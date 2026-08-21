@@ -1,0 +1,173 @@
+import io
+import logging
+
+import numpy as np
+import pytest
+
+from data_collection.hf_uploader import HfUploader, Manifest
+from data_collection.observability import configure_logging
+from data_collection.pipeline import PipelineDeps, retry_with_backoff, run_pipeline
+from data_collection.registry import VideoSource
+
+
+class FakeHfClient:
+    def __init__(self) -> None:
+        self.uploads: dict[str, bytes] = {}
+
+    def upload_bytes(self, data: bytes, path_in_repo: str) -> None:
+        self.uploads[path_in_repo] = data
+
+    def download_bytes(self, path_in_repo: str) -> bytes | None:
+        return self.uploads.get(path_in_repo)
+
+
+def _source(video_id: str, reference_patch_path: str) -> VideoSource:
+    return VideoSource(
+        video_id=video_id,
+        url=f"https://youtube.com/watch?v={video_id}",
+        game="red",
+        crop_x=0,
+        crop_y=0,
+        crop_w=4,
+        crop_h=3,
+        reference_patch_path=reference_patch_path,
+        match_confidence_baseline=1.0,
+    )
+
+
+def _reference_frame() -> np.ndarray:
+    return np.full((3, 4), 100, dtype=np.uint8)
+
+
+def test_run_pipeline_uploads_shards_and_marks_manifest_complete(tmp_path) -> None:
+    reference_path = tmp_path / "ref.png"
+    import cv2
+
+    cv2.imwrite(str(reference_path), _reference_frame())
+    source = _source("abc123", str(reference_path))
+
+    def frame_source(video_source: VideoSource):
+        for _ in range(3):
+            yield _reference_frame()
+
+    client = FakeHfClient()
+    uploader = HfUploader(client, repo_id="me/pokemon-frames")
+    deps = PipelineDeps(
+        frame_source=frame_source,
+        uploader=uploader,
+        logger=configure_logging(stream=io.StringIO()),
+        batch_size=10,
+    )
+
+    run_pipeline([source], deps)
+
+    manifest = uploader.load_manifest()
+    assert manifest.is_complete("abc123") is True
+    assert any(path.startswith("shards/abc123/") for path in client.uploads)
+
+
+def test_run_pipeline_uploads_a_contact_sheet_preview_per_batch(tmp_path) -> None:
+    reference_path = tmp_path / "ref.png"
+    import cv2
+
+    cv2.imwrite(str(reference_path), _reference_frame())
+    source = _source("abc123", str(reference_path))
+
+    def frame_source(video_source: VideoSource):
+        for _ in range(3):
+            yield _reference_frame()
+
+    client = FakeHfClient()
+    uploader = HfUploader(client, repo_id="me/pokemon-frames")
+    deps = PipelineDeps(
+        frame_source=frame_source,
+        uploader=uploader,
+        logger=configure_logging(stream=io.StringIO()),
+        batch_size=10,
+    )
+
+    run_pipeline([source], deps)
+
+    assert any(path.startswith("previews/abc123/") for path in client.uploads)
+
+
+def test_run_pipeline_skips_already_completed_videos(tmp_path) -> None:
+    reference_path = tmp_path / "ref.png"
+    import cv2
+
+    cv2.imwrite(str(reference_path), _reference_frame())
+    source = _source("abc123", str(reference_path))
+
+    calls = []
+
+    def frame_source(video_source: VideoSource):
+        calls.append(video_source.video_id)
+        return iter([])
+
+    client = FakeHfClient()
+    uploader = HfUploader(client, repo_id="me/pokemon-frames")
+    manifest = Manifest()
+    manifest.mark_complete("abc123")
+    uploader.save_manifest(manifest)
+
+    deps = PipelineDeps(
+        frame_source=frame_source,
+        uploader=uploader,
+        logger=configure_logging(stream=io.StringIO()),
+    )
+
+    run_pipeline([source], deps)
+
+    assert calls == []
+
+
+def test_run_pipeline_marks_failed_after_exhausting_retries(tmp_path) -> None:
+    reference_path = tmp_path / "ref.png"
+    import cv2
+
+    cv2.imwrite(str(reference_path), _reference_frame())
+    source = _source("abc123", str(reference_path))
+
+    def failing_frame_source(video_source: VideoSource):
+        raise RuntimeError("network blip")
+        yield  # pragma: no cover - unreachable, makes this a generator
+
+    client = FakeHfClient()
+    uploader = HfUploader(client, repo_id="me/pokemon-frames")
+    sleeps: list[float] = []
+    deps = PipelineDeps(
+        frame_source=failing_frame_source,
+        uploader=uploader,
+        logger=configure_logging(stream=io.StringIO()),
+        max_retries=2,
+        sleep_func=sleeps.append,
+    )
+
+    run_pipeline([source], deps)
+
+    manifest = uploader.load_manifest()
+    assert manifest.is_complete("abc123") is False
+    assert len(sleeps) == 1  # max_retries=2 total attempts -> 1 sleep between them
+
+
+def test_retry_with_backoff_succeeds_after_transient_failures() -> None:
+    attempts = {"count": 0}
+    sleeps: list[float] = []
+
+    def flaky() -> None:
+        attempts["count"] += 1
+        if attempts["count"] < 3:
+            raise RuntimeError("transient")
+
+    retry_with_backoff(flaky, max_retries=3, base_delay=1.0, sleep_func=sleeps.append)
+
+    assert attempts["count"] == 3
+    assert sleeps == [1.0, 2.0]
+
+
+def test_retry_with_backoff_raises_after_exhausting_retries() -> None:
+    def always_fails() -> None:
+        raise RuntimeError("permanent")
+
+    with pytest.raises(RuntimeError, match="permanent"):
+        retry_with_backoff(always_fails, max_retries=2, base_delay=1.0, sleep_func=lambda _: None)
