@@ -2144,6 +2144,7 @@ class PipelineDeps:
     batch_size: int = 500
     max_retries: int = 3
     sleep_func: Callable[[float], None] = field(default=time.sleep)
+    sample_fps: float = 2.0
 
 
 def _process_video(video: VideoSource, deps: PipelineDeps) -> None:
@@ -2157,21 +2158,32 @@ def _process_video(video: VideoSource, deps: PipelineDeps) -> None:
     for frame in deps.frame_source(video):
         sampled += 1
         result = validator.validate(frame)
-        if not result.keep:
-            dropped_anomaly += 1
-            continue
+        # `halted` must be checked before `keep`: it's sticky once tripped
+        # and must stop the loop even on a frame that itself matches again
+        # after the crop/content has drifted. Checking `keep` first would
+        # `continue` past the halt on the very frame that trips it (the
+        # window only accumulates on keep=False frames), defeating the
+        # whole point of halting -- the video would burn compute on every
+        # remaining frame instead of stopping.
         if result.halted:
+            dropped_anomaly += 1
             deps.logger.warning(
                 "video_halted_on_anomaly_rate", extra={"video_id": video.video_id}
             )
             break
+        if not result.keep:
+            dropped_anomaly += 1
+            continue
         if deduper.is_duplicate(frame):
             dropped_dedup += 1
             continue
 
         kept += 1
         record = FrameRecord(
-            image=frame, video_id=video.video_id, timestamp_s=sampled / 2.0, game=video.game
+            image=frame,
+            video_id=video.video_id,
+            timestamp_s=(sampled - 1) / deps.sample_fps,
+            game=video.game,
         )
         full_batch = batcher.add(record)
         if full_batch is not None:
@@ -2197,6 +2209,18 @@ def _process_video(video: VideoSource, deps: PipelineDeps) -> None:
         deps.trackio_run.log(metrics)
 
 
+_CONTACT_SHEET_SAMPLE_SIZE = 64
+
+
+def _sample_for_contact_sheet(
+    images: list[np.ndarray], sample_size: int = _CONTACT_SHEET_SAMPLE_SIZE
+) -> list[np.ndarray]:
+    if len(images) <= sample_size:
+        return images
+    step = len(images) / sample_size
+    return [images[int(i * step)] for i in range(sample_size)]
+
+
 def _flush_batch(
     batch: list[FrameRecord], video_id: str, shard_index: int, deps: PipelineDeps
 ) -> int:
@@ -2205,7 +2229,8 @@ def _flush_batch(
         batch_to_parquet(batch, shard_path)
         deps.uploader.upload_shard(shard_path, video_id, shard_index)
 
-        contact_sheet = build_contact_sheet([record.image for record in batch])
+        sampled_images = _sample_for_contact_sheet([record.image for record in batch])
+        contact_sheet = build_contact_sheet(sampled_images)
         preview_path = Path(tmp_dir) / "contact_sheet.png"
         cv2.imwrite(str(preview_path), contact_sheet)
         deps.uploader.upload_preview(preview_path, video_id, shard_index)
