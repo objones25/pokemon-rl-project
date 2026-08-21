@@ -9,7 +9,8 @@ tested directly.
 from __future__ import annotations
 
 import subprocess
-from typing import BinaryIO, Iterator
+from collections.abc import Iterator
+from typing import BinaryIO
 
 import numpy as np
 import yt_dlp
