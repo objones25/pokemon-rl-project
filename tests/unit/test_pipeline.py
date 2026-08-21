@@ -150,6 +150,81 @@ def test_run_pipeline_marks_failed_after_exhausting_retries(tmp_path) -> None:
     assert len(sleeps) == 1  # max_retries=2 total attempts -> 1 sleep between them
 
 
+def test_run_pipeline_halts_video_on_sustained_anomaly_and_stops_early(tmp_path) -> None:
+    reference_path = tmp_path / "ref.png"
+    import cv2
+
+    # NOTE: a constant-valued reference (like the shared `_reference_frame()`
+    # helper) is degenerate for cv2's TM_CCOEFF_NORMED: with zero variance in
+    # the template, OpenCV's normalized cross-correlation always reports a
+    # perfect score of 1.0 regardless of the frame content, so no frame could
+    # ever fail to match and the halt could never trip. Use a reference patch
+    # with real variance here so mismatches actually score low.
+    reference = np.array(
+        [[10, 50, 90, 130], [170, 210, 250, 30], [60, 100, 140, 180]], dtype=np.uint8
+    )
+    cv2.imwrite(str(reference_path), reference)
+    source = _source("abc123", str(reference_path))
+    unrelated = np.random.default_rng(seed=99).integers(0, 255, size=(3, 4), dtype=np.uint8)
+
+    frames_consumed = {"count": 0}
+
+    def frame_source(video_source: VideoSource):
+        # 300 frames total: never matches the reference, so the validator
+        # should halt well before all 300 are consumed.
+        for _ in range(300):
+            frames_consumed["count"] += 1
+            yield unrelated
+
+    client = FakeHfClient()
+    uploader = HfUploader(client, repo_id="me/pokemon-frames")
+    deps = PipelineDeps(
+        frame_source=frame_source,
+        uploader=uploader,
+        logger=configure_logging(stream=io.StringIO()),
+        batch_size=1000,
+    )
+
+    run_pipeline([source], deps)
+
+    # FrameValidator's default window_size=50 means it can halt as early as
+    # frame 50; well under the full 300-frame source either way.
+    assert frames_consumed["count"] < 300
+
+
+def test_run_pipeline_processes_next_video_after_one_fails(tmp_path) -> None:
+    reference_path = tmp_path / "ref.png"
+    import cv2
+
+    cv2.imwrite(str(reference_path), _reference_frame())
+    bad_source = _source("bad_video", str(reference_path))
+    good_source = _source("good_video", str(reference_path))
+
+    def frame_source(video_source: VideoSource):
+        if video_source.video_id == "bad_video":
+            raise RuntimeError("network blip")
+            yield  # pragma: no cover - unreachable, makes this a generator
+        for _ in range(3):
+            yield _reference_frame()
+
+    client = FakeHfClient()
+    uploader = HfUploader(client, repo_id="me/pokemon-frames")
+    deps = PipelineDeps(
+        frame_source=frame_source,
+        uploader=uploader,
+        logger=configure_logging(stream=io.StringIO()),
+        max_retries=1,
+        sleep_func=lambda _: None,
+        batch_size=10,
+    )
+
+    run_pipeline([bad_source, good_source], deps)
+
+    manifest = uploader.load_manifest()
+    assert manifest.is_complete("bad_video") is False
+    assert manifest.is_complete("good_video") is True
+
+
 def test_retry_with_backoff_succeeds_after_transient_failures() -> None:
     attempts = {"count": 0}
     sleeps: list[float] = []
