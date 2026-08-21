@@ -1,0 +1,4 @@
+# Approved video sources. Populated by `data-collection curate <url>`.
+# Do not hand-edit crop coordinates without re-running curation --
+# they must match the reference patch image captured at approval time.
+videos: []
