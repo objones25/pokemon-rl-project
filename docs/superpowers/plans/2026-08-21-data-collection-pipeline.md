@@ -2097,7 +2097,8 @@ import tempfile
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Iterator, Protocol
+from collections.abc import Callable, Iterator
+from typing import Protocol
 
 import numpy as np
 
