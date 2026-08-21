@@ -65,5 +65,11 @@ def stream_frames(
         assert proc.stdout is not None
         yield from parse_frame_stream(proc.stdout, width=crop_w, height=crop_h)
     finally:
-        proc.stdout.close() if proc.stdout else None
-        proc.wait()
+        if proc.stdout:
+            proc.stdout.close()
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
