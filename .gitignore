@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+.venv/
+uv.lock.bak
+.env
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+/data/
+*.mp4
+*.mkv
+*.webm
+.DS_Store
