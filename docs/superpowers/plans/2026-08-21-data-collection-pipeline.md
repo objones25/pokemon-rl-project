@@ -22,6 +22,7 @@
 - Phase B is designed to run unattended on a RunPod CPU pod; `ffmpeg` and `yt-dlp` must be available there — do not assume they exist on the dev machine used to write/review this code. (spec: Execution environment)
 - No frame is ever written to local disk as video — only extracted frame arrays and Parquet shards touch disk/memory. (spec: Execution environment)
 - Every module takes its external dependencies (HTTP/Hub client, subprocess runner, filesystem) as constructor/function arguments, so core logic is unit-testable without network, `ffmpeg`, or a GPU. (spec: Components)
+- Hugging Face credentials (`HF_TOKEN`) are never hardcoded or passed as a CLI argument. `huggingface_hub` resolves them from the environment or a cached `hf auth login`; `.env` (already `.gitignore`d) is the local-dev path via `python-dotenv`, loaded in Task 12's `cli.py`. No task writes a token to a file the pipeline controls, logs it, or embeds it in a URL.
 
 ---
 
@@ -2295,7 +2296,23 @@ git commit -m "feat: add Phase B pipeline orchestration with resume and retry"
 - Consumes: everything from Tasks 2–11, including `data_collection.curation.run_curation` (Task 10).
 - Produces: `main()` — the Click group registered as the `data-collection` console script (`pyproject.toml`, Task 1).
 
-- [ ] **Step 1: Write failing CLI tests**
+**Credentials:** `RealHfClient` constructs `HfApi()` with no explicit token, so
+`huggingface_hub` falls back to its own resolution (the `HF_TOKEN` env var, or
+a token cached by `hf auth login`) — this needs the process environment to
+actually have that token, which nothing before this task arranges. This task
+adds `python-dotenv` so a local `.env` (already `.gitignore`d) is loaded
+automatically for local development, and fails fast with a clear message in
+`run` (the only command that touches the Hub — `curate` is local-only) if no
+token is available at all, rather than letting a cryptic 401 surface after
+minutes of frame extraction on the first upload.
+
+- [ ] **Step 1: Add the `python-dotenv` dependency**
+
+```bash
+uv add python-dotenv
+```
+
+- [ ] **Step 2: Write failing CLI tests**
 
 Create `tests/unit/test_cli.py`:
 
@@ -2326,9 +2343,23 @@ def test_run_command_requires_repo_id_option() -> None:
     result = runner.invoke(main, ["run"])
 
     assert result.exit_code != 0
+
+
+def test_run_command_fails_fast_with_no_hf_credentials(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr("data_collection.cli.get_token", lambda: None)
+    registry_path = tmp_path / "video_sources.yaml"
+    registry_path.write_text("videos: []\n")
+
+    runner = CliRunner()
+    result = runner.invoke(
+        main, ["run", "--repo-id", "me/pokemon-frames", "--registry", str(registry_path)]
+    )
+
+    assert result.exit_code != 0
+    assert "HF_TOKEN" in result.output
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [ ] **Step 3: Run tests to verify they fail**
 
 ```bash
 uv run pytest tests/unit/test_cli.py -v
@@ -2336,7 +2367,7 @@ uv run pytest tests/unit/test_cli.py -v
 
 Expected: FAIL — `ModuleNotFoundError: No module named 'data_collection.cli'`.
 
-- [ ] **Step 3: Implement `cli.py`**
+- [ ] **Step 4: Implement `cli.py`**
 
 ```python
 """Console entry points: `data-collection curate <url>` (Phase A) and
@@ -2348,7 +2379,8 @@ from pathlib import Path
 
 import click
 import trackio
-from huggingface_hub import HfApi
+from dotenv import load_dotenv
+from huggingface_hub import HfApi, get_token
 from huggingface_hub.utils import EntryNotFoundError
 
 from data_collection import curation, extract, pipeline
@@ -2389,6 +2421,7 @@ class RealHfClient:
 @click.group()
 def main() -> None:
     """Pokemon Red/Blue data collection pipeline."""
+    load_dotenv()
 
 
 @main.command()
@@ -2414,6 +2447,12 @@ def curate(url: str, game: str, registry: Path, bank_dir: Path, approved_dir: Pa
 @click.option("--batch-size", type=int, default=500)
 def run(repo_id: str, registry: Path, batch_size: int) -> None:
     """Phase B: unattended extraction across all approved, incomplete videos."""
+    if get_token() is None:
+        raise click.ClickException(
+            "No Hugging Face credentials found. Set HF_TOKEN (e.g. in a "
+            ".env file) or run `hf auth login` before using this command."
+        )
+
     sources = load_registry(registry)
     logger = configure_logging()
 
@@ -2440,15 +2479,15 @@ def run(repo_id: str, registry: Path, batch_size: int) -> None:
     pipeline.run_pipeline(sources, deps)
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [ ] **Step 5: Run tests to verify they pass**
 
 ```bash
 uv run pytest tests/unit/test_cli.py -v
 ```
 
-Expected: all tests PASS.
+Expected: all 4 tests PASS.
 
-- [ ] **Step 5: Run the full unit test suite**
+- [ ] **Step 6: Run the full unit test suite**
 
 ```bash
 uv run pytest -v
@@ -2456,10 +2495,10 @@ uv run pytest -v
 
 Expected: every unit test across Tasks 2-12 PASSes (the `slow`-marked integration test from Task 13 does not exist yet).
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 7: Commit**
 
 ```bash
-git add src/data_collection/cli.py tests/unit/test_cli.py
+git add pyproject.toml uv.lock src/data_collection/cli.py tests/unit/test_cli.py
 git commit -m "feat: add CLI entry points for curation and pipeline"
 ```
 
