@@ -6,11 +6,12 @@ from __future__ import annotations
 import logging
 import tempfile
 import time
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
-from collections.abc import Callable, Iterator
 from typing import Protocol
 
+import cv2
 import numpy as np
 
 from data_collection.batcher import FrameBatcher, FrameRecord, batch_to_parquet
@@ -20,7 +21,6 @@ from data_collection.hf_uploader import HfUploader
 from data_collection.matching import load_template_gray
 from data_collection.observability import build_contact_sheet
 from data_collection.registry import VideoSource
-import cv2
 
 
 class TrackioRunLike(Protocol):
