@@ -11,6 +11,7 @@ def test_build_ffmpeg_command_applies_crop_gray_and_fps() -> None:
     )
 
     assert cmd[0] == "ffmpeg"
+    assert cmd[1:3] == ["-loglevel", "error"]
     assert "-i" in cmd and cmd[cmd.index("-i") + 1] == "https://example.com/stream.m3u8"
     vf_index = cmd.index("-vf")
     assert cmd[vf_index + 1] == "crop=160:144:10:20,format=gray,fps=2"

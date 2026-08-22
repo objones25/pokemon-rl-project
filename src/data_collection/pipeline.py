@@ -46,6 +46,12 @@ def retry_with_backoff(
             sleep_func(base_delay * (2 ** (attempt - 1)))
 
 
+@dataclass(frozen=True)
+class PipelineResult:
+    completed: int
+    failed: int
+
+
 @dataclass
 class PipelineDeps:
     frame_source: Callable[[VideoSource], Iterator[np.ndarray]]
@@ -65,6 +71,7 @@ def _process_video(video: VideoSource, deps: PipelineDeps) -> None:
     batcher = FrameBatcher(batch_size=deps.batch_size)
 
     sampled = kept = dropped_dedup = dropped_anomaly = shard_index = 0
+    halted = False
 
     for frame in deps.frame_source(video):
         sampled += 1
@@ -78,6 +85,7 @@ def _process_video(video: VideoSource, deps: PipelineDeps) -> None:
         # remaining frame instead of stopping.
         if result.halted:
             dropped_anomaly += 1
+            halted = True
             deps.logger.warning(
                 "video_halted_on_anomaly_rate", extra={"video_id": video.video_id}
             )
@@ -114,10 +122,23 @@ def _process_video(video: VideoSource, deps: PipelineDeps) -> None:
         "dropped_anomaly": dropped_anomaly,
         "dedup_rejection_rate": dedup_rejection_rate,
         "anomaly_drop_rate": anomaly_drop_rate,
+        "halted": halted,
     }
-    deps.logger.info("video_complete", extra=metrics)
+    # "video_processed" (not "video_complete"): this event fires whenever the
+    # frame loop finishes for any reason, including a halt or a zero-frame
+    # extraction -- both of which are about to be raised as failures below.
+    # Logging/reporting happens first so accurate counts reach Trackio even
+    # though the video will be marked failed, not complete.
+    deps.logger.info("video_processed", extra=metrics)
     if deps.trackio_run is not None:
         deps.trackio_run.log(metrics)
+
+    if sampled == 0:
+        raise RuntimeError(f"no frames extracted for video {video.video_id}")
+    if halted:
+        raise RuntimeError(
+            f"video {video.video_id} halted: sustained anomaly rate exceeded threshold"
+        )
 
 
 _CONTACT_SHEET_SAMPLE_SIZE = 64
@@ -148,11 +169,13 @@ def _flush_batch(
     return shard_index + 1
 
 
-def run_pipeline(registry: list[VideoSource], deps: PipelineDeps) -> None:
+def run_pipeline(registry: list[VideoSource], deps: PipelineDeps) -> PipelineResult:
     manifest = deps.uploader.load_manifest()
+    completed = failed = 0
 
     for video in registry:
         if manifest.is_complete(video.video_id):
+            completed += 1
             continue
 
         try:
@@ -168,10 +191,14 @@ def run_pipeline(registry: list[VideoSource], deps: PipelineDeps) -> None:
             )
             manifest.mark_failed(video.video_id, str(exc))
             deps.uploader.save_manifest(manifest)
+            failed += 1
             continue
 
         manifest.mark_complete(video.video_id)
         deps.uploader.save_manifest(manifest)
+        completed += 1
 
     if deps.trackio_run is not None:
         deps.trackio_run.finish()
+
+    return PipelineResult(completed=completed, failed=failed)

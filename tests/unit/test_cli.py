@@ -1,5 +1,6 @@
 from click.testing import CliRunner
 
+from data_collection import pipeline
 from data_collection.cli import main
 
 
@@ -38,3 +39,20 @@ def test_run_command_fails_fast_with_no_hf_credentials(tmp_path, monkeypatch) ->
 
     assert result.exit_code != 0
     assert "HF_TOKEN" in result.output
+
+
+def test_run_command_exits_nonzero_when_pipeline_reports_failures(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr("data_collection.cli.get_token", lambda: "fake-token")
+    monkeypatch.setattr(
+        "data_collection.cli.pipeline.run_pipeline",
+        lambda sources, deps: pipeline.PipelineResult(completed=0, failed=1),
+    )
+    registry_path = tmp_path / "video_sources.yaml"
+    registry_path.write_text("videos: []\n")
+
+    runner = CliRunner()
+    result = runner.invoke(
+        main, ["run", "--repo-id", "me/pokemon-frames", "--registry", str(registry_path)]
+    )
+
+    assert result.exit_code != 0

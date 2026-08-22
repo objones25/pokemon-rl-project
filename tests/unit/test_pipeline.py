@@ -6,7 +6,7 @@ import pytest
 
 from data_collection.hf_uploader import HfUploader, Manifest
 from data_collection.observability import configure_logging
-from data_collection.pipeline import PipelineDeps, retry_with_backoff, run_pipeline
+from data_collection.pipeline import PipelineDeps, PipelineResult, retry_with_backoff, run_pipeline
 from data_collection.registry import VideoSource
 
 
@@ -150,6 +150,32 @@ def test_run_pipeline_marks_failed_after_exhausting_retries(tmp_path) -> None:
     assert len(sleeps) == 1  # max_retries=2 total attempts -> 1 sleep between them
 
 
+def test_run_pipeline_zero_frames_leaves_video_incomplete(tmp_path) -> None:
+    reference_path = tmp_path / "ref.png"
+    import cv2
+
+    cv2.imwrite(str(reference_path), _reference_frame())
+    source = _source("abc123", str(reference_path))
+
+    def frame_source(video_source: VideoSource):
+        return iter([])
+
+    client = FakeHfClient()
+    uploader = HfUploader(client, repo_id="me/pokemon-frames")
+    deps = PipelineDeps(
+        frame_source=frame_source,
+        uploader=uploader,
+        logger=configure_logging(stream=io.StringIO()),
+        max_retries=1,
+        sleep_func=lambda _: None,
+    )
+
+    run_pipeline([source], deps)
+
+    manifest = uploader.load_manifest()
+    assert manifest.is_complete("abc123") is False
+
+
 def test_run_pipeline_halts_video_on_sustained_anomaly_and_stops_early(tmp_path) -> None:
     reference_path = tmp_path / "ref.png"
     import cv2
@@ -192,6 +218,40 @@ def test_run_pipeline_halts_video_on_sustained_anomaly_and_stops_early(tmp_path)
     assert frames_consumed["count"] < 300
 
 
+def test_run_pipeline_halted_video_is_not_marked_complete(tmp_path) -> None:
+    reference_path = tmp_path / "ref.png"
+    import cv2
+
+    # See NOTE above: a constant-valued reference is degenerate for
+    # cv2's TM_CCOEFF_NORMED, so use a reference patch with real variance.
+    reference = np.array(
+        [[10, 50, 90, 130], [170, 210, 250, 30], [60, 100, 140, 180]], dtype=np.uint8
+    )
+    cv2.imwrite(str(reference_path), reference)
+    source = _source("abc123", str(reference_path))
+    unrelated = np.random.default_rng(seed=99).integers(0, 255, size=(3, 4), dtype=np.uint8)
+
+    def frame_source(video_source: VideoSource):
+        for _ in range(300):
+            yield unrelated
+
+    client = FakeHfClient()
+    uploader = HfUploader(client, repo_id="me/pokemon-frames")
+    deps = PipelineDeps(
+        frame_source=frame_source,
+        uploader=uploader,
+        logger=configure_logging(stream=io.StringIO()),
+        batch_size=1000,
+        max_retries=1,
+        sleep_func=lambda _: None,
+    )
+
+    run_pipeline([source], deps)
+
+    manifest = uploader.load_manifest()
+    assert manifest.is_complete("abc123") is False
+
+
 def test_run_pipeline_processes_next_video_after_one_fails(tmp_path) -> None:
     reference_path = tmp_path / "ref.png"
     import cv2
@@ -218,11 +278,12 @@ def test_run_pipeline_processes_next_video_after_one_fails(tmp_path) -> None:
         batch_size=10,
     )
 
-    run_pipeline([bad_source, good_source], deps)
+    result = run_pipeline([bad_source, good_source], deps)
 
     manifest = uploader.load_manifest()
     assert manifest.is_complete("bad_video") is False
     assert manifest.is_complete("good_video") is True
+    assert result == PipelineResult(completed=1, failed=1)
 
 
 def test_retry_with_backoff_succeeds_after_transient_failures() -> None:

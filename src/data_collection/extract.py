@@ -21,6 +21,8 @@ def build_ffmpeg_command(
 ) -> list[str]:
     return [
         "ffmpeg",
+        "-loglevel",
+        "error",
         "-i",
         stream_url,
         "-vf",
@@ -61,10 +63,12 @@ def stream_frames(
     stream_url: str, crop_x: int, crop_y: int, crop_w: int, crop_h: int, fps: int = 2
 ) -> Iterator[np.ndarray]:
     cmd = build_ffmpeg_command(stream_url, crop_x, crop_y, crop_w, crop_h, fps)
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    exhausted_naturally = False
     try:
         assert proc.stdout is not None
         yield from parse_frame_stream(proc.stdout, width=crop_w, height=crop_h)
+        exhausted_naturally = True
     finally:
         if proc.stdout:
             proc.stdout.close()
@@ -74,3 +78,9 @@ def stream_frames(
         except subprocess.TimeoutExpired:
             proc.kill()
             proc.wait()
+        if exhausted_naturally and proc.returncode != 0:
+            stderr_text = proc.stderr.read().decode(errors="replace") if proc.stderr else ""
+            raise RuntimeError(
+                f"ffmpeg exited with code {proc.returncode} for {stream_url}: "
+                f"{stderr_text[-2000:]}"
+            )

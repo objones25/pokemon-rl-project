@@ -104,4 +104,8 @@ def run(repo_id: str, registry: Path, batch_size: int) -> None:
         trackio_run=trackio_run,
         batch_size=batch_size,
     )
-    pipeline.run_pipeline(sources, deps)
+    result = pipeline.run_pipeline(sources, deps)
+    if result.failed > 0:
+        raise click.ClickException(
+            f"{result.failed} of {len(sources)} video(s) failed -- see logs for details."
+        )
