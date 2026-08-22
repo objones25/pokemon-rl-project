@@ -59,12 +59,10 @@ def run_curation(
     approved_dir: Path,
     registry_path: Path,
     game: str,
-    smoke_test_width: int = 1920,
-    smoke_test_height: int = 1080,
     input_func=input,
 ) -> None:
-    stream_url = extract.get_stream_url(video_url)
-    frame = _grab_smoke_test_frame(stream_url, smoke_test_width, smoke_test_height)
+    stream_url, width, height = extract.get_stream_info(video_url)
+    frame = _grab_smoke_test_frame(stream_url, width, height)
 
     bank_templates = {
         p.stem: load_template_gray(p) for p in sorted(bank_dir.glob("*.png"))

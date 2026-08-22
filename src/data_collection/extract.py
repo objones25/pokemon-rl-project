@@ -46,19 +46,30 @@ def parse_frame_stream(stdout: IO[bytes], width: int, height: int) -> Iterator[n
         yield np.frombuffer(chunk, dtype=np.uint8).reshape(height, width)
 
 
-def get_stream_url(video_url: str) -> str:
+def get_stream_info(video_url: str) -> tuple[str, int, int]:
+    """Returns (stream_url, width, height) for the best available video-only
+    stream. Longplay uploads range from ~360p to 4K, so callers that need to
+    grab a full, uncropped frame (curation's smoke test) must use the real
+    dimensions here rather than guessing a fixed resolution."""
     opts = {"format": "bestvideo", "quiet": True, "noplaylist": True}
     with yt_dlp.YoutubeDL(opts) as ydl:  # type: ignore[arg-type]
         info = ydl.extract_info(video_url, download=False)
 
     url = info.get("url")
-    if url:
-        return url
+    width = info.get("width")
+    height = info.get("height")
+    if url and width and height:
+        return url, width, height
     for fmt in reversed(info.get("formats") or []):
         fmt_url = fmt.get("url")
         if fmt.get("vcodec") not in (None, "none") and fmt_url:
-            return fmt_url
+            return fmt_url, fmt.get("width") or width or 0, fmt.get("height") or height or 0
     raise RuntimeError(f"no playable video stream found for {video_url}")
+
+
+def get_stream_url(video_url: str) -> str:
+    url, _, _ = get_stream_info(video_url)
+    return url
 
 
 def stream_frames(
