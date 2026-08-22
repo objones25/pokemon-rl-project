@@ -8,6 +8,7 @@ uv.lock.bak
 .ruff_cache/
 .mypy_cache/
 /data/
+/scratch/
 *.mp4
 *.mkv
 *.webm
