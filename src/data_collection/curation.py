@@ -45,10 +45,24 @@ def propose_crop_box(
     return (best_x, best_y, w, h)
 
 
+_SMOKE_TEST_SEEK_SECONDS = 120
+
+
 def _grab_smoke_test_frame(stream_url: str, width: int, height: int) -> np.ndarray:
-    """Grab one full, uncropped frame -- the crop box doesn't exist yet."""
+    """Grab one full, uncropped frame -- the crop box doesn't exist yet.
+
+    Seeks past the first couple of minutes rather than grabbing frame 0:
+    longplay uploads reliably open on a channel intro or title card, not
+    gameplay, so frame 0 is useless for proposing/confirming a crop box.
+    """
     frames = extract.stream_frames(
-        stream_url, crop_x=0, crop_y=0, crop_w=width, crop_h=height, fps=1
+        stream_url,
+        crop_x=0,
+        crop_y=0,
+        crop_w=width,
+        crop_h=height,
+        fps=1,
+        start_seconds=_SMOKE_TEST_SEEK_SECONDS,
     )
     return next(frames)
 

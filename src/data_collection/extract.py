@@ -17,12 +17,18 @@ import yt_dlp
 
 
 def build_ffmpeg_command(
-    stream_url: str, crop_x: int, crop_y: int, crop_w: int, crop_h: int, fps: int = 2
+    stream_url: str,
+    crop_x: int,
+    crop_y: int,
+    crop_w: int,
+    crop_h: int,
+    fps: int = 2,
+    start_seconds: float = 0,
 ) -> list[str]:
-    return [
-        "ffmpeg",
-        "-loglevel",
-        "error",
+    cmd = ["ffmpeg", "-loglevel", "error"]
+    if start_seconds:
+        cmd += ["-ss", str(start_seconds)]
+    cmd += [
         "-i",
         stream_url,
         "-vf",
@@ -35,6 +41,7 @@ def build_ffmpeg_command(
         "rawvideo",
         "-",
     ]
+    return cmd
 
 
 def parse_frame_stream(stdout: IO[bytes], width: int, height: int) -> Iterator[np.ndarray]:
@@ -73,9 +80,15 @@ def get_stream_url(video_url: str) -> str:
 
 
 def stream_frames(
-    stream_url: str, crop_x: int, crop_y: int, crop_w: int, crop_h: int, fps: int = 2
+    stream_url: str,
+    crop_x: int,
+    crop_y: int,
+    crop_w: int,
+    crop_h: int,
+    fps: int = 2,
+    start_seconds: float = 0,
 ) -> Iterator[np.ndarray]:
-    cmd = build_ffmpeg_command(stream_url, crop_x, crop_y, crop_w, crop_h, fps)
+    cmd = build_ffmpeg_command(stream_url, crop_x, crop_y, crop_w, crop_h, fps, start_seconds)
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     exhausted_naturally = False
     try:
