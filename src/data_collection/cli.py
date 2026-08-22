@@ -9,7 +9,7 @@ import click
 import trackio
 from dotenv import load_dotenv
 from huggingface_hub import HfApi, get_token
-from huggingface_hub.utils import EntryNotFoundError
+from huggingface_hub.errors import EntryNotFoundError
 
 from data_collection import curation, extract, pipeline
 from data_collection.hf_uploader import HfClient, HfUploader

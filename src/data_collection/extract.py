@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import subprocess
 from collections.abc import Iterator
-from typing import BinaryIO
+from typing import IO
 
 import numpy as np
 import yt_dlp
@@ -37,7 +37,7 @@ def build_ffmpeg_command(
     ]
 
 
-def parse_frame_stream(stdout: BinaryIO, width: int, height: int) -> Iterator[np.ndarray]:
+def parse_frame_stream(stdout: IO[bytes], width: int, height: int) -> Iterator[np.ndarray]:
     frame_size = width * height
     while True:
         chunk = stdout.read(frame_size)
@@ -48,14 +48,16 @@ def parse_frame_stream(stdout: BinaryIO, width: int, height: int) -> Iterator[np
 
 def get_stream_url(video_url: str) -> str:
     opts = {"format": "bestvideo", "quiet": True, "noplaylist": True}
-    with yt_dlp.YoutubeDL(opts) as ydl:
+    with yt_dlp.YoutubeDL(opts) as ydl:  # type: ignore[arg-type]
         info = ydl.extract_info(video_url, download=False)
 
-    if info.get("url"):
-        return info["url"]
-    for fmt in reversed(info.get("formats", [])):
-        if fmt.get("vcodec") not in (None, "none") and fmt.get("url"):
-            return fmt["url"]
+    url = info.get("url")
+    if url:
+        return url
+    for fmt in reversed(info.get("formats") or []):
+        fmt_url = fmt.get("url")
+        if fmt.get("vcodec") not in (None, "none") and fmt_url:
+            return fmt_url
     raise RuntimeError(f"no playable video stream found for {video_url}")
 
 
