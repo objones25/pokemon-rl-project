@@ -2,7 +2,12 @@ import numpy as np
 import pytest
 
 from data_collection.hf_uploader import HfUploader, Manifest
-from data_collection.pipeline import PipelineDeps, PipelineResult, retry_with_backoff, run_pipeline
+from data_collection.pipeline import (
+    PipelineDeps,
+    PipelineResult,
+    retry_with_backoff,
+    run_pipeline,
+)
 from data_collection.registry import VideoSource
 
 
