@@ -53,3 +53,12 @@ videos:
   crop_h: 1152
   reference_patch_path: configs/templates/approved/YW29l3jJXr4.png
   match_confidence_baseline: 1.0
+- video_id: V6yBLNGIeBQ
+  url: https://www.youtube.com/watch?v=V6yBLNGIeBQ
+  game: red
+  crop_x: 0
+  crop_y: 0
+  crop_w: 1600
+  crop_h: 1440
+  reference_patch_path: configs/templates/approved/V6yBLNGIeBQ.png
+  match_confidence_baseline: 1.0
