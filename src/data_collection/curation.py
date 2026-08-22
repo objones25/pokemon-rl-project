@@ -78,18 +78,22 @@ def run_curation(
     stream_url, width, height = extract.get_stream_info(video_url)
     frame = _grab_smoke_test_frame(stream_url, width, height)
 
+    detected = extract.detect_crop_box(stream_url, start_seconds=_SMOKE_TEST_SEEK_SECONDS)
     bank_templates = {
         p.stem: load_template_gray(p) for p in sorted(bank_dir.glob("*.png"))
     }
     proposed = propose_crop_box(frame, bank_templates) if bank_templates else None
 
-    if proposed is not None:
+    if detected is not None:
+        x, y, w, h = detected
+        print(f"Auto-detected crop box (ffmpeg cropdetect): x={x} y={y} w={w} h={h}")
+    elif proposed is not None:
         x, y, w, h = proposed
         print(f"Proposed crop box from template match: x={x} y={y} w={w} h={h}")
     else:
-        print("No confident template match found -- enter a crop box manually.")
+        print("No automatic proposal available -- starting from the full frame.")
         x = y = 0
-        w, h = 160, 144
+        w, h = width, height
 
     while True:
         preview = render_preview(frame, x, y, w, h)

@@ -8,12 +8,15 @@ tested directly.
 
 from __future__ import annotations
 
+import re
 import subprocess
 from collections.abc import Iterator
 from typing import IO
 
 import numpy as np
 import yt_dlp
+
+_CROPDETECT_PATTERN = re.compile(rb"crop=(\d+):(\d+):(\d+):(\d+)")
 
 
 def build_ffmpeg_command(
@@ -77,6 +80,40 @@ def get_stream_info(video_url: str) -> tuple[str, int, int]:
 def get_stream_url(video_url: str) -> str:
     url, _, _ = get_stream_info(video_url)
     return url
+
+
+def detect_crop_box(
+    stream_url: str, start_seconds: float, duration_seconds: float = 20
+) -> tuple[int, int, int, int] | None:
+    """Auto-detects the real content region via ffmpeg's `cropdetect` filter
+    over a short segment, so curation proposes a starting crop box derived
+    from the actual video instead of a guess. Returns (x, y, w, h), or None
+    if `cropdetect` produced no usable output at all (ffmpeg failure, an
+    unreadable stream, etc. -- NOT the same as "no letterbox found", which
+    `cropdetect` reports as a crop matching the full frame).
+    """
+    cmd = [
+        "ffmpeg",
+        "-loglevel",
+        "info",
+        "-ss",
+        str(start_seconds),
+        "-i",
+        stream_url,
+        "-t",
+        str(duration_seconds),
+        "-vf",
+        "cropdetect=24:2:0",
+        "-f",
+        "null",
+        "-",
+    ]
+    proc = subprocess.run(cmd, capture_output=True, timeout=120)
+    matches = _CROPDETECT_PATTERN.findall(proc.stderr)
+    if not matches:
+        return None
+    w, h, x, y = (int(v) for v in matches[-1])
+    return (x, y, w, h)
 
 
 def stream_frames(
