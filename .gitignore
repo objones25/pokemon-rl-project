@@ -13,4 +13,5 @@ configs/templates/approved/_preview.png
 *.mp4
 *.mkv
 *.webm
+*.log
 .DS_Store
