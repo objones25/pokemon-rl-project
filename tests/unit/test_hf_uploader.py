@@ -38,6 +38,37 @@ def test_manifest_json_round_trip() -> None:
     assert restored.is_complete("def456") is False
 
 
+def test_manifest_progress_starts_absent() -> None:
+    manifest = Manifest()
+    assert manifest.get_progress("abc123") is None
+
+
+def test_manifest_save_and_get_progress() -> None:
+    manifest = Manifest()
+    manifest.save_progress("abc123", resume_seconds=120.5, next_shard_index=3)
+
+    progress = manifest.get_progress("abc123")
+
+    assert progress == {"resume_seconds": 120.5, "next_shard_index": 3}
+
+
+def test_manifest_mark_complete_clears_progress() -> None:
+    manifest = Manifest()
+    manifest.save_progress("abc123", resume_seconds=120.5, next_shard_index=3)
+    manifest.mark_complete("abc123")
+
+    assert manifest.get_progress("abc123") is None
+
+
+def test_manifest_progress_round_trips_through_json() -> None:
+    manifest = Manifest()
+    manifest.save_progress("abc123", resume_seconds=120.5, next_shard_index=3)
+
+    restored = Manifest.from_json(manifest.to_json())
+
+    assert restored.get_progress("abc123") == {"resume_seconds": 120.5, "next_shard_index": 3}
+
+
 def test_upload_shard_writes_to_expected_path(tmp_path: Path) -> None:
     shard_path = tmp_path / "shard.parquet"
     shard_path.write_bytes(b"fake-parquet-bytes")

@@ -75,7 +75,13 @@ def curate(url: str, game: str, registry: Path, bank_dir: Path, approved_dir: Pa
 @click.option("--repo-id", required=True, help="HF dataset repo, e.g. me/pokemon-frames")
 @click.option("--registry", type=click.Path(path_type=Path), default=_DEFAULT_REGISTRY)
 @click.option("--batch-size", type=int, default=500)
-def run(repo_id: str, registry: Path, batch_size: int) -> None:
+@click.option(
+    "--max-concurrent-videos",
+    type=int,
+    default=1,
+    help="Process this many videos in parallel (each has its own ffmpeg subprocess).",
+)
+def run(repo_id: str, registry: Path, batch_size: int, max_concurrent_videos: int) -> None:
     """Phase B: unattended extraction across all approved, incomplete videos."""
     if get_token() is None:
         raise click.ClickException(
@@ -89,7 +95,7 @@ def run(repo_id: str, registry: Path, batch_size: int) -> None:
     uploader = HfUploader(client, repo_id)
     trackio_run = TrackioRun(trackio, project="pokemon-data-collection", name=repo_id)
 
-    def frame_source(video_source):
+    def frame_source(video_source, resume_seconds: float = 0.0):
         stream_url, _, _, headers = extract.get_stream_info(video_source.url)
         return extract.stream_frames(
             stream_url,
@@ -97,6 +103,7 @@ def run(repo_id: str, registry: Path, batch_size: int) -> None:
             crop_y=video_source.crop_y,
             crop_w=video_source.crop_w,
             crop_h=video_source.crop_h,
+            start_seconds=resume_seconds,
             headers=headers,
         )
 
@@ -105,6 +112,7 @@ def run(repo_id: str, registry: Path, batch_size: int) -> None:
         uploader=uploader,
         trackio_run=trackio_run,
         batch_size=batch_size,
+        max_concurrent_videos=max_concurrent_videos,
     )
     result = pipeline.run_pipeline(sources, deps)
     if result.failed > 0:

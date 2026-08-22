@@ -18,10 +18,14 @@ _MANIFEST_PATH = "manifest.json"
 
 class Manifest:
     def __init__(
-        self, completed: set[str] | None = None, failed: dict[str, str] | None = None
+        self,
+        completed: set[str] | None = None,
+        failed: dict[str, str] | None = None,
+        progress: dict[str, dict] | None = None,
     ) -> None:
         self._completed = set(completed or set())
         self._failed = dict(failed or {})
+        self._progress: dict[str, dict] = dict(progress or {})
 
     def is_complete(self, video_id: str) -> bool:
         return video_id in self._completed
@@ -29,17 +33,37 @@ class Manifest:
     def mark_complete(self, video_id: str) -> None:
         self._completed.add(video_id)
         self._failed.pop(video_id, None)
+        self._progress.pop(video_id, None)
 
     def mark_failed(self, video_id: str, reason: str) -> None:
         self._failed[video_id] = reason
 
+    def get_progress(self, video_id: str) -> dict | None:
+        return self._progress.get(video_id)
+
+    def save_progress(self, video_id: str, resume_seconds: float, next_shard_index: int) -> None:
+        self._progress[video_id] = {
+            "resume_seconds": resume_seconds,
+            "next_shard_index": next_shard_index,
+        }
+
     def to_json(self) -> str:
-        return json.dumps({"completed": sorted(self._completed), "failed": self._failed})
+        return json.dumps(
+            {
+                "completed": sorted(self._completed),
+                "failed": self._failed,
+                "progress": self._progress,
+            }
+        )
 
     @classmethod
     def from_json(cls, data: str) -> "Manifest":
         parsed = json.loads(data)
-        return cls(completed=set(parsed.get("completed", [])), failed=parsed.get("failed", {}))
+        return cls(
+            completed=set(parsed.get("completed", [])),
+            failed=parsed.get("failed", {}),
+            progress=parsed.get("progress", {}),
+        )
 
 
 class HfUploader:

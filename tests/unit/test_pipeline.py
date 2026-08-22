@@ -49,7 +49,7 @@ def test_run_pipeline_uploads_shards_and_marks_manifest_complete(tmp_path) -> No
     cv2.imwrite(str(reference_path), _reference_frame())
     source = _source("abc123", str(reference_path))
 
-    def frame_source(video_source: VideoSource):
+    def frame_source(video_source: VideoSource, resume_seconds: float = 0.0):
         for _ in range(3):
             yield _reference_frame()
 
@@ -75,7 +75,7 @@ def test_process_video_logs_periodic_progress_for_long_videos(tmp_path, caplog) 
     cv2.imwrite(str(reference_path), _reference_frame())
     source = _source("abc123", str(reference_path))
 
-    def frame_source(video_source: VideoSource):
+    def frame_source(video_source: VideoSource, resume_seconds: float = 0.0):
         for _ in range(250):  # > the 200-sample progress-log interval
             yield _reference_frame()
 
@@ -102,7 +102,7 @@ def test_run_pipeline_uploads_a_contact_sheet_preview_per_batch(tmp_path) -> Non
     cv2.imwrite(str(reference_path), _reference_frame())
     source = _source("abc123", str(reference_path))
 
-    def frame_source(video_source: VideoSource):
+    def frame_source(video_source: VideoSource, resume_seconds: float = 0.0):
         for _ in range(3):
             yield _reference_frame()
 
@@ -128,7 +128,7 @@ def test_run_pipeline_skips_already_completed_videos(tmp_path) -> None:
 
     calls = []
 
-    def frame_source(video_source: VideoSource):
+    def frame_source(video_source: VideoSource, resume_seconds: float = 0.0):
         calls.append(video_source.video_id)
         return iter([])
 
@@ -155,7 +155,7 @@ def test_run_pipeline_marks_failed_after_exhausting_retries(tmp_path) -> None:
     cv2.imwrite(str(reference_path), _reference_frame())
     source = _source("abc123", str(reference_path))
 
-    def failing_frame_source(video_source: VideoSource):
+    def failing_frame_source(video_source: VideoSource, resume_seconds: float = 0.0):
         raise RuntimeError("network blip")
         yield  # pragma: no cover - unreachable, makes this a generator
 
@@ -183,7 +183,7 @@ def test_run_pipeline_zero_frames_leaves_video_incomplete(tmp_path) -> None:
     cv2.imwrite(str(reference_path), _reference_frame())
     source = _source("abc123", str(reference_path))
 
-    def frame_source(video_source: VideoSource):
+    def frame_source(video_source: VideoSource, resume_seconds: float = 0.0):
         return iter([])
 
     client = FakeHfClient()
@@ -220,7 +220,7 @@ def test_run_pipeline_halts_video_on_sustained_anomaly_and_stops_early(tmp_path)
 
     frames_consumed = {"count": 0}
 
-    def frame_source(video_source: VideoSource):
+    def frame_source(video_source: VideoSource, resume_seconds: float = 0.0):
         # 300 frames total: never matches the reference, so the validator
         # should halt well before all 300 are consumed.
         for _ in range(300):
@@ -255,7 +255,7 @@ def test_run_pipeline_halted_video_is_not_marked_complete(tmp_path) -> None:
     source = _source("abc123", str(reference_path))
     unrelated = np.random.default_rng(seed=99).integers(0, 255, size=(3, 4), dtype=np.uint8)
 
-    def frame_source(video_source: VideoSource):
+    def frame_source(video_source: VideoSource, resume_seconds: float = 0.0):
         for _ in range(300):
             yield unrelated
 
@@ -283,7 +283,7 @@ def test_run_pipeline_processes_next_video_after_one_fails(tmp_path) -> None:
     bad_source = _source("bad_video", str(reference_path))
     good_source = _source("good_video", str(reference_path))
 
-    def frame_source(video_source: VideoSource):
+    def frame_source(video_source: VideoSource, resume_seconds: float = 0.0):
         if video_source.video_id == "bad_video":
             raise RuntimeError("network blip")
             yield  # pragma: no cover - unreachable, makes this a generator
@@ -306,6 +306,75 @@ def test_run_pipeline_processes_next_video_after_one_fails(tmp_path) -> None:
     assert manifest.is_complete("bad_video") is False
     assert manifest.is_complete("good_video") is True
     assert result == PipelineResult(completed=1, failed=1)
+
+
+def test_run_pipeline_resumes_from_last_checkpoint_after_failure(tmp_path) -> None:
+    reference_path = tmp_path / "ref.png"
+    import cv2
+
+    cv2.imwrite(str(reference_path), _reference_frame())
+    source = _source("abc123", str(reference_path))
+    call_resume_seconds: list[float] = []
+
+    def frame_source(video_source: VideoSource, resume_seconds: float = 0.0):
+        call_resume_seconds.append(resume_seconds)
+        rng = np.random.default_rng(seed=len(call_resume_seconds))
+        # Distinct frames each call so nothing gets deduped and the sample
+        # count during the checkpoint is exact. 250 > the 200-sample
+        # checkpoint interval, so a checkpoint fires mid-stream.
+        for _ in range(250):
+            yield rng.integers(0, 255, size=(3, 4), dtype=np.uint8)
+        if len(call_resume_seconds) == 1:
+            raise RuntimeError("network blip after first pass")
+
+    client = FakeHfClient()
+    uploader = HfUploader(client, repo_id="me/pokemon-frames")
+    deps = PipelineDeps(
+        frame_source=frame_source,
+        uploader=uploader,
+        batch_size=1000,
+        max_retries=2,
+        sleep_func=lambda _: None,
+    )
+
+    result = run_pipeline([source], deps)
+
+    assert result == PipelineResult(completed=1, failed=0)
+    # First attempt starts from scratch; the retry resumes from the
+    # checkpoint the first attempt saved at sample 200 (200 / 2.0 fps),
+    # not from 0 again.
+    assert call_resume_seconds == [0.0, 100.0]
+
+
+def test_run_pipeline_processes_multiple_videos_concurrently(tmp_path) -> None:
+    reference_path = tmp_path / "ref.png"
+    import cv2
+
+    cv2.imwrite(str(reference_path), _reference_frame())
+    sources = [_source(f"video{i}", str(reference_path)) for i in range(5)]
+
+    def frame_source(video_source: VideoSource, resume_seconds: float = 0.0):
+        for _ in range(3):
+            yield _reference_frame()
+
+    client = FakeHfClient()
+    uploader = HfUploader(client, repo_id="me/pokemon-frames")
+    deps = PipelineDeps(
+        frame_source=frame_source,
+        uploader=uploader,
+        batch_size=10,
+        max_concurrent_videos=4,
+    )
+
+    result = run_pipeline(sources, deps)
+
+    assert result == PipelineResult(completed=5, failed=0)
+    manifest = uploader.load_manifest()
+    for source in sources:
+        # Every video's completion must actually land in the manifest --
+        # this is the thing a manifest-save race between threads would lose.
+        assert manifest.is_complete(source.video_id) is True
+        assert any(path.startswith(f"shards/{source.video_id}/") for path in client.uploads)
 
 
 def test_retry_with_backoff_succeeds_after_transient_failures() -> None:
