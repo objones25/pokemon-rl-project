@@ -65,6 +65,36 @@ class PipelineDeps:
     sample_fps: float = 2.0
 
 
+_PROGRESS_LOG_INTERVAL_SAMPLES = 200
+
+
+def _log_progress(
+    video: VideoSource,
+    deps: PipelineDeps,
+    started_at: float,
+    sampled: int,
+    kept: int,
+    dropped_dedup: int,
+    dropped_anomaly: int,
+) -> None:
+    """Periodic checkpoint during a single video's (possibly hours-long)
+    frame loop -- without this, nothing is logged between the video
+    starting and it finishing, which looks identical to "hung" from the
+    outside on an 8+ hour video."""
+    metrics = {
+        "video_id": video.video_id,
+        "sampled": sampled,
+        "kept": kept,
+        "dropped_dedup": dropped_dedup,
+        "dropped_anomaly": dropped_anomaly,
+        "video_time_s": sampled / deps.sample_fps,
+        "elapsed_wall_s": time.monotonic() - started_at,
+    }
+    logger.info("video_progress", extra=metrics)
+    if deps.trackio_run is not None:
+        deps.trackio_run.log(metrics)
+
+
 def _process_video(video: VideoSource, deps: PipelineDeps) -> None:
     reference_patch = load_template_gray(video.reference_patch_path)
     validator = FrameValidator(reference_patch, baseline_score=video.match_confidence_baseline)
@@ -73,9 +103,12 @@ def _process_video(video: VideoSource, deps: PipelineDeps) -> None:
 
     sampled = kept = dropped_dedup = dropped_anomaly = shard_index = 0
     halted = False
+    started_at = time.monotonic()
 
     for frame in deps.frame_source(video):
         sampled += 1
+        if sampled % _PROGRESS_LOG_INTERVAL_SAMPLES == 0:
+            _log_progress(video, deps, started_at, sampled, kept, dropped_dedup, dropped_anomaly)
         result = validator.validate(frame)
         # `halted` must be checked before `keep`: it's sticky once tripped
         # and must stop the loop even on a frame that itself matches again

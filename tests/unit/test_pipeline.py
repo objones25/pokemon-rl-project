@@ -1,3 +1,5 @@
+import logging
+
 import numpy as np
 import pytest
 
@@ -64,6 +66,33 @@ def test_run_pipeline_uploads_shards_and_marks_manifest_complete(tmp_path) -> No
     manifest = uploader.load_manifest()
     assert manifest.is_complete("abc123") is True
     assert any(path.startswith("shards/abc123/") for path in client.uploads)
+
+
+def test_process_video_logs_periodic_progress_for_long_videos(tmp_path, caplog) -> None:
+    reference_path = tmp_path / "ref.png"
+    import cv2
+
+    cv2.imwrite(str(reference_path), _reference_frame())
+    source = _source("abc123", str(reference_path))
+
+    def frame_source(video_source: VideoSource):
+        for _ in range(250):  # > the 200-sample progress-log interval
+            yield _reference_frame()
+
+    client = FakeHfClient()
+    uploader = HfUploader(client, repo_id="me/pokemon-frames")
+    deps = PipelineDeps(frame_source=frame_source, uploader=uploader, batch_size=1000)
+
+    with caplog.at_level(logging.INFO, logger="data_collection.pipeline"):
+        run_pipeline([source], deps)
+
+    progress_records = [r for r in caplog.records if r.message == "video_progress"]
+    assert len(progress_records) >= 1
+    assert progress_records[0].sampled == 200
+    # Every yielded frame is pixel-identical, so the deduper correctly
+    # collapses frames 2+ as duplicates of frame 1 -- only 1 is ever kept.
+    assert progress_records[0].kept == 1
+    assert progress_records[0].video_time_s == 100.0  # 200 samples / 2.0 default sample_fps
 
 
 def test_run_pipeline_uploads_a_contact_sheet_preview_per_batch(tmp_path) -> None:
