@@ -19,6 +19,12 @@ import yt_dlp
 _CROPDETECT_PATTERN = re.compile(rb"crop=(\d+):(\d+):(\d+):(\d+)")
 
 
+def _format_headers(headers: dict[str, str] | None) -> str | None:
+    if not headers:
+        return None
+    return "".join(f"{key}: {value}\r\n" for key, value in headers.items())
+
+
 def build_ffmpeg_command(
     stream_url: str,
     crop_x: int,
@@ -27,10 +33,14 @@ def build_ffmpeg_command(
     crop_h: int,
     fps: int = 2,
     start_seconds: float = 0,
+    headers: dict[str, str] | None = None,
 ) -> list[str]:
     cmd = ["ffmpeg", "-loglevel", "error"]
     if start_seconds:
         cmd += ["-ss", str(start_seconds)]
+    header_str = _format_headers(headers)
+    if header_str:
+        cmd += ["-headers", header_str]
     cmd += [
         "-i",
         stream_url,
@@ -56,11 +66,20 @@ def parse_frame_stream(stdout: IO[bytes], width: int, height: int) -> Iterator[n
         yield np.frombuffer(chunk, dtype=np.uint8).reshape(height, width)
 
 
-def get_stream_info(video_url: str) -> tuple[str, int, int]:
-    """Returns (stream_url, width, height) for the best available video-only
-    stream. Longplay uploads range from ~360p to 4K, so callers that need to
-    grab a full, uncropped frame (curation's smoke test) must use the real
-    dimensions here rather than guessing a fixed resolution."""
+def get_stream_info(video_url: str) -> tuple[str, int, int, dict[str, str]]:
+    """Returns (stream_url, width, height, http_headers) for the best
+    available video-only stream. Longplay uploads range from ~360p to 4K, so
+    callers that need to grab a full, uncropped frame (curation's smoke
+    test) must use the real dimensions here rather than guessing a fixed
+    resolution.
+
+    `http_headers` (User-Agent etc.) must be replayed on every subsequent
+    request to this URL. YouTube's CDN validates them alongside the URL's
+    own signature -- fetching the bare URL with ffmpeg's default headers
+    works inconsistently from a residential IP and reliably 403s from a
+    datacenter IP (e.g. a RunPod pod), since the mismatched headers read as
+    bot traffic.
+    """
     opts = {"format": "bestvideo", "quiet": True, "noplaylist": True}
     with yt_dlp.YoutubeDL(opts) as ydl:  # type: ignore[arg-type]
         info = ydl.extract_info(video_url, download=False)
@@ -69,21 +88,25 @@ def get_stream_info(video_url: str) -> tuple[str, int, int]:
     width = info.get("width")
     height = info.get("height")
     if url and width and height:
-        return url, width, height
+        return url, width, height, info.get("http_headers") or {}
     for fmt in reversed(info.get("formats") or []):
         fmt_url = fmt.get("url")
         if fmt.get("vcodec") not in (None, "none") and fmt_url:
-            return fmt_url, fmt.get("width") or width or 0, fmt.get("height") or height or 0
+            headers = fmt.get("http_headers") or info.get("http_headers") or {}
+            return fmt_url, fmt.get("width") or width or 0, fmt.get("height") or height or 0, headers
     raise RuntimeError(f"no playable video stream found for {video_url}")
 
 
 def get_stream_url(video_url: str) -> str:
-    url, _, _ = get_stream_info(video_url)
+    url, _, _, _ = get_stream_info(video_url)
     return url
 
 
 def detect_crop_box(
-    stream_url: str, start_seconds: float, duration_seconds: float = 20
+    stream_url: str,
+    start_seconds: float,
+    duration_seconds: float = 20,
+    headers: dict[str, str] | None = None,
 ) -> tuple[int, int, int, int] | None:
     """Auto-detects the real content region via ffmpeg's `cropdetect` filter
     over a short segment, so curation proposes a starting crop box derived
@@ -92,12 +115,11 @@ def detect_crop_box(
     unreadable stream, etc. -- NOT the same as "no letterbox found", which
     `cropdetect` reports as a crop matching the full frame).
     """
-    cmd = [
-        "ffmpeg",
-        "-loglevel",
-        "info",
-        "-ss",
-        str(start_seconds),
+    cmd = ["ffmpeg", "-loglevel", "info", "-ss", str(start_seconds)]
+    header_str = _format_headers(headers)
+    if header_str:
+        cmd += ["-headers", header_str]
+    cmd += [
         "-i",
         stream_url,
         "-t",
@@ -124,8 +146,11 @@ def stream_frames(
     crop_h: int,
     fps: int = 2,
     start_seconds: float = 0,
+    headers: dict[str, str] | None = None,
 ) -> Iterator[np.ndarray]:
-    cmd = build_ffmpeg_command(stream_url, crop_x, crop_y, crop_w, crop_h, fps, start_seconds)
+    cmd = build_ffmpeg_command(
+        stream_url, crop_x, crop_y, crop_w, crop_h, fps, start_seconds, headers
+    )
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     exhausted_naturally = False
     try:

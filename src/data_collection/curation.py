@@ -48,7 +48,9 @@ def propose_crop_box(
 _SMOKE_TEST_SEEK_SECONDS = 120
 
 
-def _grab_smoke_test_frame(stream_url: str, width: int, height: int) -> np.ndarray:
+def _grab_smoke_test_frame(
+    stream_url: str, width: int, height: int, headers: dict[str, str] | None = None
+) -> np.ndarray:
     """Grab one full, uncropped frame -- the crop box doesn't exist yet.
 
     Seeks past the first couple of minutes rather than grabbing frame 0:
@@ -63,6 +65,7 @@ def _grab_smoke_test_frame(stream_url: str, width: int, height: int) -> np.ndarr
         crop_h=height,
         fps=1,
         start_seconds=_SMOKE_TEST_SEEK_SECONDS,
+        headers=headers,
     )
     return next(frames)
 
@@ -75,10 +78,12 @@ def run_curation(
     game: str,
     input_func=input,
 ) -> None:
-    stream_url, width, height = extract.get_stream_info(video_url)
-    frame = _grab_smoke_test_frame(stream_url, width, height)
+    stream_url, width, height, headers = extract.get_stream_info(video_url)
+    frame = _grab_smoke_test_frame(stream_url, width, height, headers)
 
-    detected = extract.detect_crop_box(stream_url, start_seconds=_SMOKE_TEST_SEEK_SECONDS)
+    detected = extract.detect_crop_box(
+        stream_url, start_seconds=_SMOKE_TEST_SEEK_SECONDS, headers=headers
+    )
     bank_templates = {
         p.stem: load_template_gray(p) for p in sorted(bank_dir.glob("*.png"))
     }

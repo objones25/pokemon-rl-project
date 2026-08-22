@@ -90,12 +90,14 @@ def run(repo_id: str, registry: Path, batch_size: int) -> None:
     trackio_run = TrackioRun(trackio, project="pokemon-data-collection", name=repo_id)
 
     def frame_source(video_source):
+        stream_url, _, _, headers = extract.get_stream_info(video_source.url)
         return extract.stream_frames(
-            extract.get_stream_url(video_source.url),
+            stream_url,
             crop_x=video_source.crop_x,
             crop_y=video_source.crop_y,
             crop_w=video_source.crop_w,
             crop_h=video_source.crop_h,
+            headers=headers,
         )
 
     deps = pipeline.PipelineDeps(
