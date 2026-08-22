@@ -19,8 +19,10 @@ from data_collection.dedup import PerceptualHashDeduper
 from data_collection.frame_validator import FrameValidator
 from data_collection.hf_uploader import HfUploader
 from data_collection.matching import load_template_gray
-from data_collection.observability import build_contact_sheet
 from data_collection.registry import VideoSource
+from observability.visualization import build_contact_sheet
+
+logger = logging.getLogger(__name__)
 
 
 class TrackioRunLike(Protocol):
@@ -56,7 +58,6 @@ class PipelineResult:
 class PipelineDeps:
     frame_source: Callable[[VideoSource], Iterator[np.ndarray]]
     uploader: HfUploader
-    logger: logging.Logger
     trackio_run: TrackioRunLike | None = None
     batch_size: int = 500
     max_retries: int = 3
@@ -86,7 +87,7 @@ def _process_video(video: VideoSource, deps: PipelineDeps) -> None:
         if result.halted:
             dropped_anomaly += 1
             halted = True
-            deps.logger.warning(
+            logger.warning(
                 "video_halted_on_anomaly_rate", extra={"video_id": video.video_id}
             )
             break
@@ -129,7 +130,7 @@ def _process_video(video: VideoSource, deps: PipelineDeps) -> None:
     # extraction -- both of which are about to be raised as failures below.
     # Logging/reporting happens first so accurate counts reach Trackio even
     # though the video will be marked failed, not complete.
-    deps.logger.info("video_processed", extra=metrics)
+    logger.info("video_processed", extra=metrics)
     if deps.trackio_run is not None:
         deps.trackio_run.log(metrics)
 
@@ -186,7 +187,7 @@ def run_pipeline(registry: list[VideoSource], deps: PipelineDeps) -> PipelineRes
                 sleep_func=deps.sleep_func,
             )
         except Exception as exc:
-            deps.logger.error(
+            logger.error(
                 "video_failed", extra={"video_id": video.video_id, "reason": str(exc)}
             )
             manifest.mark_failed(video.video_id, str(exc))

@@ -13,8 +13,9 @@ from huggingface_hub.errors import EntryNotFoundError
 
 from data_collection import curation, extract, pipeline
 from data_collection.hf_uploader import HfClient, HfUploader
-from data_collection.observability import TrackioRun, configure_logging
 from data_collection.registry import load_registry
+from observability.logging_config import configure_logging
+from observability.tracking import TrackioRun
 
 _DEFAULT_REGISTRY = Path("configs/video_sources.yaml")
 _DEFAULT_BANK_DIR = Path("configs/templates/bank")
@@ -50,6 +51,7 @@ class RealHfClient:
 def main() -> None:
     """Pokemon Red/Blue data collection pipeline."""
     load_dotenv()
+    configure_logging()
 
 
 @main.command()
@@ -82,7 +84,6 @@ def run(repo_id: str, registry: Path, batch_size: int) -> None:
         )
 
     sources = load_registry(registry)
-    logger = configure_logging()
 
     client: HfClient = RealHfClient(HfApi(), repo_id)
     uploader = HfUploader(client, repo_id)
@@ -100,7 +101,6 @@ def run(repo_id: str, registry: Path, batch_size: int) -> None:
     deps = pipeline.PipelineDeps(
         frame_source=frame_source,
         uploader=uploader,
-        logger=logger,
         trackio_run=trackio_run,
         batch_size=batch_size,
     )

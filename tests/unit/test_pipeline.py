@@ -1,11 +1,7 @@
-import io
-import logging
-
 import numpy as np
 import pytest
 
 from data_collection.hf_uploader import HfUploader, Manifest
-from data_collection.observability import configure_logging
 from data_collection.pipeline import PipelineDeps, PipelineResult, retry_with_backoff, run_pipeline
 from data_collection.registry import VideoSource
 
@@ -55,7 +51,6 @@ def test_run_pipeline_uploads_shards_and_marks_manifest_complete(tmp_path) -> No
     deps = PipelineDeps(
         frame_source=frame_source,
         uploader=uploader,
-        logger=configure_logging(stream=io.StringIO()),
         batch_size=10,
     )
 
@@ -82,7 +77,6 @@ def test_run_pipeline_uploads_a_contact_sheet_preview_per_batch(tmp_path) -> Non
     deps = PipelineDeps(
         frame_source=frame_source,
         uploader=uploader,
-        logger=configure_logging(stream=io.StringIO()),
         batch_size=10,
     )
 
@@ -113,7 +107,6 @@ def test_run_pipeline_skips_already_completed_videos(tmp_path) -> None:
     deps = PipelineDeps(
         frame_source=frame_source,
         uploader=uploader,
-        logger=configure_logging(stream=io.StringIO()),
     )
 
     run_pipeline([source], deps)
@@ -138,7 +131,6 @@ def test_run_pipeline_marks_failed_after_exhausting_retries(tmp_path) -> None:
     deps = PipelineDeps(
         frame_source=failing_frame_source,
         uploader=uploader,
-        logger=configure_logging(stream=io.StringIO()),
         max_retries=2,
         sleep_func=sleeps.append,
     )
@@ -165,7 +157,6 @@ def test_run_pipeline_zero_frames_leaves_video_incomplete(tmp_path) -> None:
     deps = PipelineDeps(
         frame_source=frame_source,
         uploader=uploader,
-        logger=configure_logging(stream=io.StringIO()),
         max_retries=1,
         sleep_func=lambda _: None,
     )
@@ -207,7 +198,6 @@ def test_run_pipeline_halts_video_on_sustained_anomaly_and_stops_early(tmp_path)
     deps = PipelineDeps(
         frame_source=frame_source,
         uploader=uploader,
-        logger=configure_logging(stream=io.StringIO()),
         batch_size=1000,
     )
 
@@ -240,7 +230,6 @@ def test_run_pipeline_halted_video_is_not_marked_complete(tmp_path) -> None:
     deps = PipelineDeps(
         frame_source=frame_source,
         uploader=uploader,
-        logger=configure_logging(stream=io.StringIO()),
         batch_size=1000,
         max_retries=1,
         sleep_func=lambda _: None,
@@ -272,7 +261,6 @@ def test_run_pipeline_processes_next_video_after_one_fails(tmp_path) -> None:
     deps = PipelineDeps(
         frame_source=frame_source,
         uploader=uploader,
-        logger=configure_logging(stream=io.StringIO()),
         max_retries=1,
         sleep_func=lambda _: None,
         batch_size=10,
