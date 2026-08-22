@@ -41,8 +41,24 @@ def test_run_command_fails_fast_with_no_hf_credentials(tmp_path, monkeypatch) ->
     assert "HF_TOKEN" in result.output
 
 
+class _FakeTrackioModule:
+    """`cli.run` constructs a real TrackioRun before calling `pipeline.run_pipeline`,
+    so this test must fake the `trackio` module itself, not just `run_pipeline`,
+    or it makes a real call into the trackio library on every test run."""
+
+    def init(self, project: str, name: str) -> None:
+        pass
+
+    def log(self, metrics: dict) -> None:
+        pass
+
+    def finish(self) -> None:
+        pass
+
+
 def test_run_command_exits_nonzero_when_pipeline_reports_failures(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr("data_collection.cli.get_token", lambda: "fake-token")
+    monkeypatch.setattr("data_collection.cli.trackio", _FakeTrackioModule())
     monkeypatch.setattr(
         "data_collection.cli.pipeline.run_pipeline",
         lambda sources, deps: pipeline.PipelineResult(completed=0, failed=1),
