@@ -80,6 +80,22 @@ class PipelineDeps:
 _PROGRESS_CHECKPOINT_INTERVAL_SAMPLES = 200
 
 
+def _safe_trackio_log(deps: PipelineDeps, video: VideoSource, metrics: dict) -> None:
+    """Trackio is a best-effort live dashboard, not a correctness
+    dependency -- an internal trackio failure (its global "current run"
+    state getting invalidated under concurrent access from multiple
+    pipeline worker threads, observed in practice) must never interrupt
+    real extraction work or trigger a needless retry."""
+    if deps.trackio_run is None:
+        return
+    try:
+        deps.trackio_run.log(metrics)
+    except Exception as exc:
+        logger.warning(
+            "trackio_log_failed", extra={"video_id": video.video_id, "reason": str(exc)}
+        )
+
+
 def _checkpoint_progress(
     video: VideoSource,
     deps: PipelineDeps,
@@ -107,12 +123,16 @@ def _checkpoint_progress(
         "elapsed_wall_s": time.monotonic() - started_at,
     }
     logger.info("video_progress", extra=metrics)
-    if deps.trackio_run is not None:
-        deps.trackio_run.log(metrics)
 
+    # Checkpoint persistence is the critical path -- it must happen
+    # regardless of Trackio's outcome. Trackio logging comes last and is
+    # best-effort (see observability.tracking.TrackioRun): a resume
+    # checkpoint must never be lost because a dashboard call failed.
     with manifest_lock:
         manifest.save_progress(video.video_id, resume_seconds, shard_index)
         deps.uploader.save_manifest(manifest)
+
+    _safe_trackio_log(deps, video, metrics)
 
 
 def _process_video(
@@ -186,8 +206,7 @@ def _process_video(
     # happens first so accurate counts reach Trackio even though the video
     # will be marked failed, not complete.
     logger.info("video_processed", extra=metrics)
-    if deps.trackio_run is not None:
-        deps.trackio_run.log(metrics)
+    _safe_trackio_log(deps, video, metrics)
 
     if sampled == 0:
         raise RuntimeError(f"no frames extracted for video {video.video_id}")

@@ -265,6 +265,46 @@ def test_run_pipeline_processes_multiple_videos_concurrently() -> None:
         assert any(path.startswith(f"shards/{source.video_id}/") for path in client.uploads)
 
 
+def test_video_completes_despite_every_trackio_call_failing() -> None:
+    """Regression test: trackio.log() raising 'Call trackio.init() before
+    trackio.log()' under concurrent multi-thread use previously wiped out
+    every checkpoint (it ran before manifest.save_progress) and aborted
+    the video's processing entirely, forcing every retry to restart from
+    0 -- confirmed against the real manifest.json after a live run
+    (progress: {} despite hours of real extraction work, every video
+    marked failed with that exact reason). Trackio is best-effort; a
+    video must complete normally regardless of whether it works."""
+    source = _source("abc123")
+
+    class RaisingTrackioRun:
+        def log(self, metrics: dict) -> None:
+            raise RuntimeError("Call trackio.init() before trackio.log().")
+
+        def finish(self) -> None:
+            pass
+
+    def frame_source(video_source: VideoSource, resume_seconds: float = 0.0):
+        for _ in range(250):  # > the 200-sample checkpoint interval
+            yield _frame()
+
+    client = FakeHfClient()
+    uploader = HfUploader(client, repo_id="me/pokemon-frames")
+    deps = PipelineDeps(
+        frame_source=frame_source,
+        uploader=uploader,
+        trackio_run=RaisingTrackioRun(),
+        batch_size=1000,
+        max_retries=1,
+        sleep_func=lambda _: None,
+    )
+
+    result = run_pipeline([source], deps)
+
+    assert result == PipelineResult(completed=1, failed=0)
+    manifest = uploader.load_manifest()
+    assert manifest.is_complete("abc123") is True
+
+
 def test_retry_with_backoff_succeeds_after_transient_failures() -> None:
     attempts = {"count": 0}
     sleeps: list[float] = []
