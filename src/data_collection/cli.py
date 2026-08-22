@@ -18,7 +18,6 @@ from observability.logging_config import configure_logging
 from observability.tracking import TrackioRun
 
 _DEFAULT_REGISTRY = Path("configs/video_sources.yaml")
-_DEFAULT_BANK_DIR = Path("configs/templates/bank")
 _DEFAULT_APPROVED_DIR = Path("configs/templates/approved")
 
 
@@ -58,13 +57,11 @@ def main() -> None:
 @click.argument("url")
 @click.option("--game", type=click.Choice(["red", "blue"]), required=True)
 @click.option("--registry", type=click.Path(path_type=Path), default=_DEFAULT_REGISTRY)
-@click.option("--bank-dir", type=click.Path(path_type=Path), default=_DEFAULT_BANK_DIR)
 @click.option("--approved-dir", type=click.Path(path_type=Path), default=_DEFAULT_APPROVED_DIR)
-def curate(url: str, game: str, registry: Path, bank_dir: Path, approved_dir: Path) -> None:
+def curate(url: str, game: str, registry: Path, approved_dir: Path) -> None:
     """Phase A: interactively review and approve a candidate video."""
     curation.run_curation(
         video_url=url,
-        bank_dir=bank_dir,
         approved_dir=approved_dir,
         registry_path=registry,
         game=game,

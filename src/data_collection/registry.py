@@ -16,8 +16,6 @@ _REQUIRED_FIELDS = (
     "crop_y",
     "crop_w",
     "crop_h",
-    "reference_patch_path",
-    "match_confidence_baseline",
 )
 
 
@@ -30,8 +28,6 @@ class VideoSource:
     crop_y: int
     crop_w: int
     crop_h: int
-    reference_patch_path: str
-    match_confidence_baseline: float
 
 
 def _parse_entry(entry: dict) -> VideoSource:
@@ -50,8 +46,6 @@ def _parse_entry(entry: dict) -> VideoSource:
         crop_y=entry["crop_y"],
         crop_w=entry["crop_w"],
         crop_h=entry["crop_h"],
-        reference_patch_path=entry["reference_patch_path"],
-        match_confidence_baseline=entry["match_confidence_baseline"],
     )
 
 

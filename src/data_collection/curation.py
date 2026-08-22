@@ -1,9 +1,9 @@
 """Phase A: interactive, human-gated crop-box curation.
 
-`render_preview` and `propose_crop_box` are pure and unit tested. `run_curation`
-drives the actual interactive terminal flow (fetch smoke-test frame, propose
-a box, let the human confirm/adjust, capture the reference patch, append to
-the registry) and is exercised manually, per the spec's testing strategy.
+`render_preview` is pure and unit tested. `run_curation` drives the actual
+interactive terminal flow (fetch smoke-test frame, propose a box via ffmpeg
+cropdetect, let the human confirm/adjust, append to the registry) and is
+exercised manually, per the spec's testing strategy.
 """
 
 from __future__ import annotations
@@ -14,7 +14,6 @@ import cv2
 import numpy as np
 
 from data_collection import extract
-from data_collection.matching import load_template_gray, match_crop
 from data_collection.registry import VideoSource, append_to_registry
 
 
@@ -22,27 +21,6 @@ def render_preview(frame_gray: np.ndarray, x: int, y: int, w: int, h: int) -> np
     preview = frame_gray.copy()
     cv2.rectangle(preview, (x, y), (x + w, y + h), color=255, thickness=2)
     return preview
-
-
-def propose_crop_box(
-    frame_gray: np.ndarray,
-    bank_templates: dict[str, np.ndarray],
-    min_confidence: float = 0.7,
-) -> tuple[int, int, int, int] | None:
-    best_name: str | None = None
-    best_score = -1.0
-    best_x = best_y = 0
-
-    for name, template in bank_templates.items():
-        result = match_crop(frame_gray, template)
-        if result.score > best_score:
-            best_name, best_score, best_x, best_y = name, result.score, result.x, result.y
-
-    if best_name is None or best_score < min_confidence:
-        return None
-
-    h, w = bank_templates[best_name].shape
-    return (best_x, best_y, w, h)
 
 
 _SMOKE_TEST_SEEK_SECONDS = 120
@@ -72,7 +50,6 @@ def _grab_smoke_test_frame(
 
 def run_curation(
     video_url: str,
-    bank_dir: Path,
     approved_dir: Path,
     registry_path: Path,
     game: str,
@@ -84,19 +61,12 @@ def run_curation(
     detected = extract.detect_crop_box(
         stream_url, start_seconds=_SMOKE_TEST_SEEK_SECONDS, headers=headers
     )
-    bank_templates = {
-        p.stem: load_template_gray(p) for p in sorted(bank_dir.glob("*.png"))
-    }
-    proposed = propose_crop_box(frame, bank_templates) if bank_templates else None
 
     if detected is not None:
         x, y, w, h = detected
         print(f"Auto-detected crop box (ffmpeg cropdetect): x={x} y={y} w={w} h={h}")
-    elif proposed is not None:
-        x, y, w, h = proposed
-        print(f"Proposed crop box from template match: x={x} y={y} w={w} h={h}")
     else:
-        print("No automatic proposal available -- starting from the full frame.")
+        print("No boundary detected -- starting from the full frame.")
         x = y = 0
         w, h = width, height
 
@@ -121,9 +91,6 @@ def run_curation(
             h = int(input_func(f"h [{h}]: ") or h)
 
     video_id = video_url.rstrip("/").split("=")[-1].split("/")[-1]
-    reference_patch = frame[y : y + h, x : x + w]
-    reference_patch_path = approved_dir / f"{video_id}.png"
-    cv2.imwrite(str(reference_patch_path), reference_patch)
 
     source = VideoSource(
         video_id=video_id,
@@ -133,8 +100,6 @@ def run_curation(
         crop_y=y,
         crop_w=w,
         crop_h=h,
-        reference_patch_path=str(reference_patch_path),
-        match_confidence_baseline=1.0,
     )
     append_to_registry(registry_path, source)
     print(f"Approved and added {video_id} to {registry_path}")

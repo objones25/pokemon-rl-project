@@ -24,7 +24,7 @@ class FakeHfClient:
         return self.uploads.get(path_in_repo)
 
 
-def _source(video_id: str, reference_patch_path: str) -> VideoSource:
+def _source(video_id: str) -> VideoSource:
     return VideoSource(
         video_id=video_id,
         url=f"https://youtube.com/watch?v={video_id}",
@@ -33,25 +33,19 @@ def _source(video_id: str, reference_patch_path: str) -> VideoSource:
         crop_y=0,
         crop_w=4,
         crop_h=3,
-        reference_patch_path=reference_patch_path,
-        match_confidence_baseline=1.0,
     )
 
 
-def _reference_frame() -> np.ndarray:
+def _frame() -> np.ndarray:
     return np.full((3, 4), 100, dtype=np.uint8)
 
 
-def test_run_pipeline_uploads_shards_and_marks_manifest_complete(tmp_path) -> None:
-    reference_path = tmp_path / "ref.png"
-    import cv2
-
-    cv2.imwrite(str(reference_path), _reference_frame())
-    source = _source("abc123", str(reference_path))
+def test_run_pipeline_uploads_shards_and_marks_manifest_complete() -> None:
+    source = _source("abc123")
 
     def frame_source(video_source: VideoSource, resume_seconds: float = 0.0):
         for _ in range(3):
-            yield _reference_frame()
+            yield _frame()
 
     client = FakeHfClient()
     uploader = HfUploader(client, repo_id="me/pokemon-frames")
@@ -68,16 +62,12 @@ def test_run_pipeline_uploads_shards_and_marks_manifest_complete(tmp_path) -> No
     assert any(path.startswith("shards/abc123/") for path in client.uploads)
 
 
-def test_process_video_logs_periodic_progress_for_long_videos(tmp_path, caplog) -> None:
-    reference_path = tmp_path / "ref.png"
-    import cv2
-
-    cv2.imwrite(str(reference_path), _reference_frame())
-    source = _source("abc123", str(reference_path))
+def test_process_video_logs_periodic_progress_for_long_videos(caplog) -> None:
+    source = _source("abc123")
 
     def frame_source(video_source: VideoSource, resume_seconds: float = 0.0):
         for _ in range(250):  # > the 200-sample progress-log interval
-            yield _reference_frame()
+            yield _frame()
 
     client = FakeHfClient()
     uploader = HfUploader(client, repo_id="me/pokemon-frames")
@@ -95,16 +85,12 @@ def test_process_video_logs_periodic_progress_for_long_videos(tmp_path, caplog) 
     assert progress_records[0].video_time_s == 100.0  # 200 samples / 2.0 default sample_fps
 
 
-def test_run_pipeline_uploads_a_contact_sheet_preview_per_batch(tmp_path) -> None:
-    reference_path = tmp_path / "ref.png"
-    import cv2
-
-    cv2.imwrite(str(reference_path), _reference_frame())
-    source = _source("abc123", str(reference_path))
+def test_run_pipeline_uploads_a_contact_sheet_preview_per_batch() -> None:
+    source = _source("abc123")
 
     def frame_source(video_source: VideoSource, resume_seconds: float = 0.0):
         for _ in range(3):
-            yield _reference_frame()
+            yield _frame()
 
     client = FakeHfClient()
     uploader = HfUploader(client, repo_id="me/pokemon-frames")
@@ -119,12 +105,8 @@ def test_run_pipeline_uploads_a_contact_sheet_preview_per_batch(tmp_path) -> Non
     assert any(path.startswith("previews/abc123/") for path in client.uploads)
 
 
-def test_run_pipeline_skips_already_completed_videos(tmp_path) -> None:
-    reference_path = tmp_path / "ref.png"
-    import cv2
-
-    cv2.imwrite(str(reference_path), _reference_frame())
-    source = _source("abc123", str(reference_path))
+def test_run_pipeline_skips_already_completed_videos() -> None:
+    source = _source("abc123")
 
     calls = []
 
@@ -148,12 +130,8 @@ def test_run_pipeline_skips_already_completed_videos(tmp_path) -> None:
     assert calls == []
 
 
-def test_run_pipeline_marks_failed_after_exhausting_retries(tmp_path) -> None:
-    reference_path = tmp_path / "ref.png"
-    import cv2
-
-    cv2.imwrite(str(reference_path), _reference_frame())
-    source = _source("abc123", str(reference_path))
+def test_run_pipeline_marks_failed_after_exhausting_retries() -> None:
+    source = _source("abc123")
 
     def failing_frame_source(video_source: VideoSource, resume_seconds: float = 0.0):
         raise RuntimeError("network blip")
@@ -176,12 +154,8 @@ def test_run_pipeline_marks_failed_after_exhausting_retries(tmp_path) -> None:
     assert len(sleeps) == 1  # max_retries=2 total attempts -> 1 sleep between them
 
 
-def test_run_pipeline_zero_frames_leaves_video_incomplete(tmp_path) -> None:
-    reference_path = tmp_path / "ref.png"
-    import cv2
-
-    cv2.imwrite(str(reference_path), _reference_frame())
-    source = _source("abc123", str(reference_path))
+def test_run_pipeline_zero_frames_leaves_video_incomplete() -> None:
+    source = _source("abc123")
 
     def frame_source(video_source: VideoSource, resume_seconds: float = 0.0):
         return iter([])
@@ -201,94 +175,16 @@ def test_run_pipeline_zero_frames_leaves_video_incomplete(tmp_path) -> None:
     assert manifest.is_complete("abc123") is False
 
 
-def test_run_pipeline_halts_video_on_sustained_anomaly_and_stops_early(tmp_path) -> None:
-    reference_path = tmp_path / "ref.png"
-    import cv2
-
-    # NOTE: a constant-valued reference (like the shared `_reference_frame()`
-    # helper) is degenerate for cv2's TM_CCOEFF_NORMED: with zero variance in
-    # the template, OpenCV's normalized cross-correlation always reports a
-    # perfect score of 1.0 regardless of the frame content, so no frame could
-    # ever fail to match and the halt could never trip. Use a reference patch
-    # with real variance here so mismatches actually score low.
-    reference = np.array(
-        [[10, 50, 90, 130], [170, 210, 250, 30], [60, 100, 140, 180]], dtype=np.uint8
-    )
-    cv2.imwrite(str(reference_path), reference)
-    source = _source("abc123", str(reference_path))
-    unrelated = np.random.default_rng(seed=99).integers(0, 255, size=(3, 4), dtype=np.uint8)
-
-    frames_consumed = {"count": 0}
-
-    def frame_source(video_source: VideoSource, resume_seconds: float = 0.0):
-        # 300 frames total: never matches the reference, so the validator
-        # should halt well before all 300 are consumed.
-        for _ in range(300):
-            frames_consumed["count"] += 1
-            yield unrelated
-
-    client = FakeHfClient()
-    uploader = HfUploader(client, repo_id="me/pokemon-frames")
-    deps = PipelineDeps(
-        frame_source=frame_source,
-        uploader=uploader,
-        batch_size=1000,
-    )
-
-    run_pipeline([source], deps)
-
-    # FrameValidator's default window_size=50 means it can halt as early as
-    # frame 50; well under the full 300-frame source either way.
-    assert frames_consumed["count"] < 300
-
-
-def test_run_pipeline_halted_video_is_not_marked_complete(tmp_path) -> None:
-    reference_path = tmp_path / "ref.png"
-    import cv2
-
-    # See NOTE above: a constant-valued reference is degenerate for
-    # cv2's TM_CCOEFF_NORMED, so use a reference patch with real variance.
-    reference = np.array(
-        [[10, 50, 90, 130], [170, 210, 250, 30], [60, 100, 140, 180]], dtype=np.uint8
-    )
-    cv2.imwrite(str(reference_path), reference)
-    source = _source("abc123", str(reference_path))
-    unrelated = np.random.default_rng(seed=99).integers(0, 255, size=(3, 4), dtype=np.uint8)
-
-    def frame_source(video_source: VideoSource, resume_seconds: float = 0.0):
-        for _ in range(300):
-            yield unrelated
-
-    client = FakeHfClient()
-    uploader = HfUploader(client, repo_id="me/pokemon-frames")
-    deps = PipelineDeps(
-        frame_source=frame_source,
-        uploader=uploader,
-        batch_size=1000,
-        max_retries=1,
-        sleep_func=lambda _: None,
-    )
-
-    run_pipeline([source], deps)
-
-    manifest = uploader.load_manifest()
-    assert manifest.is_complete("abc123") is False
-
-
-def test_run_pipeline_processes_next_video_after_one_fails(tmp_path) -> None:
-    reference_path = tmp_path / "ref.png"
-    import cv2
-
-    cv2.imwrite(str(reference_path), _reference_frame())
-    bad_source = _source("bad_video", str(reference_path))
-    good_source = _source("good_video", str(reference_path))
+def test_run_pipeline_processes_next_video_after_one_fails() -> None:
+    bad_source = _source("bad_video")
+    good_source = _source("good_video")
 
     def frame_source(video_source: VideoSource, resume_seconds: float = 0.0):
         if video_source.video_id == "bad_video":
             raise RuntimeError("network blip")
             yield  # pragma: no cover - unreachable, makes this a generator
         for _ in range(3):
-            yield _reference_frame()
+            yield _frame()
 
     client = FakeHfClient()
     uploader = HfUploader(client, repo_id="me/pokemon-frames")
@@ -308,12 +204,8 @@ def test_run_pipeline_processes_next_video_after_one_fails(tmp_path) -> None:
     assert result == PipelineResult(completed=1, failed=1)
 
 
-def test_run_pipeline_resumes_from_last_checkpoint_after_failure(tmp_path) -> None:
-    reference_path = tmp_path / "ref.png"
-    import cv2
-
-    cv2.imwrite(str(reference_path), _reference_frame())
-    source = _source("abc123", str(reference_path))
+def test_run_pipeline_resumes_from_last_checkpoint_after_failure() -> None:
+    source = _source("abc123")
     call_resume_seconds: list[float] = []
 
     def frame_source(video_source: VideoSource, resume_seconds: float = 0.0):
@@ -346,16 +238,12 @@ def test_run_pipeline_resumes_from_last_checkpoint_after_failure(tmp_path) -> No
     assert call_resume_seconds == [0.0, 100.0]
 
 
-def test_run_pipeline_processes_multiple_videos_concurrently(tmp_path) -> None:
-    reference_path = tmp_path / "ref.png"
-    import cv2
-
-    cv2.imwrite(str(reference_path), _reference_frame())
-    sources = [_source(f"video{i}", str(reference_path)) for i in range(5)]
+def test_run_pipeline_processes_multiple_videos_concurrently() -> None:
+    sources = [_source(f"video{i}") for i in range(5)]
 
     def frame_source(video_source: VideoSource, resume_seconds: float = 0.0):
         for _ in range(3):
-            yield _reference_frame()
+            yield _frame()
 
     client = FakeHfClient()
     uploader = HfUploader(client, repo_id="me/pokemon-frames")

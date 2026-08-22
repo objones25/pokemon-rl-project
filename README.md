@@ -44,18 +44,7 @@ immediately with a clear error rather than partway through a long extraction.
 
 ## Workflow
 
-### 1. Add reference templates (one-time)
-
-`curate` proposes a starting crop box by matching a candidate video's first
-frame against a bank of reference screenshots. Add a few PNGs to
-`configs/templates/bank/` — distinctive, mostly-static Game Boy Pokemon
-Red/Blue screens (the start menu fully open works well) — captured from a
-video you have the rights to view. See `configs/templates/bank/README.md`.
-
-This step is optional: with an empty bank, `curate` just skips straight to
-manual crop entry.
-
-### 2. Curate candidate videos
+### 1. Curate candidate videos
 
 ```bash
 uv run data-collection curate "https://www.youtube.com/watch?v=<id>" --game red
@@ -66,16 +55,15 @@ What happens:
 1. Resolves the video's real stream URL and resolution via `yt-dlp`
    (longplay uploads range from ~360p to 4K — there's no fixed assumption
    here).
-2. Grabs one full, uncropped frame and, if the template bank isn't empty,
-   proposes a crop box.
+2. Grabs one full, uncropped frame and proposes a crop box via ffmpeg's
+   `cropdetect` filter (real pixel-based letterbox/pillarbox detection).
+   Falls back to the full frame if nothing is detected.
 3. Writes an annotated preview to
    `configs/templates/approved/_preview.png` and prompts:
    `[a]pprove / [m]anual entry / [r]eject`. Open the preview image to see
    the proposed box; `m` lets you type new `x`/`y`/`w`/`h` values and loop
    back to a fresh preview until it looks right.
-4. On approval, cuts that exact region out as the video's own reference
-   patch (`configs/templates/approved/<video_id>.png`) and appends the
-   video — crop box, patch path, source URL, game — to
+4. On approval, appends the video — crop box, source URL, game — to
    `configs/video_sources.yaml`.
 
 Nothing is ever written to the registry without an explicit `a`. Repeat for
@@ -92,14 +80,14 @@ uv run python -c "
 from data_collection import extract
 for url in ['https://www.youtube.com/watch?v=<id1>', 'https://www.youtube.com/watch?v=<id2>']:
     try:
-        stream_url, w, h = extract.get_stream_info(url)
+        stream_url, w, h, _headers = extract.get_stream_info(url)
         print(f'OK   {w}x{h}  {url}')
     except Exception as exc:
         print(f'FAIL {exc!r}  {url}')
 "
 ```
 
-### 3. Run extraction (Phase B)
+### 2. Run extraction (Phase B)
 
 ```bash
 uv run data-collection run --repo-id you/pokemon-frames
@@ -107,11 +95,10 @@ uv run data-collection run --repo-id you/pokemon-frames
 
 Iterates every video in `configs/video_sources.yaml` not already marked
 complete in the repo's `manifest.json`, streaming frames via `ffmpeg`
-(never writing video to local disk), validating each against that video's
-own reference patch, deduplicating near-identical frames, and uploading
-Parquet shards plus a contact-sheet preview PNG per batch. A crashed or
-interrupted run resumes at video granularity next time — already-complete
-videos are skipped.
+(never writing video to local disk), deduplicating near-identical frames,
+and uploading Parquet shards plus a contact-sheet preview PNG per batch. A
+crashed or interrupted run resumes mid-video from its last checkpoint
+(`--max-concurrent-videos` controls how many videos run in parallel).
 
 Exits nonzero if any video failed (check the JSON logs on stdout for
 `"message": "video_failed"` entries, and `manifest.json` in the dataset
@@ -126,12 +113,10 @@ identically run locally against a small registry for testing.
 configs/
   video_sources.yaml       # the registry -- populated by `curate`, read by `run`
   templates/
-    bank/                  # reference screenshots used to propose crop boxes
-    approved/              # per-video captured reference patches (+ preview scratch file)
+    approved/               # preview scratch file from the last curate run
 src/
-  data_collection/         # this pipeline: registry, matching, dedup, extract,
-                            # frame_validator, batcher, hf_uploader, curation,
-                            # pipeline, cli
+  data_collection/         # this pipeline: registry, dedup, extract,
+                            # batcher, hf_uploader, curation, pipeline, cli
   observability/           # shared logging/tracking/visualization -- used by
                             # every sub-project in this repo, not just this one
 tests/

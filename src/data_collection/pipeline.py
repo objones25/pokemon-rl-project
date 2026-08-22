@@ -1,5 +1,5 @@
-"""Orchestrate Phase B: per approved video, extract -> validate -> dedup ->
-batch -> upload, with resume-by-manifest and bounded retry on failure.
+"""Orchestrate Phase B: per approved video, extract -> dedup -> batch ->
+upload, with resume-by-manifest and bounded retry on failure.
 
 Videos are processed concurrently (PipelineDeps.max_concurrent_videos, default
 1 = sequential) via a thread pool -- the heavy per-video work (ffmpeg decode)
@@ -26,9 +26,7 @@ import numpy as np
 
 from data_collection.batcher import FrameBatcher, FrameRecord, batch_to_parquet
 from data_collection.dedup import PerceptualHashDeduper
-from data_collection.frame_validator import FrameValidator
 from data_collection.hf_uploader import HfUploader, Manifest
-from data_collection.matching import load_template_gray
 from data_collection.registry import VideoSource
 from observability.visualization import build_contact_sheet
 
@@ -91,7 +89,6 @@ def _checkpoint_progress(
     sampled: int,
     kept: int,
     dropped_dedup: int,
-    dropped_anomaly: int,
     shard_index: int,
 ) -> None:
     """Periodic checkpoint during a single video's (possibly hours-long)
@@ -106,7 +103,6 @@ def _checkpoint_progress(
         "sampled": sampled,
         "kept": kept,
         "dropped_dedup": dropped_dedup,
-        "dropped_anomaly": dropped_anomaly,
         "video_time_s": resume_seconds,
         "elapsed_wall_s": time.monotonic() - started_at,
     }
@@ -122,8 +118,6 @@ def _checkpoint_progress(
 def _process_video(
     video: VideoSource, deps: PipelineDeps, manifest: Manifest, manifest_lock: threading.Lock
 ) -> None:
-    reference_patch = load_template_gray(video.reference_patch_path)
-    validator = FrameValidator(reference_patch, baseline_score=video.match_confidence_baseline)
     deduper = PerceptualHashDeduper()
     batcher = FrameBatcher(batch_size=deps.batch_size)
 
@@ -142,8 +136,7 @@ def _process_video(
         )
 
     sampled = round(resume_seconds * deps.sample_fps)
-    kept = dropped_dedup = dropped_anomaly = 0
-    halted = False
+    kept = dropped_dedup = 0
     started_at = time.monotonic()
 
     for frame in deps.frame_source(video, resume_seconds):
@@ -158,27 +151,8 @@ def _process_video(
                 sampled,
                 kept,
                 dropped_dedup,
-                dropped_anomaly,
                 shard_index,
             )
-        result = validator.validate(frame)
-        # `halted` must be checked before `keep`: it's sticky once tripped
-        # and must stop the loop even on a frame that itself matches again
-        # after the crop/content has drifted. Checking `keep` first would
-        # `continue` past the halt on the very frame that trips it (the
-        # window only accumulates on keep=False frames), defeating the
-        # whole point of halting -- the video would burn compute on every
-        # remaining frame instead of stopping.
-        if result.halted:
-            dropped_anomaly += 1
-            halted = True
-            logger.warning(
-                "video_halted_on_anomaly_rate", extra={"video_id": video.video_id}
-            )
-            break
-        if not result.keep:
-            dropped_anomaly += 1
-            continue
         if deduper.is_duplicate(frame):
             dropped_dedup += 1
             continue
@@ -199,32 +173,24 @@ def _process_video(
         shard_index = _flush_batch(trailing, video.video_id, shard_index, deps)
 
     dedup_rejection_rate = dropped_dedup / sampled if sampled else 0.0
-    anomaly_drop_rate = dropped_anomaly / sampled if sampled else 0.0
     metrics = {
         "video_id": video.video_id,
         "sampled": sampled,
         "kept": kept,
         "dropped_dedup": dropped_dedup,
-        "dropped_anomaly": dropped_anomaly,
         "dedup_rejection_rate": dedup_rejection_rate,
-        "anomaly_drop_rate": anomaly_drop_rate,
-        "halted": halted,
     }
     # "video_processed" (not "video_complete"): this event fires whenever the
-    # frame loop finishes for any reason, including a halt or a zero-frame
-    # extraction -- both of which are about to be raised as failures below.
-    # Logging/reporting happens first so accurate counts reach Trackio even
-    # though the video will be marked failed, not complete.
+    # frame loop finishes for any reason, including a zero-frame extraction,
+    # which is about to be raised as a failure below. Logging/reporting
+    # happens first so accurate counts reach Trackio even though the video
+    # will be marked failed, not complete.
     logger.info("video_processed", extra=metrics)
     if deps.trackio_run is not None:
         deps.trackio_run.log(metrics)
 
     if sampled == 0:
         raise RuntimeError(f"no frames extracted for video {video.video_id}")
-    if halted:
-        raise RuntimeError(
-            f"video {video.video_id} halted: sustained anomaly rate exceeded threshold"
-        )
 
     # Save the final position too: if this attempt got cut off by an
     # exception on a *later* frame than the last periodic checkpoint (or

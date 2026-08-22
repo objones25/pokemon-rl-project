@@ -16,14 +16,11 @@ import os
 import shutil
 from pathlib import Path
 
-import cv2
 import pytest
 
 from data_collection import extract
 from data_collection.batcher import FrameBatcher, FrameRecord, batch_to_parquet
 from data_collection.dedup import PerceptualHashDeduper
-from data_collection.frame_validator import FrameValidator
-from data_collection.matching import load_template_gray
 
 pytestmark = pytest.mark.slow
 
@@ -44,18 +41,12 @@ def test_real_extraction_chain_produces_a_local_parquet_shard(tmp_path: Path) ->
     )
     assert len(frames) > 0
 
-    reference_path = tmp_path / "reference.png"
-    cv2.imwrite(str(reference_path), frames[0])
-    reference = load_template_gray(reference_path)
-
-    validator = FrameValidator(reference, baseline_score=1.0)
     deduper = PerceptualHashDeduper()
     batcher = FrameBatcher(batch_size=1000)
 
     kept_count = 0
     for i, frame in enumerate(frames):
-        result = validator.validate(frame)
-        if not result.keep or deduper.is_duplicate(frame):
+        if deduper.is_duplicate(frame):
             continue
         kept_count += 1
         batcher.add(

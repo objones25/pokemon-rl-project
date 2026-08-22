@@ -6,8 +6,6 @@ videos:
   crop_y: 0
   crop_w: 400
   crop_h: 360
-  reference_patch_path: configs/templates/approved/OHHSQxn_IOY.png
-  match_confidence_baseline: 1.0
 - video_id: uyHNAu2WoTE
   url: https://www.youtube.com/watch?v=uyHNAu2WoTE
   game: blue
@@ -15,8 +13,6 @@ videos:
   crop_y: 4
   crop_w: 1268
   crop_h: 716
-  reference_patch_path: configs/templates/approved/uyHNAu2WoTE.png
-  match_confidence_baseline: 1.0
 - video_id: WjHDuVA5k5A
   url: https://www.youtube.com/watch?v=WjHDuVA5k5A
   game: red
@@ -24,8 +20,6 @@ videos:
   crop_y: 0
   crop_w: 1920
   crop_h: 1080
-  reference_patch_path: configs/templates/approved/WjHDuVA5k5A.png
-  match_confidence_baseline: 1.0
 - video_id: oRRtP7C8W8s
   url: https://www.youtube.com/watch?v=oRRtP7C8W8s
   game: blue
@@ -33,8 +27,6 @@ videos:
   crop_y: 0
   crop_w: 2400
   crop_h: 2160
-  reference_patch_path: configs/templates/approved/oRRtP7C8W8s.png
-  match_confidence_baseline: 1.0
 - video_id: D1SrSFZrV7A
   url: https://www.youtube.com/watch?v=D1SrSFZrV7A
   game: red
@@ -42,8 +34,6 @@ videos:
   crop_y: 0
   crop_w: 2400
   crop_h: 2160
-  reference_patch_path: configs/templates/approved/D1SrSFZrV7A.png
-  match_confidence_baseline: 1.0
 - video_id: YW29l3jJXr4
   url: https://www.youtube.com/watch?v=YW29l3jJXr4
   game: blue
@@ -51,8 +41,6 @@ videos:
   crop_y: 0
   crop_w: 1280
   crop_h: 1152
-  reference_patch_path: configs/templates/approved/YW29l3jJXr4.png
-  match_confidence_baseline: 1.0
 - video_id: V6yBLNGIeBQ
   url: https://www.youtube.com/watch?v=V6yBLNGIeBQ
   game: red
@@ -60,5 +48,3 @@ videos:
   crop_y: 0
   crop_w: 1600
   crop_h: 1440
-  reference_patch_path: configs/templates/approved/V6yBLNGIeBQ.png
-  match_confidence_baseline: 1.0

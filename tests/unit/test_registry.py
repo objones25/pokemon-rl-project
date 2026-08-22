@@ -24,8 +24,6 @@ def test_load_registry_parses_valid_entries(tmp_path: Path) -> None:
                     "crop_y": 20,
                     "crop_w": 160,
                     "crop_h": 144,
-                    "reference_patch_path": "configs/templates/approved/abc123.png",
-                    "match_confidence_baseline": 0.999,
                 }
             ]
         },
@@ -42,8 +40,6 @@ def test_load_registry_parses_valid_entries(tmp_path: Path) -> None:
             crop_y=20,
             crop_w=160,
             crop_h=144,
-            reference_patch_path="configs/templates/approved/abc123.png",
-            match_confidence_baseline=0.999,
         )
     ]
 
@@ -69,8 +65,6 @@ def test_load_registry_rejects_invalid_game(tmp_path: Path) -> None:
                     "crop_y": 0,
                     "crop_w": 160,
                     "crop_h": 144,
-                    "reference_patch_path": "x.png",
-                    "match_confidence_baseline": 1.0,
                 }
             ]
         },
@@ -92,9 +86,7 @@ def test_load_registry_rejects_missing_field(tmp_path: Path) -> None:
                     "game": "red",
                     "crop_x": 0,
                     "crop_y": 0,
-                    "crop_w": 160,
-                    "crop_h": 144,
-                    # missing reference_patch_path and match_confidence_baseline
+                    # missing crop_w and crop_h
                 }
             ]
         },
@@ -115,8 +107,6 @@ def test_append_to_registry_adds_entry(tmp_path: Path) -> None:
         crop_y=5,
         crop_w=160,
         crop_h=144,
-        reference_patch_path="configs/templates/approved/def456.png",
-        match_confidence_baseline=1.0,
     )
 
     append_to_registry(path, new_source)
@@ -134,8 +124,6 @@ def test_append_to_registry_preserves_existing_entries(tmp_path: Path) -> None:
         crop_y=0,
         crop_w=160,
         crop_h=144,
-        reference_patch_path="configs/templates/approved/abc123.png",
-        match_confidence_baseline=1.0,
     )
     _write_yaml(path, {"videos": []})
     append_to_registry(path, first)
@@ -148,8 +136,6 @@ def test_append_to_registry_preserves_existing_entries(tmp_path: Path) -> None:
         crop_y=5,
         crop_w=160,
         crop_h=144,
-        reference_patch_path="configs/templates/approved/def456.png",
-        match_confidence_baseline=1.0,
     )
     append_to_registry(path, second)
 
