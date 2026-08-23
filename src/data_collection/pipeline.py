@@ -85,7 +85,15 @@ def _safe_trackio_log(deps: PipelineDeps, video: VideoSource, metrics: dict) -> 
     dependency -- an internal trackio failure (its global "current run"
     state getting invalidated under concurrent access from multiple
     pipeline worker threads, observed in practice) must never interrupt
-    real extraction work or trigger a needless retry."""
+    real extraction work or trigger a needless retry.
+
+    TODO: this currently just swallows a real, unfixed trackio bug --
+    every trackio.log() call has been observed to fail with "Call
+    trackio.init() before trackio.log()." shortly after a run starts, so
+    the live dashboard shows nothing. Root-cause and remove this
+    try/except once trackio's concurrent-logging issue is fixed upstream
+    or worked around (see the same TODO in observability/tracking.py).
+    """
     if deps.trackio_run is None:
         return
     try:

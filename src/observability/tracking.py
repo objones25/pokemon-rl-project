@@ -6,6 +6,15 @@ truth. `log`/`finish` swallow any exception from the underlying module
 rather than propagate: an internal trackio failure (e.g. its global
 "current run" state getting invalidated under concurrent access from
 multiple pipeline worker threads) must never fail real extraction work.
+
+TODO: this currently just swallows a real, unfixed trackio bug -- every
+trackio.log() call has been observed to fail with "Call trackio.init()
+before trackio.log()." shortly after a run starts (likely trackio's
+global "current run" state not being safe across the pipeline's
+concurrent worker threads), so the live dashboard shows nothing useful.
+Root-cause and remove this try/except once trackio's concurrent-logging
+issue is fixed upstream or worked around (see the same TODO in
+data_collection/pipeline.py).
 """
 
 from __future__ import annotations
