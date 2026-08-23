@@ -22,13 +22,14 @@ dependencies = [
 
 [project.scripts]
 data-collection = "data_collection.cli:main"
+contrastive-pretrain = "contrastive_pretrain.cli:main"
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/data_collection", "src/observability"]
+packages = ["src/data_collection", "src/observability", "src/contrastive_pretrain"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
