@@ -10,11 +10,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-import torch
-import torch.nn.functional as F
-from torchvision.io import ImageReadMode, decode_jpeg, encode_jpeg
-from torchvision.transforms.v2 import functional as TF
-
 
 @dataclass(frozen=True)
 class AugmentationConfig:
