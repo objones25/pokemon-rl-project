@@ -146,3 +146,21 @@ def _apply_jpeg_artifact(frame: torch.Tensor, quality: int) -> torch.Tensor:
 def random_jpeg_artifact(frame: torch.Tensor, config: AugmentationConfig, rng: torch.Generator) -> torch.Tensor:
     quality = _resolve_jpeg_quality(config, rng)
     return _apply_jpeg_artifact(frame, quality)
+
+
+def augment_view(frame: torch.Tensor, config: AugmentationConfig, rng: torch.Generator) -> torch.Tensor:
+    view = random_translate(frame, config, rng)
+    view = random_crop_resize(view, config, rng)
+    view = random_brightness_contrast(view, config, rng)
+    view = random_gaussian_noise(view, config, rng)
+    view = random_gaussian_blur(view, config, rng)
+    view = random_jpeg_artifact(view, config, rng)
+    return view
+
+
+def make_pair(
+    frame: torch.Tensor, config: AugmentationConfig, rng: torch.Generator
+) -> tuple[torch.Tensor, torch.Tensor]:
+    view_a = augment_view(frame, config, rng)
+    view_b = augment_view(frame, config, rng)
+    return view_a, view_b

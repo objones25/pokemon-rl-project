@@ -281,3 +281,43 @@ def test_random_jpeg_artifact_preserves_shape_and_dtype() -> None:
 
     assert result.shape == frame.shape
     assert result.dtype == frame.dtype
+
+
+from contrastive_pretrain.augmentation import augment_view, make_pair
+
+
+def test_augment_view_preserves_shape_and_dtype() -> None:
+    frame = torch.zeros((1, 144, 160), dtype=torch.uint8)
+    frame[0, 70:74, 78:82] = 255
+    config = AugmentationConfig()
+    rng = torch.Generator().manual_seed(14)
+
+    result = augment_view(frame, config, rng)
+
+    assert result.shape == frame.shape
+    assert result.dtype == frame.dtype
+
+
+def test_make_pair_produces_two_independently_sampled_views() -> None:
+    frame = torch.zeros((1, 144, 160), dtype=torch.uint8)
+    frame[0, 70:74, 78:82] = 255
+    config = AugmentationConfig()
+    rng = torch.Generator().manual_seed(15)
+
+    view_a, view_b = make_pair(frame, config, rng)
+
+    assert view_a.shape == frame.shape
+    assert view_b.shape == frame.shape
+    assert not torch.equal(view_a, view_b)
+
+
+def test_make_pair_is_reproducible_given_the_same_seed() -> None:
+    frame = torch.zeros((1, 144, 160), dtype=torch.uint8)
+    frame[0, 70:74, 78:82] = 255
+    config = AugmentationConfig()
+
+    view_a1, view_b1 = make_pair(frame, config, torch.Generator().manual_seed(42))
+    view_a2, view_b2 = make_pair(frame, config, torch.Generator().manual_seed(42))
+
+    assert torch.equal(view_a1, view_a2)
+    assert torch.equal(view_b1, view_b2)
