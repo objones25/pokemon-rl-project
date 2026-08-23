@@ -27,28 +27,11 @@ from data_collection.batcher import FrameBatcher, FrameRecord, batch_to_parquet
 from data_collection.dedup import PerceptualHashDeduper
 from data_collection.hf_uploader import HfUploader, Manifest
 from data_collection.registry import VideoSource
+from data_collection.retry import retry_with_backoff
 from observability.tracking import NullTrackioRun, TrackioRunLike
 from observability.visualization import build_contact_sheet
 
 logger = logging.getLogger(__name__)
-
-
-def retry_with_backoff(
-    func: Callable[[], None],
-    max_retries: int,
-    base_delay: float,
-    sleep_func: Callable[[float], None],
-) -> None:
-    attempt = 0
-    while True:
-        try:
-            func()
-            return
-        except Exception:
-            attempt += 1
-            if attempt >= max_retries:
-                raise
-            sleep_func(base_delay * (2 ** (attempt - 1)))
 
 
 @dataclass(frozen=True)
@@ -70,9 +53,11 @@ class PipelineDeps:
     sleep_func: Callable[[float], None] = field(default=time.sleep)
     sample_fps: float = 2.0
     max_concurrent_videos: int = 1
-
-
-_PROGRESS_CHECKPOINT_INTERVAL_SAMPLES = 200
+    # Every checkpoint re-uploads the full manifest.json as its own HF Hub
+    # commit, so too small an interval burns through the Hub's hourly commit
+    # quota fast on a long video. 5000 samples = ~41 min of video at
+    # sample_fps=2.0.
+    checkpoint_interval_samples: int = 5000
 
 
 def _checkpoint_progress(
@@ -140,7 +125,7 @@ def _process_video(
 
     for frame in deps.frame_source(video, resume_seconds):
         sampled += 1
-        if sampled % _PROGRESS_CHECKPOINT_INTERVAL_SAMPLES == 0:
+        if sampled % deps.checkpoint_interval_samples == 0:
             _checkpoint_progress(
                 video,
                 deps,

@@ -1,13 +1,11 @@
 import logging
 
 import numpy as np
-import pytest
 
 from data_collection.hf_uploader import HfUploader, Manifest
 from data_collection.pipeline import (
     PipelineDeps,
     PipelineResult,
-    retry_with_backoff,
     run_pipeline,
 )
 from data_collection.registry import VideoSource
@@ -71,7 +69,12 @@ def test_process_video_logs_periodic_progress_for_long_videos(caplog) -> None:
 
     client = FakeHfClient()
     uploader = HfUploader(client, repo_id="me/pokemon-frames")
-    deps = PipelineDeps(frame_source=frame_source, uploader=uploader, batch_size=1000)
+    deps = PipelineDeps(
+        frame_source=frame_source,
+        uploader=uploader,
+        batch_size=1000,
+        checkpoint_interval_samples=200,
+    )
 
     with caplog.at_level(logging.INFO, logger="data_collection.pipeline"):
         run_pipeline([source], deps)
@@ -225,6 +228,7 @@ def test_run_pipeline_resumes_from_last_checkpoint_after_failure() -> None:
         frame_source=frame_source,
         uploader=uploader,
         batch_size=1000,
+        checkpoint_interval_samples=200,
         max_retries=2,
         sleep_func=lambda _: None,
     )
@@ -263,26 +267,3 @@ def test_run_pipeline_processes_multiple_videos_concurrently() -> None:
         # this is the thing a manifest-save race between threads would lose.
         assert manifest.is_complete(source.video_id) is True
         assert any(path.startswith(f"shards/{source.video_id}/") for path in client.uploads)
-
-
-def test_retry_with_backoff_succeeds_after_transient_failures() -> None:
-    attempts = {"count": 0}
-    sleeps: list[float] = []
-
-    def flaky() -> None:
-        attempts["count"] += 1
-        if attempts["count"] < 3:
-            raise RuntimeError("transient")
-
-    retry_with_backoff(flaky, max_retries=3, base_delay=1.0, sleep_func=sleeps.append)
-
-    assert attempts["count"] == 3
-    assert sleeps == [1.0, 2.0]
-
-
-def test_retry_with_backoff_raises_after_exhausting_retries() -> None:
-    def always_fails() -> None:
-        raise RuntimeError("permanent")
-
-    with pytest.raises(RuntimeError, match="permanent"):
-        retry_with_backoff(always_fails, max_retries=2, base_delay=1.0, sleep_func=lambda _: None)

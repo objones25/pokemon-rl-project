@@ -71,14 +71,27 @@ def curate(url: str, game: str, registry: Path, approved_dir: Path) -> None:
 @main.command()
 @click.option("--repo-id", required=True, help="HF dataset repo, e.g. me/pokemon-frames")
 @click.option("--registry", type=click.Path(path_type=Path), default=_DEFAULT_REGISTRY)
-@click.option("--batch-size", type=int, default=500)
+@click.option("--batch-size", type=int, default=2000)
+@click.option(
+    "--checkpoint-interval",
+    type=int,
+    default=5000,
+    help="Sampled frames between progress checkpoints (each one commits manifest.json to the "
+    "Hub -- too small a value burns through HF's hourly commit quota on a long video).",
+)
 @click.option(
     "--max-concurrent-videos",
     type=int,
     default=1,
     help="Process this many videos in parallel (each has its own ffmpeg subprocess).",
 )
-def run(repo_id: str, registry: Path, batch_size: int, max_concurrent_videos: int) -> None:
+def run(
+    repo_id: str,
+    registry: Path,
+    batch_size: int,
+    checkpoint_interval: int,
+    max_concurrent_videos: int,
+) -> None:
     """Phase B: unattended extraction across all approved, incomplete videos."""
     if get_token() is None:
         raise click.ClickException(
@@ -109,6 +122,7 @@ def run(repo_id: str, registry: Path, batch_size: int, max_concurrent_videos: in
         uploader=uploader,
         trackio_run=trackio_run,
         batch_size=batch_size,
+        checkpoint_interval_samples=checkpoint_interval,
         max_concurrent_videos=max_concurrent_videos,
     )
     result = pipeline.run_pipeline(sources, deps)
