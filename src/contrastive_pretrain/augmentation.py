@@ -94,3 +94,19 @@ def random_brightness_contrast(
 ) -> torch.Tensor:
     brightness_factor, contrast_factor = _resolve_brightness_contrast(config, rng)
     return _apply_brightness_contrast(frame, brightness_factor, contrast_factor)
+
+
+def _resolve_noise_sigma(config: AugmentationConfig, rng: torch.Generator) -> float:
+    return torch.empty(1).uniform_(0.0, config.noise_sigma_max, generator=rng).item()
+
+
+def _apply_gaussian_noise(frame: torch.Tensor, sigma: float, rng: torch.Generator) -> torch.Tensor:
+    if sigma <= 0:
+        return frame.clone()
+    noise = torch.randn(frame.shape, generator=rng) * sigma
+    return (frame.to(torch.float32) + noise).clamp(0, 255).to(torch.uint8)
+
+
+def random_gaussian_noise(frame: torch.Tensor, config: AugmentationConfig, rng: torch.Generator) -> torch.Tensor:
+    sigma = _resolve_noise_sigma(config, rng)
+    return _apply_gaussian_noise(frame, sigma, rng)

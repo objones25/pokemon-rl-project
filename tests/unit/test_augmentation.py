@@ -135,3 +135,49 @@ def test_random_brightness_contrast_preserves_shape_and_dtype() -> None:
 
     assert result.shape == frame.shape
     assert result.dtype == frame.dtype
+
+
+from contrastive_pretrain.augmentation import (
+    _apply_gaussian_noise,
+    _resolve_noise_sigma,
+    random_gaussian_noise,
+)
+
+
+def test_resolve_noise_sigma_stays_within_configured_bound() -> None:
+    config = AugmentationConfig(noise_sigma_max=8.0)
+    rng = torch.Generator().manual_seed(6)
+
+    for _ in range(1000):
+        sigma = _resolve_noise_sigma(config, rng)
+        assert 0.0 <= sigma <= 8.0
+
+
+def test_apply_gaussian_noise_zero_sigma_is_identity() -> None:
+    frame = torch.full((1, 144, 160), 100, dtype=torch.uint8)
+    rng = torch.Generator().manual_seed(7)
+
+    result = _apply_gaussian_noise(frame, sigma=0.0, rng=rng)
+
+    assert torch.equal(result, frame)
+
+
+def test_apply_gaussian_noise_std_matches_requested_sigma() -> None:
+    frame = torch.full((1, 144, 160), 128, dtype=torch.uint8)
+    rng = torch.Generator().manual_seed(8)
+
+    result = _apply_gaussian_noise(frame, sigma=8.0, rng=rng)
+
+    diff_std = (result.to(torch.float32) - frame.to(torch.float32)).std().item()
+    assert 6.0 <= diff_std <= 10.0
+
+
+def test_random_gaussian_noise_preserves_shape_and_dtype() -> None:
+    frame = torch.full((1, 144, 160), 100, dtype=torch.uint8)
+    config = AugmentationConfig()
+    rng = torch.Generator().manual_seed(9)
+
+    result = random_gaussian_noise(frame, config, rng)
+
+    assert result.shape == frame.shape
+    assert result.dtype == frame.dtype
