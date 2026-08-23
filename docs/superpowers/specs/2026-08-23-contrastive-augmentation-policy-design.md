@@ -70,6 +70,21 @@ will apply to frames pulled from the data-collection pipeline's output.
   already stores per-frame `video_id` and source timestamp, so this remains
   available as a future supplementary signal once the single-frame policy
   is validated (see Open Questions) — not building it now (YAGNI).
+- **Pairs, not triplets**: Triplet loss (anchor/positive/negative) was
+  considered and rejected. It requires an explicit negative-mining step —
+  deciding which other frame is "different enough" to serve as the
+  negative — that neither candidate training objective needs. SimCLR's
+  InfoNCE/NT-Xent treats every other sample in the minibatch as an
+  implicit negative for a given pair (batch_size-1 negatives "for free,"
+  versus one negative per triplet), which is a large part of why
+  InfoNCE-style losses superseded triplet loss for representation learning.
+  BYOL uses no negatives at all, avoiding the mining problem entirely via a
+  momentum target network and stop-gradient — precisely why it was
+  attractive here. Triplets would add negative-mining design surface (risk
+  of picking a near-duplicate frame as a "negative" from unlabeled
+  gameplay video) in service of a loss neither deferred candidate uses.
+  The pair-construction interface below produces two augmented views,
+  matching both.
 
 ## Policy
 
