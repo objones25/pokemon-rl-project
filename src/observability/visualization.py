@@ -18,3 +18,17 @@ def build_contact_sheet(frames: list[np.ndarray], cols: int = 8) -> np.ndarray:
         sheet[row * height : (row + 1) * height, col * width : (col + 1) * width] = frame
 
     return sheet
+
+
+def build_pair_preview(original: np.ndarray, view_a: np.ndarray, view_b: np.ndarray) -> np.ndarray:
+    """Concatenate three images horizontally: original | view_a | view_b."""
+    return np.concatenate([original, view_a, view_b], axis=1)
+
+
+def build_augmentation_contact_sheet(triples: list[tuple[np.ndarray, np.ndarray, np.ndarray]]) -> np.ndarray:
+    """Stack augmentation pair previews vertically."""
+    if not triples:
+        return np.empty((0, 0), dtype=np.uint8)
+
+    rows = [build_pair_preview(original, view_a, view_b) for original, view_a, view_b in triples]
+    return np.concatenate(rows, axis=0)

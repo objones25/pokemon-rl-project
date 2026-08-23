@@ -1,6 +1,10 @@
 import numpy as np
 
-from observability.visualization import build_contact_sheet
+from observability.visualization import (
+    build_augmentation_contact_sheet,
+    build_contact_sheet,
+    build_pair_preview,
+)
 
 
 def test_build_contact_sheet_grid_dimensions() -> None:
@@ -14,4 +18,37 @@ def test_build_contact_sheet_grid_dimensions() -> None:
 
 def test_build_contact_sheet_empty_input_returns_empty_array() -> None:
     sheet = build_contact_sheet([], cols=4)
+    assert sheet.size == 0
+
+
+def test_build_pair_preview_concatenates_horizontally() -> None:
+    original = np.full((144, 160), 10, dtype=np.uint8)
+    view_a = np.full((144, 160), 20, dtype=np.uint8)
+    view_b = np.full((144, 160), 30, dtype=np.uint8)
+
+    preview = build_pair_preview(original, view_a, view_b)
+
+    assert preview.shape == (144, 480)
+    assert np.all(preview[:, :160] == 10)
+    assert np.all(preview[:, 160:320] == 20)
+    assert np.all(preview[:, 320:] == 30)
+
+
+def test_build_augmentation_contact_sheet_stacks_rows_vertically() -> None:
+    triples = [
+        (
+            np.full((144, 160), i, dtype=np.uint8),
+            np.full((144, 160), i + 1, dtype=np.uint8),
+            np.full((144, 160), i + 2, dtype=np.uint8),
+        )
+        for i in range(3)
+    ]
+
+    sheet = build_augmentation_contact_sheet(triples)
+
+    assert sheet.shape == (144 * 3, 480)
+
+
+def test_build_augmentation_contact_sheet_empty_input_returns_empty_array() -> None:
+    sheet = build_augmentation_contact_sheet([])
     assert sheet.size == 0
