@@ -85,11 +85,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-import torch
-import torch.nn.functional as F
-from torchvision.io import ImageReadMode, decode_jpeg, encode_jpeg
-from torchvision.transforms.v2 import functional as TF
-
 
 @dataclass(frozen=True)
 class AugmentationConfig:
@@ -223,6 +218,20 @@ Run: `uv run pytest tests/unit/test_augmentation.py -v`
 Expected: FAIL with `ImportError` (names not yet defined)
 
 - [ ] **Step 3: Implement the transforms**
+
+Add these imports at the top of `src/contrastive_pretrain/augmentation.py`,
+directly below `from dataclasses import dataclass` (this task is the first
+to need `torch`/`torchvision` — only import what a task actually uses,
+never front-load imports a later task will consume, to avoid dead-import
+lint failures on intermediate commits):
+
+```python
+import torch
+import torch.nn.functional as F
+from torchvision.transforms.v2 import functional as TF
+```
+
+Then append the transforms:
 
 ```python
 # append to src/contrastive_pretrain/augmentation.py
@@ -676,6 +685,16 @@ Run: `uv run pytest tests/unit/test_augmentation.py -v`
 Expected: FAIL with `ImportError`
 
 - [ ] **Step 3: Implement the transform**
+
+Add this import at the top of `src/contrastive_pretrain/augmentation.py`,
+below the existing `torch`/`torchvision` imports (this task is the first
+to need `torchvision.io`):
+
+```python
+from torchvision.io import ImageReadMode, decode_jpeg, encode_jpeg
+```
+
+Then append the transform:
 
 ```python
 # append to src/contrastive_pretrain/augmentation.py
