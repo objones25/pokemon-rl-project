@@ -19,7 +19,6 @@ from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Protocol
 
 import cv2
 import numpy as np
@@ -28,14 +27,10 @@ from data_collection.batcher import FrameBatcher, FrameRecord, batch_to_parquet
 from data_collection.dedup import PerceptualHashDeduper
 from data_collection.hf_uploader import HfUploader, Manifest
 from data_collection.registry import VideoSource
+from observability.tracking import NullTrackioRun, TrackioRunLike
 from observability.visualization import build_contact_sheet
 
 logger = logging.getLogger(__name__)
-
-
-class TrackioRunLike(Protocol):
-    def log(self, metrics: dict) -> None: ...
-    def finish(self) -> None: ...
 
 
 def retry_with_backoff(
@@ -69,7 +64,7 @@ class PipelineDeps:
     # content on a resumed video, via ffmpeg's -ss (see extract.stream_frames).
     frame_source: Callable[[VideoSource, float], Iterator[np.ndarray]]
     uploader: HfUploader
-    trackio_run: TrackioRunLike | None = None
+    trackio_run: TrackioRunLike = field(default_factory=NullTrackioRun)
     batch_size: int = 500
     max_retries: int = 3
     sleep_func: Callable[[float], None] = field(default=time.sleep)
@@ -78,30 +73,6 @@ class PipelineDeps:
 
 
 _PROGRESS_CHECKPOINT_INTERVAL_SAMPLES = 200
-
-
-def _safe_trackio_log(deps: PipelineDeps, video: VideoSource, metrics: dict) -> None:
-    """Trackio is a best-effort live dashboard, not a correctness
-    dependency -- an internal trackio failure (its global "current run"
-    state getting invalidated under concurrent access from multiple
-    pipeline worker threads, observed in practice) must never interrupt
-    real extraction work or trigger a needless retry.
-
-    TODO: this currently just swallows a real, unfixed trackio bug --
-    every trackio.log() call has been observed to fail with "Call
-    trackio.init() before trackio.log()." shortly after a run starts, so
-    the live dashboard shows nothing. Root-cause and remove this
-    try/except once trackio's concurrent-logging issue is fixed upstream
-    or worked around (see the same TODO in observability/tracking.py).
-    """
-    if deps.trackio_run is None:
-        return
-    try:
-        deps.trackio_run.log(metrics)
-    except Exception as exc:
-        logger.warning(
-            "trackio_log_failed", extra={"video_id": video.video_id, "reason": str(exc)}
-        )
 
 
 def _checkpoint_progress(
@@ -140,7 +111,7 @@ def _checkpoint_progress(
         manifest.save_progress(video.video_id, resume_seconds, shard_index)
         deps.uploader.save_manifest(manifest)
 
-    _safe_trackio_log(deps, video, metrics)
+    deps.trackio_run.log(metrics)
 
 
 def _process_video(
@@ -214,7 +185,7 @@ def _process_video(
     # happens first so accurate counts reach Trackio even though the video
     # will be marked failed, not complete.
     logger.info("video_processed", extra=metrics)
-    _safe_trackio_log(deps, video, metrics)
+    deps.trackio_run.log(metrics)
 
     if sampled == 0:
         raise RuntimeError(f"no frames extracted for video {video.video_id}")
@@ -304,7 +275,6 @@ def run_pipeline(registry: list[VideoSource], deps: PipelineDeps) -> PipelineRes
                 else:
                     failed += 1
 
-    if deps.trackio_run is not None:
-        deps.trackio_run.finish()
+    deps.trackio_run.finish()
 
     return PipelineResult(completed=completed, failed=failed)
