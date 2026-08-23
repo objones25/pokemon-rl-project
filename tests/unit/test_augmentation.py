@@ -233,3 +233,51 @@ def test_random_gaussian_blur_preserves_shape_and_dtype() -> None:
 
     assert result.shape == frame.shape
     assert result.dtype == frame.dtype
+
+
+from contrastive_pretrain.augmentation import (
+    _apply_jpeg_artifact,
+    _resolve_jpeg_quality,
+    random_jpeg_artifact,
+)
+
+
+def test_resolve_jpeg_quality_stays_within_configured_bounds() -> None:
+    config = AugmentationConfig(jpeg_quality_min=60, jpeg_quality_max=95)
+    rng = torch.Generator().manual_seed(12)
+
+    for _ in range(1000):
+        quality = _resolve_jpeg_quality(config, rng)
+        assert 60 <= quality <= 95
+
+
+def test_apply_jpeg_artifact_preserves_shape_and_dtype() -> None:
+    frame = torch.zeros((1, 144, 160), dtype=torch.uint8)
+    frame[0, 70:74, 78:82] = 255
+
+    result = _apply_jpeg_artifact(frame, quality=80)
+
+    assert result.shape == frame.shape
+    assert result.dtype == frame.dtype
+
+
+def test_apply_jpeg_artifact_at_high_quality_stays_close_to_original() -> None:
+    frame = torch.zeros((1, 144, 160), dtype=torch.uint8)
+    frame[0, 70:74, 78:82] = 255
+
+    result = _apply_jpeg_artifact(frame, quality=95)
+
+    diff = (result.to(torch.int16) - frame.to(torch.int16)).abs()
+    assert diff.to(torch.float32).mean().item() < 5.0
+
+
+def test_random_jpeg_artifact_preserves_shape_and_dtype() -> None:
+    frame = torch.zeros((1, 144, 160), dtype=torch.uint8)
+    frame[0, 70:74, 78:82] = 255
+    config = AugmentationConfig()
+    rng = torch.Generator().manual_seed(13)
+
+    result = random_jpeg_artifact(frame, config, rng)
+
+    assert result.shape == frame.shape
+    assert result.dtype == frame.dtype

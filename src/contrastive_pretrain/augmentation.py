@@ -12,6 +12,7 @@ from dataclasses import dataclass
 
 import torch
 import torch.nn.functional as F
+from torchvision.io import ImageReadMode, decode_jpeg, encode_jpeg
 from torchvision.transforms.v2 import functional as TF
 
 
@@ -131,3 +132,17 @@ def random_gaussian_blur(frame: torch.Tensor, config: AugmentationConfig, rng: t
     sigma = _resolve_blur_sigma(config, rng)
     kernel_size = _resolve_blur_kernel(config)
     return _apply_gaussian_blur(frame, sigma, kernel_size)
+
+
+def _resolve_jpeg_quality(config: AugmentationConfig, rng: torch.Generator) -> int:
+    return int(torch.randint(config.jpeg_quality_min, config.jpeg_quality_max + 1, (1,), generator=rng).item())
+
+
+def _apply_jpeg_artifact(frame: torch.Tensor, quality: int) -> torch.Tensor:
+    encoded = encode_jpeg(frame, quality=quality)
+    return decode_jpeg(encoded, mode=ImageReadMode.GRAY)
+
+
+def random_jpeg_artifact(frame: torch.Tensor, config: AugmentationConfig, rng: torch.Generator) -> torch.Tensor:
+    quality = _resolve_jpeg_quality(config, rng)
+    return _apply_jpeg_artifact(frame, quality)
