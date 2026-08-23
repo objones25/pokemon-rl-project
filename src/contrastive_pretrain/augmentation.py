@@ -10,6 +10,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+import torch
+import torch.nn.functional as F
+from torchvision.transforms.v2 import functional as TF
+
 
 @dataclass(frozen=True)
 class AugmentationConfig:
@@ -22,3 +26,49 @@ class AugmentationConfig:
     blur_kernel_size: int = 3
     jpeg_quality_min: int = 60
     jpeg_quality_max: int = 95
+
+
+def _resolve_translate_offset(config: AugmentationConfig, rng: torch.Generator) -> tuple[int, int]:
+    bound = config.max_translate_px
+    dy = int(torch.randint(-bound, bound + 1, (1,), generator=rng).item())
+    dx = int(torch.randint(-bound, bound + 1, (1,), generator=rng).item())
+    return dy, dx
+
+
+def _apply_translate(frame: torch.Tensor, dy: int, dx: int, max_px: int) -> torch.Tensor:
+    padded = F.pad(frame, (max_px, max_px, max_px, max_px), mode="replicate")
+    h, w = frame.shape[-2:]
+    y0 = max_px - dy
+    x0 = max_px - dx
+    return padded[..., y0 : y0 + h, x0 : x0 + w]
+
+
+def random_translate(frame: torch.Tensor, config: AugmentationConfig, rng: torch.Generator) -> torch.Tensor:
+    dy, dx = _resolve_translate_offset(config, rng)
+    return _apply_translate(frame, dy, dx, config.max_translate_px)
+
+
+def _resolve_crop_box(
+    frame_shape: tuple[int, int], config: AugmentationConfig, rng: torch.Generator
+) -> tuple[int, int, int, int]:
+    h, w = frame_shape
+    area_fraction = torch.empty(1).uniform_(config.crop_min_area_fraction, 1.0, generator=rng).item()
+    scale = area_fraction**0.5
+    crop_h = max(1, round(h * scale))
+    crop_w = max(1, round(w * scale))
+    max_y = h - crop_h
+    max_x = w - crop_w
+    y = int(torch.randint(0, max_y + 1, (1,), generator=rng).item()) if max_y > 0 else 0
+    x = int(torch.randint(0, max_x + 1, (1,), generator=rng).item()) if max_x > 0 else 0
+    return y, x, crop_h, crop_w
+
+
+def _apply_crop_resize(frame: torch.Tensor, y: int, x: int, crop_h: int, crop_w: int) -> torch.Tensor:
+    h, w = frame.shape[-2:]
+    cropped = frame[..., y : y + crop_h, x : x + crop_w]
+    return TF.resize(cropped, [h, w], antialias=True)
+
+
+def random_crop_resize(frame: torch.Tensor, config: AugmentationConfig, rng: torch.Generator) -> torch.Tensor:
+    y, x, crop_h, crop_w = _resolve_crop_box(frame.shape[-2:], config, rng)
+    return _apply_crop_resize(frame, y, x, crop_h, crop_w)
