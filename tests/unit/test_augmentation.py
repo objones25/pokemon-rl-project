@@ -181,3 +181,55 @@ def test_random_gaussian_noise_preserves_shape_and_dtype() -> None:
 
     assert result.shape == frame.shape
     assert result.dtype == frame.dtype
+
+
+from contrastive_pretrain.augmentation import (
+    _apply_gaussian_blur,
+    _resolve_blur_kernel,
+    _resolve_blur_sigma,
+    random_gaussian_blur,
+)
+
+
+def test_resolve_blur_sigma_stays_within_configured_bound() -> None:
+    config = AugmentationConfig(blur_sigma_max=0.8)
+    rng = torch.Generator().manual_seed(10)
+
+    for _ in range(1000):
+        sigma = _resolve_blur_sigma(config, rng)
+        assert 0.0 <= sigma <= 0.8
+
+
+def test_resolve_blur_kernel_is_always_odd() -> None:
+    assert _resolve_blur_kernel(AugmentationConfig(blur_kernel_size=3)) == 3
+    assert _resolve_blur_kernel(AugmentationConfig(blur_kernel_size=4)) == 5
+
+
+def test_apply_gaussian_blur_zero_sigma_is_identity() -> None:
+    frame = torch.full((1, 144, 160), 100, dtype=torch.uint8)
+
+    result = _apply_gaussian_blur(frame, sigma=0.0, kernel_size=3)
+
+    assert torch.equal(result, frame)
+
+
+def test_apply_gaussian_blur_preserves_shape_and_dtype() -> None:
+    frame = torch.zeros((1, 144, 160), dtype=torch.uint8)
+    frame[0, 70:74, 78:82] = 255
+
+    result = _apply_gaussian_blur(frame, sigma=0.8, kernel_size=3)
+
+    assert result.shape == frame.shape
+    assert result.dtype == frame.dtype
+
+
+def test_random_gaussian_blur_preserves_shape_and_dtype() -> None:
+    frame = torch.zeros((1, 144, 160), dtype=torch.uint8)
+    frame[0, 70:74, 78:82] = 255
+    config = AugmentationConfig()
+    rng = torch.Generator().manual_seed(11)
+
+    result = random_gaussian_blur(frame, config, rng)
+
+    assert result.shape == frame.shape
+    assert result.dtype == frame.dtype

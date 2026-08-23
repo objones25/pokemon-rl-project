@@ -110,3 +110,24 @@ def _apply_gaussian_noise(frame: torch.Tensor, sigma: float, rng: torch.Generato
 def random_gaussian_noise(frame: torch.Tensor, config: AugmentationConfig, rng: torch.Generator) -> torch.Tensor:
     sigma = _resolve_noise_sigma(config, rng)
     return _apply_gaussian_noise(frame, sigma, rng)
+
+
+def _resolve_blur_sigma(config: AugmentationConfig, rng: torch.Generator) -> float:
+    return torch.empty(1).uniform_(0.0, config.blur_sigma_max, generator=rng).item()
+
+
+def _resolve_blur_kernel(config: AugmentationConfig) -> int:
+    kernel = config.blur_kernel_size
+    return kernel if kernel % 2 == 1 else kernel + 1
+
+
+def _apply_gaussian_blur(frame: torch.Tensor, sigma: float, kernel_size: int) -> torch.Tensor:
+    if sigma <= 0:
+        return frame.clone()
+    return TF.gaussian_blur(frame, [kernel_size, kernel_size], [sigma, sigma])
+
+
+def random_gaussian_blur(frame: torch.Tensor, config: AugmentationConfig, rng: torch.Generator) -> torch.Tensor:
+    sigma = _resolve_blur_sigma(config, rng)
+    kernel_size = _resolve_blur_kernel(config)
+    return _apply_gaussian_blur(frame, sigma, kernel_size)
