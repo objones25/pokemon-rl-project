@@ -2,10 +2,13 @@ import torch
 
 from contrastive_pretrain.augmentation import (
     AugmentationConfig,
+    _apply_brightness_contrast,
     _apply_crop_resize,
     _apply_translate,
+    _resolve_brightness_contrast,
     _resolve_crop_box,
     _resolve_translate_offset,
+    random_brightness_contrast,
     random_crop_resize,
     random_translate,
 )
@@ -90,6 +93,45 @@ def test_random_crop_resize_preserves_shape_and_dtype() -> None:
     rng = torch.Generator().manual_seed(3)
 
     result = random_crop_resize(frame, config, rng)
+
+    assert result.shape == frame.shape
+    assert result.dtype == frame.dtype
+
+
+def test_resolve_brightness_contrast_stays_within_configured_range() -> None:
+    config = AugmentationConfig(brightness_range=0.15, contrast_range=0.15)
+    rng = torch.Generator().manual_seed(4)
+
+    for _ in range(1000):
+        brightness_factor, contrast_factor = _resolve_brightness_contrast(config, rng)
+        assert 0.85 <= brightness_factor <= 1.15
+        assert 0.85 <= contrast_factor <= 1.15
+
+
+def test_apply_brightness_contrast_on_solid_frame_scales_by_brightness_factor() -> None:
+    frame = torch.full((1, 144, 160), 100, dtype=torch.uint8)
+
+    result = _apply_brightness_contrast(frame, brightness_factor=1.2, contrast_factor=1.0)
+
+    # A uniform frame's own mean equals its value, so contrast (which blends
+    # toward that mean) is a no-op here; only brightness scaling shows up.
+    assert torch.all(result == 120)
+
+
+def test_apply_brightness_contrast_clips_to_valid_pixel_range() -> None:
+    frame = torch.full((1, 144, 160), 250, dtype=torch.uint8)
+
+    result = _apply_brightness_contrast(frame, brightness_factor=1.15, contrast_factor=1.0)
+
+    assert torch.all(result == 255)
+
+
+def test_random_brightness_contrast_preserves_shape_and_dtype() -> None:
+    frame = torch.full((1, 144, 160), 100, dtype=torch.uint8)
+    config = AugmentationConfig()
+    rng = torch.Generator().manual_seed(5)
+
+    result = random_brightness_contrast(frame, config, rng)
 
     assert result.shape == frame.shape
     assert result.dtype == frame.dtype

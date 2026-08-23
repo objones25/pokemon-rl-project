@@ -72,3 +72,25 @@ def _apply_crop_resize(frame: torch.Tensor, y: int, x: int, crop_h: int, crop_w:
 def random_crop_resize(frame: torch.Tensor, config: AugmentationConfig, rng: torch.Generator) -> torch.Tensor:
     y, x, crop_h, crop_w = _resolve_crop_box(frame.shape[-2:], config, rng)
     return _apply_crop_resize(frame, y, x, crop_h, crop_w)
+
+
+def _resolve_brightness_contrast(config: AugmentationConfig, rng: torch.Generator) -> tuple[float, float]:
+    brightness_factor = (
+        torch.empty(1).uniform_(1 - config.brightness_range, 1 + config.brightness_range, generator=rng).item()
+    )
+    contrast_factor = (
+        torch.empty(1).uniform_(1 - config.contrast_range, 1 + config.contrast_range, generator=rng).item()
+    )
+    return brightness_factor, contrast_factor
+
+
+def _apply_brightness_contrast(frame: torch.Tensor, brightness_factor: float, contrast_factor: float) -> torch.Tensor:
+    adjusted = TF.adjust_brightness(frame, brightness_factor)
+    return TF.adjust_contrast(adjusted, contrast_factor)
+
+
+def random_brightness_contrast(
+    frame: torch.Tensor, config: AugmentationConfig, rng: torch.Generator
+) -> torch.Tensor:
+    brightness_factor, contrast_factor = _resolve_brightness_contrast(config, rng)
+    return _apply_brightness_contrast(frame, brightness_factor, contrast_factor)
