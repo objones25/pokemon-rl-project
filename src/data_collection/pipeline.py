@@ -241,7 +241,7 @@ def _run_one_video(
             base_delay=1.0,
             sleep_func=deps.sleep_func,
         )
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 -- must catch whatever a video's processing raises
         logger.error("video_failed", extra={"video_id": video.video_id, "reason": str(exc)})
         with manifest_lock:
             manifest.mark_failed(video.video_id, str(exc))

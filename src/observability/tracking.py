@@ -45,13 +45,13 @@ class TrackioRun:
     def log(self, metrics: dict) -> None:
         try:
             self._run.log(metrics)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 -- must swallow any trackio failure, whatever its type
             logger.warning("trackio_log_failed", extra={"reason": str(exc)})
 
     def finish(self) -> None:
         try:
             self._run.finish()
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 -- must swallow any trackio failure, whatever its type
             logger.warning("trackio_finish_failed", extra={"reason": str(exc)})
 
 

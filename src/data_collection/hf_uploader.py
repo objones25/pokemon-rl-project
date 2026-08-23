@@ -57,7 +57,7 @@ class Manifest:
         )
 
     @classmethod
-    def from_json(cls, data: str) -> "Manifest":
+    def from_json(cls, data: str) -> Manifest:
         parsed = json.loads(data)
         return cls(
             completed=set(parsed.get("completed", [])),

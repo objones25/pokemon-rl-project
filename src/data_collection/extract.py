@@ -130,7 +130,7 @@ def detect_crop_box(
         "null",
         "-",
     ]
-    proc = subprocess.run(cmd, capture_output=True, timeout=120)
+    proc = subprocess.run(cmd, capture_output=True, timeout=120, check=False)
     matches = _CROPDETECT_PATTERN.findall(proc.stderr)
     if not matches:
         return None
