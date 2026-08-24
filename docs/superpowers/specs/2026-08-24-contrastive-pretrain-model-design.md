@@ -164,6 +164,25 @@ resumability or shuffle quality:
   exactly what decorrelates consecutive, highly-similar frames from the
   same video.
 
+**Augmentation randomness — per-row deterministic seed, not a shared
+`torch.Generator`.** A single `torch.Generator` instance passed into the
+`.map()` transform would be copied as-is into every `StatefulDataLoader`
+worker process (`num_workers > 0` forks/spawns the dataset, including
+whatever the transform closes over); every worker would then start from
+an identical RNG state and produce correlated, not independent,
+augmentation sequences across the parallel stream — a real correctness
+gap the original draft of this section didn't address. Instead, each
+row's augmentation seed is derived deterministically from data the row
+already carries: `sha256(f"{base_seed}:{video_id}:{timestamp_s}")`,
+truncated to a `torch.Generator.manual_seed()`-sized int. This sidesteps
+the multi-worker correlation problem entirely (every worker computes the
+same seed for the same row, independent of which worker happens to
+process it), makes a given frame's augmentation exactly reproducible
+from `(base_seed, video_id, timestamp_s)` alone, and needs zero
+checkpoint state — resuming re-derives the identical seed rather than
+restoring saved generator state. The training checkpoint dict below
+therefore does **not** include an `augmentation_rng` entry.
+
 Streaming ties every training step to Hub network throughput for the
 run's duration; for 160x144x1-byte frames this is not expected to
 bottleneck a GPU doing ResNet-50 forward/backward, but the training loop
@@ -436,7 +455,6 @@ rationale above for why this fails fast instead of retrying smaller.
     "optimizer": optimizer.state_dict(),
     "scheduler": scheduler.state_dict(),
     "dataloader": dataloader.state_dict(),   # StatefulDataLoader — shard + example index
-    "augmentation_rng": rng.get_state(),     # the torch.Generator make_pair takes
     "best_val_loss": float,
 }
 ```
@@ -460,8 +478,7 @@ Restore order matters and is enforced in `checkpoint.py`:
    must happen before optimizer state is restored, or the restored LR
    gets clobbered.
 6. If resuming: `optimizer.load_state_dict()`, then
-   `scheduler.load_state_dict()`, then `dataloader.load_state_dict()`,
-   then `rng.set_state()`.
+   `scheduler.load_state_dict()`, then `dataloader.load_state_dict()`.
 
 `train.py` checks the network volume for the latest checkpoint on
 startup and resumes automatically if one exists — the same
