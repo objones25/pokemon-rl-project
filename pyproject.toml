@@ -29,7 +29,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/data_collection", "src/observability", "src/contrastive_pretrain"]
+packages = ["src/data_collection", "src/observability", "src/contrastive_pretrain", "src/hf_storage"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -1,6 +1,6 @@
 import pytest
 
-from data_collection.retry import (
+from hf_storage.retry import (
     is_rate_limited,
     rate_limit_aware_backoff,
     retry_with_backoff,

@@ -7,14 +7,9 @@ import json
 import time
 from collections.abc import Callable
 from pathlib import Path
-from typing import Protocol
 
-from data_collection.retry import rate_limit_aware_backoff, retry_with_backoff
-
-
-class HfClient(Protocol):
-    def upload_bytes(self, data: bytes, path_in_repo: str) -> None: ...
-    def download_bytes(self, path_in_repo: str) -> bytes | None: ...
+from hf_storage.client import HfClient
+from hf_storage.retry import rate_limit_aware_backoff, retry_with_backoff
 
 
 _MANIFEST_PATH = "manifest.json"

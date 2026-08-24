@@ -9,41 +9,16 @@ import click
 import trackio
 from dotenv import load_dotenv
 from huggingface_hub import HfApi, get_token
-from huggingface_hub.errors import EntryNotFoundError
 
 from data_collection import curation, extract, pipeline
-from data_collection.hf_uploader import HfClient, HfUploader
+from data_collection.hf_uploader import HfUploader
 from data_collection.registry import load_registry
+from hf_storage.client import HfClient, RealHfClient
 from observability.logging_config import configure_logging
 from observability.tracking import TrackioRun
 
 _DEFAULT_REGISTRY = Path("configs/video_sources.yaml")
 _DEFAULT_APPROVED_DIR = Path("configs/templates/approved")
-
-
-class RealHfClient:
-    """Adapts huggingface_hub.HfApi to the HfClient protocol hf_uploader expects."""
-
-    def __init__(self, api: HfApi, repo_id: str) -> None:
-        self._api = api
-        self._repo_id = repo_id
-
-    def upload_bytes(self, data: bytes, path_in_repo: str) -> None:
-        self._api.upload_file(
-            path_or_fileobj=data,
-            path_in_repo=path_in_repo,
-            repo_id=self._repo_id,
-            repo_type="dataset",
-        )
-
-    def download_bytes(self, path_in_repo: str) -> bytes | None:
-        try:
-            local_path = self._api.hf_hub_download(
-                repo_id=self._repo_id, filename=path_in_repo, repo_type="dataset"
-            )
-        except EntryNotFoundError:
-            return None
-        return Path(local_path).read_bytes()
 
 
 @click.group()

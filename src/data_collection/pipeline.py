@@ -27,7 +27,7 @@ from data_collection.batcher import FrameBatcher, FrameRecord, batch_to_parquet
 from data_collection.dedup import PerceptualHashDeduper
 from data_collection.hf_uploader import HfUploader, Manifest
 from data_collection.registry import VideoSource
-from data_collection.retry import retry_with_backoff
+from hf_storage.retry import retry_with_backoff
 from observability.tracking import NullTrackioRun, TrackioRunLike
 from observability.visualization import build_contact_sheet
 
