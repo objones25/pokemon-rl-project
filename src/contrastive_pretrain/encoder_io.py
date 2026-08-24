@@ -9,8 +9,22 @@ consumers call.
 
 from __future__ import annotations
 
+import copy
+import json
+import time
+from collections.abc import Callable, Iterable
+
+import torch
 import torch.nn as nn
 import torch.nn.utils.fusion as fusion
+from safetensors.torch import load as safetensors_load
+from safetensors.torch import save as safetensors_save
+
+from contrastive_pretrain.model import EMBEDDING_DIM, build_encoder
+from hf_storage.client import HfClient, RealHfClient
+from hf_storage.retry import rate_limit_aware_backoff, retry_with_backoff
+
+_INPUT_SIZE = [160, 144]  # [W, H], matches the augmentation spec's convention
 
 
 def fuse_conv_bn_modules(module: nn.Module) -> nn.Module:
@@ -33,3 +47,102 @@ def fuse_conv_bn_modules(module: nn.Module) -> nn.Module:
             setattr(module, name_b, nn.Identity())
 
     return module
+
+
+def export_frozen_encoder(encoder: nn.Module) -> tuple[bytes, bytes]:
+    """`encoder` is the live, unfused training module -- this function
+    deep-copies it before fusing, so the caller's training model is
+    never mutated by an export call."""
+    fused = fuse_conv_bn_modules(copy.deepcopy(encoder).eval())
+    weights_bytes = safetensors_save(fused.state_dict())
+    config = {
+        "embedding_dim": EMBEDDING_DIM,
+        "stem": "no_maxpool",
+        "input_channels": 1,
+        "input_size": _INPUT_SIZE,
+        "pretrained_init": True,
+    }
+    config_bytes = json.dumps(config).encode("utf-8")
+    return weights_bytes, config_bytes
+
+
+def push_frozen_encoder(
+    client: HfClient,
+    encoder: nn.Module,
+    latent_mean: torch.Tensor,
+    latent_std: torch.Tensor,
+    max_retries: int = 5,
+    base_delay: float = 2.0,
+    rate_limit_delay: float = 120.0,
+    sleep_func: Callable[[float], None] = time.sleep,
+) -> None:
+    weights_bytes, config_bytes = export_frozen_encoder(encoder)
+    stats_bytes = json.dumps(
+        {"mean": latent_mean.tolist(), "std": latent_std.tolist()}
+    ).encode("utf-8")
+
+    backoff = rate_limit_aware_backoff(base_delay, rate_limit_delay)
+    for data, path_in_repo in (
+        (weights_bytes, "model.safetensors"),
+        (config_bytes, "config.json"),
+        (stats_bytes, "latent_stats.json"),
+    ):
+        retry_with_backoff(
+            lambda data=data, path_in_repo=path_in_repo: client.upload_bytes(data, path_in_repo),
+            max_retries=max_retries,
+            base_delay=base_delay,
+            sleep_func=sleep_func,
+            backoff_seconds=backoff,
+        )
+
+
+def _load_frozen_encoder_from_client(client: HfClient) -> nn.Module:
+    config_bytes = client.download_bytes("config.json")
+    weights_bytes = client.download_bytes("model.safetensors")
+    if config_bytes is None or weights_bytes is None:
+        raise FileNotFoundError("model.safetensors or config.json missing from the target repo")
+    config = json.loads(config_bytes)
+
+    encoder, _ = build_encoder(pretrained=False)
+    fused = fuse_conv_bn_modules(encoder.eval())
+    fused.load_state_dict(safetensors_load(weights_bytes))
+    for param in fused.parameters():
+        param.requires_grad_(False)
+    fused.eval()
+    return fused
+
+
+def load_frozen_encoder(repo_id: str, revision: str | None = None) -> nn.Module:
+    """The PPO-facing entrypoint: downloads config.json + model.safetensors
+    from `repo_id` (an HF Hub model repo) and returns a frozen, eval-mode
+    module mapping (N, 1, 160, 144) grayscale input to (N, 2048) float
+    features. Raw, unnormalized output -- the affine normalization layer
+    is the caller's job, using that repo's latent_stats.json."""
+    from huggingface_hub import HfApi
+
+    client = RealHfClient(HfApi(), repo_id, repo_type="model")
+    return _load_frozen_encoder_from_client(client)
+
+
+def compute_latent_stats(
+    encoder: nn.Module,
+    rows: Iterable[dict],
+    device: torch.device,
+    max_examples: int = 2000,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """`rows` yields dicts with an "original" (1, H, W) uint8 tensor --
+    the same shape contrastive_pretrain.dataset.to_pair_transform
+    produces. Restores the encoder's original train/eval mode on exit."""
+    was_training = encoder.training
+    encoder.eval()
+    features = []
+    with torch.no_grad():
+        for i, row in enumerate(rows):
+            if i >= max_examples:
+                break
+            frame = row["original"].unsqueeze(0).to(device).float()
+            features.append(encoder(frame).squeeze(0).cpu())
+    encoder.train(was_training)
+
+    stacked = torch.stack(features)
+    return stacked.mean(dim=0), stacked.std(dim=0)
