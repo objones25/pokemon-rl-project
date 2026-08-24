@@ -74,11 +74,11 @@ def test_find_latest_checkpoint_returns_none_when_empty(tmp_path) -> None:
     assert find_latest_checkpoint(tmp_path) is None
 
 
-def test_restore_optimizer_and_scheduler_does_not_clobber_restored_lr() -> None:
-    """Regression test for the documented PyTorch gotcha: constructing a
-    scheduler resets its optimizer's lr, so the scheduler must be built
-    BEFORE restore_optimizer_and_scheduler() is called, or the restored
-    lr gets clobbered by the scheduler's own initialization."""
+def test_restore_optimizer_and_scheduler_restores_correct_lr() -> None:
+    """Test that restore_optimizer_and_scheduler correctly restores the optimizer's
+    learning rate when called in the documented order (scheduler constructed
+    before restore). Implicitly verifies that optimizer.load_state_dict() is
+    actually called — fully omitting it would cause this test to fail."""
     model = nn.Linear(2, 2)
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=100)

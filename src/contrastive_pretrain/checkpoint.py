@@ -61,7 +61,9 @@ def find_latest_checkpoint(checkpoint_dir: str | Path) -> Path | None:
 
 def restore_optimizer_and_scheduler(optimizer: Optimizer, scheduler: LRScheduler, state: dict) -> None:
     """Caller must construct `scheduler` (attached to `optimizer`) BEFORE
-    calling this -- constructing a scheduler resets its optimizer's lr,
-    so constructing it after this call would clobber the restored lr."""
+    calling this function. This follows PyTorch's documented recommended order
+    for restoring optimizer+scheduler state and is defensive/forward-compatible
+    best practice, even though it may be empirically a no-op on the current
+    torch version for some scheduler types."""
     optimizer.load_state_dict(state["optimizer"])
     scheduler.load_state_dict(state["scheduler"])
