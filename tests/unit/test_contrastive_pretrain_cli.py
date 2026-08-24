@@ -5,6 +5,7 @@ from click.testing import CliRunner
 from PIL import Image
 
 from contrastive_pretrain.cli import main
+from contrastive_pretrain.config import TrainingConfig
 
 
 def test_preview_command_writes_contact_sheet(tmp_path: Path) -> None:
@@ -66,3 +67,53 @@ def test_preview_command_errors_on_mismatched_frame_sizes(tmp_path: Path) -> Non
 
     assert result.exit_code != 0
     assert "mismatched shapes" in result.output
+
+
+class _FakeHfApi:
+    def create_repo(self, repo_id: str, repo_type: str, exist_ok: bool, private: bool) -> None:
+        pass
+
+
+def test_cli_help_lists_train_and_export_commands() -> None:
+    runner = CliRunner()
+    result = runner.invoke(main, ["--help"])
+
+    assert result.exit_code == 0
+    assert "train" in result.output
+    assert "export-frozen-encoder" in result.output
+
+
+def test_train_command_builds_deps_from_config_and_calls_run_training(tmp_path, monkeypatch) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("batch_size: 8\n")
+    captured = {}
+
+    monkeypatch.setattr("contrastive_pretrain.cli.run_training", lambda deps: captured.update(deps=deps))
+    monkeypatch.setattr("contrastive_pretrain.cli.RealHfClient", lambda *a, **k: object())
+    monkeypatch.setattr("contrastive_pretrain.cli.HfApi", lambda: _FakeHfApi())
+    monkeypatch.setattr("contrastive_pretrain.cli.get_token", lambda: "fake-token")
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["train", "--config", str(config_path)])
+
+    assert result.exit_code == 0, result.output
+    assert captured["deps"].config.batch_size == 8
+
+
+def test_train_command_fails_fast_with_no_hf_credentials(tmp_path, monkeypatch) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("batch_size: 8\n")
+    monkeypatch.setattr("contrastive_pretrain.cli.get_token", lambda: None)
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["train", "--config", str(config_path)])
+
+    assert result.exit_code != 0
+    assert "HF_TOKEN" in result.output
+
+
+def test_export_frozen_encoder_command_requires_checkpoint_option() -> None:
+    runner = CliRunner()
+    result = runner.invoke(main, ["export-frozen-encoder"])
+
+    assert result.exit_code != 0
