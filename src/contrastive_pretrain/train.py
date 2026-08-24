@@ -57,9 +57,15 @@ def compute_val_loss(
                 break
             view_a = batch["view_a"].to(device).float()
             view_b = batch["view_b"].to(device).float()
-            z_a = projector(encoder(view_a))
-            z_b = projector(encoder(view_b))
-            loss = nt_xent_loss(z_a, z_b, temperature)
+            # Matches the training step's autocast context -- otherwise
+            # validation runs in full fp32 at the training batch size, and
+            # the startup memory probe (which only exercises the bf16
+            # training step) doesn't actually cover validation's memory
+            # profile.
+            with torch.autocast(device_type=device.type, dtype=torch.bfloat16):
+                z_a = projector(encoder(view_a))
+                z_b = projector(encoder(view_b))
+                loss = nt_xent_loss(z_a, z_b, temperature)
             total_loss += loss.item()
             n_batches += 1
 
@@ -74,6 +80,8 @@ def compute_val_loss(
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+
+import trackio
 
 from contrastive_pretrain.checkpoint import (
     build_checkpoint_state,
@@ -173,14 +181,27 @@ def run_training(deps: TrainingDeps) -> None:
         start_epoch = state["epoch"]
         best_val_loss = state["best_val_loss"]
 
+    def _save_checkpoint(epoch: int) -> None:
+        ckpt_state = build_checkpoint_state(
+            epoch, global_step, encoder, optimizer, scheduler, dataloader.state_dict(), best_val_loss
+        )
+        save_checkpoint(checkpoint_dir / f"checkpoint_step{global_step:08d}.pt", ckpt_state)
+        logger.info("checkpoint_saved", extra={"global_step": global_step})
+
+    prev_step_end = time.monotonic()
     for epoch in range(start_epoch, config.max_epochs):
         train_dataset.set_epoch(epoch)
         contact_sheet_logged_this_epoch = False
         for batch in dataloader:
-            step_start = time.monotonic()
+            # The blocking wait for the next batch happens inside the `for`
+            # loop's implicit __next__() call, i.e. BETWEEN iterations, not
+            # inside the loop body -- so data_wait_s is measured as the gap
+            # since the end of the previous iteration, not as time spent
+            # inside this one (which would just measure the trivial H2D
+            # transfer below and read ~0 regardless of streaming stalls).
+            data_wait_s = time.monotonic() - prev_step_end
             view_a = batch["view_a"].to(device, non_blocking=True).float().to(memory_format=torch.channels_last)
             view_b = batch["view_b"].to(device, non_blocking=True).float().to(memory_format=torch.channels_last)
-            data_wait_s = time.monotonic() - step_start
 
             # Logged every step (not gated behind the 50-step interval below):
             # data_wait_s is a plain wall-clock float, not a GPU read, so
@@ -206,7 +227,13 @@ def run_training(deps: TrainingDeps) -> None:
                     for i in range(min(4, batch["original"].shape[0]))
                 ]
                 contact_sheet = build_augmentation_contact_sheet(triples)
-                deps.trackio_run.log({"augmentation_contact_sheet": contact_sheet})
+                # trackio.Run.log only renders known media wrapper types --
+                # a raw ndarray is silently dropped (TrackioRun.log swallows
+                # all exceptions by design), so the sanity-check image would
+                # never actually appear anywhere without this wrapper.
+                deps.trackio_run.log(
+                    {"augmentation_contact_sheet": trackio.Image(contact_sheet, caption=f"epoch {epoch}")}
+                )
                 contact_sheet_logged_this_epoch = True
 
             optimizer.zero_grad(set_to_none=True)
@@ -230,11 +257,11 @@ def run_training(deps: TrainingDeps) -> None:
                 deps.trackio_run.log(metrics)
 
             if global_step % config.checkpoint_interval_steps == 0:
-                ckpt_state = build_checkpoint_state(
-                    epoch, global_step, encoder, optimizer, scheduler, dataloader.state_dict(), best_val_loss
-                )
-                save_checkpoint(checkpoint_dir / f"checkpoint_step{global_step:08d}.pt", ckpt_state)
-                logger.info("checkpoint_saved", extra={"global_step": global_step})
+                _save_checkpoint(epoch)
+
+            # Last thing in the loop body, right before the loop returns to
+            # `for batch in dataloader` and blocks on the next batch.
+            prev_step_end = time.monotonic()
 
         val_dataloader = build_dataloader(val_dataset, config.batch_size, 0, 1, pin_memory=False)
         val_loss = compute_val_loss(
@@ -248,5 +275,15 @@ def run_training(deps: TrainingDeps) -> None:
             latent_mean, latent_std = compute_latent_stats(compiled_encoder, val_dataset, device)
             push_frozen_encoder(deps.frozen_encoder_client, encoder, latent_mean, latent_std)
             logger.info("frozen_artifact_pushed", extra={"epoch": epoch, "val_loss": val_loss})
+
+        # Checkpoint at every epoch boundary, not just every
+        # checkpoint_interval_steps: best_val_loss just changed in memory
+        # above but isn't durable until this call. Without it, a crash
+        # between a val-loss improvement and the next periodic mid-epoch
+        # save would resume with a stale (too-high) best_val_loss, letting
+        # a later, actually-worse model pass the improvement check and
+        # overwrite the genuinely better encoder already published to the
+        # Hub.
+        _save_checkpoint(epoch)
 
     deps.trackio_run.finish()

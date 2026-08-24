@@ -105,6 +105,62 @@ class _FakeHfClient:
         return self.files.get(path_in_repo)
 
 
+class _FakeStreamingDataset(torch.utils.data.IterableDataset):
+    """Stands in for contrastive_pretrain.dataset's HF streaming datasets --
+    same per-row shape (a dict with "original"/"view_a"/"view_b" (1, H, W)
+    uint8 tensors) and the same set_epoch(epoch) hook run_training calls,
+    but entirely in-memory so this test needs no network or HF credentials."""
+
+    def __init__(self, n: int) -> None:
+        self.n = n
+        self.epoch = 0
+
+    def set_epoch(self, epoch: int) -> None:
+        self.epoch = epoch
+
+    def __iter__(self):
+        for _ in range(self.n):
+            yield {
+                "original": torch.randint(0, 256, (1, 144, 160), dtype=torch.uint8),
+                "view_a": torch.randint(0, 256, (1, 144, 160), dtype=torch.uint8),
+                "view_b": torch.randint(0, 256, (1, 144, 160), dtype=torch.uint8),
+            }
+
+
+def test_run_training_completes_and_checkpoints_at_epoch_boundary(tmp_path, monkeypatch) -> None:
+    """Fast, network/credential-free regression coverage for run_training --
+    the plan's highest-fan-in function otherwise had zero automated
+    coverage protecting its checkpoint-restore ordering (model state loaded
+    before torch.compile wraps it), its raw-vs-compiled module passing
+    (build_checkpoint_state/push_frozen_encoder must get the raw `encoder`,
+    never `compiled_encoder`), and its two logging cadences. Monkeypatches
+    the streaming-dataset builders with a tiny in-memory fake and uses
+    pretrained=False so the whole run needs no network or HF credentials.
+
+    checkpoint_interval_steps is set far above the total step count so the
+    only checkpoint written is the epoch-boundary one -- this also
+    regression-tests the epoch-boundary checkpoint fix (a crash between a
+    val-loss improvement and the next periodic save must not be able to
+    resume with a stale best_val_loss)."""
+    monkeypatch.setattr("contrastive_pretrain.train.build_train_dataset", lambda config: _FakeStreamingDataset(n=8))
+    monkeypatch.setattr("contrastive_pretrain.train.build_val_dataset", lambda config: _FakeStreamingDataset(n=8))
+
+    config = TrainingConfig(
+        pretrained=False,
+        batch_size=4,
+        num_workers=0,
+        max_epochs=1,
+        checkpoint_interval_steps=1000,
+        network_volume_checkpoint_dir=str(tmp_path / "checkpoints"),
+    )
+    deps = TrainingDeps(config=config, frozen_encoder_client=_FakeHfClient(), device=torch.device("cpu"))
+
+    run_training(deps)
+
+    checkpoints = list((tmp_path / "checkpoints").glob("checkpoint_step*.pt"))
+    assert len(checkpoints) == 1
+
+
 @pytest.mark.slow
 def test_run_training_completes_a_few_steps_without_nan(tmp_path) -> None:
     """A real, short smoke run (real streaming data, real model, a
