@@ -110,7 +110,8 @@ class TrainingDeps:
     frozen_encoder_client: HfClient
     trackio_run: TrackioRunLike = field(default_factory=NullTrackioRun)
     device: torch.device = field(
-        default_factory=lambda: torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        default_factory=lambda: torch.accelerator.current_accelerator(check_available=True)
+        or torch.device("cpu")
     )
 
 
@@ -118,8 +119,14 @@ def run_training(deps: TrainingDeps) -> None:
     config = deps.config
     device = deps.device
 
-    torch.backends.cudnn.benchmark = True
-    torch.backends.cuda.matmul.fp32_precision = "tf32"
+    # cudnn and TF32 are CUDA/NVIDIA-specific -- setting them unconditionally
+    # would be a no-op at best on other accelerators (MPS, CPU) and is simply
+    # wrong to ship as if it applied everywhere, given the target production
+    # hardware is a CUDA A100 but this code also runs in non-CUDA dev/test
+    # environments.
+    if device.type == "cuda":
+        torch.backends.cudnn.benchmark = True
+        torch.backends.cuda.matmul.fp32_precision = "tf32"
 
     encoder, embedding_dim = build_encoder(pretrained=config.pretrained)
     projector = build_projector(in_dim=embedding_dim)
