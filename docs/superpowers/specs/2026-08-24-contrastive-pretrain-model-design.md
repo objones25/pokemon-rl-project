@@ -24,6 +24,7 @@ checkpoints persist to a RunPod network volume attached to that pod.
 ## Scope boundary
 
 In scope:
+
 - ResNet-50-style encoder architecture (stem, backbone) and the SimCLR
   projection head + NT-Xent loss used only during pretraining.
 - The training loop: data pipeline, precision/performance settings,
@@ -37,6 +38,7 @@ In scope:
   `data_collection/cli.py`) into a shared package.
 
 Out of scope (deferred to their own specs):
+
 - The sequence-model transformer (RoPE/GQA), and the "explicit affine
   normalization layer" the architecture plan says sits between the
   frozen encoder and the transformer — that layer is the sequence
@@ -138,10 +140,11 @@ draft of this spec proposed downloading it once to the network volume;
 that was wrong, and dropped after checking the actual current state of
 the tooling rather than assuming streaming meant giving up
 resumability or shuffle quality:
+
 - `datasets.IterableDataset` has native `.state_dict()` /
   `.load_state_dict()`: state is the current shard plus in-shard example
   index, and resuming skips already-read shards and fast-forwards within
-  the current one. The one real gap — shuffle-buffer *contents* aren't
+  the current one. The one real gap — shuffle-buffer _contents_ aren't
   exactly restored on resume, the buffer just refills with new data — is
   an accepted approximation for this project (exact reshuffling isn't a
   requirement here).
@@ -149,11 +152,11 @@ resumability or shuffle quality:
   replacement for `torch.utils.data.DataLoader` that wraps this
   automatically, including with `num_workers > 0` (it aggregates state
   across worker processes). Constraint worth designing around: resuming
-  requires the *same* `num_workers` as the checkpointing run, so
+  requires the _same_ `num_workers` as the checkpointing run, so
   `num_workers` is a fixed, checkpoint-compatible config value, not
   something to change casually between resumes.
 - Our 367 shards are already fine-grained for streaming shuffle quality
-  (`datasets`' own docs flag *few*-file datasets as needing `reshard()`
+  (`datasets`' own docs flag _few_-file datasets as needing `reshard()`
   before shuffling; 367 isn't that). Each shard is one full video's
   frames in original temporal order (per `hf_uploader.py`'s
   `shards/{video_id}/{shard_index}.parquet` layout), so shard-order
@@ -194,8 +197,8 @@ aggressive modes enable CUDA graphs by default, which impose real
 constraints (static tensor shapes/addresses, a "capturable" optimizer,
 no input mutation) that interact awkwardly with exactly the
 resumable-checkpoint design this spec depends on. PyTorch's own docs
-describe `reduce-overhead`'s benefit as targeting *small-batch,
-Python-overhead-bound* workloads — a ResNet-50 forward/backward is real
+describe `reduce-overhead`'s benefit as targeting _small-batch,
+Python-overhead-bound_ workloads — a ResNet-50 forward/backward is real
 GPU compute, not obviously that regime. `default` mode still gets
 automatic operator fusion via the Inductor backend (this is where
 "operator fusion" mostly lives for the training loop — no separate
@@ -217,6 +220,40 @@ launch-overhead-bound (CUDA graphs), `torch.compile` already has
 lower-effort levers for both — an automatic activation-memory-budget
 knob, and `mode="max-autotune"` for CUDA graphs — that are preferable to
 hand-instrumenting the model.
+
+**Batch size 1024, with a fail-fast startup memory probe.** Dropping
+`maxpool` (see above) means the network's total downsampling is 16x per
+dimension instead of 32x, so every stage's feature map has ~4x more
+spatial positions than a standard ResNet-50 would have at the same input
+size. Our 160x144 input is ~0.46x the pixel count of ImageNet's 224x224,
+so net-net this backbone's activation memory per image is roughly ~1.8x
+a standard ResNet-50 at 224x224 (4x from the missing downsample step,
+0.46x from the smaller input) — a real, deliberate cost of the detail-
+preservation choice made above, not free. Standard ResNet-50 at batch
+256 in mixed precision is commonly cited around 8-12GB of activation
+memory; by that rough scaling, `batch_size=512` was already plausibly in
+the 30-40GB range before optimizer state, gradients, and workspace —
+tight on a 40GB card. Confirmed the training pod is an 80GB A100, which
+gives enough headroom to double to `batch_size=1024` (SimCLR quality
+benefits directly from more implicit negatives per batch) — but this
+arithmetic is a rough estimate, not a measurement, so the training loop
+runs a startup memory probe: a few dummy forward+backward steps at the
+configured `batch_size`, using real model/precision/memory-format
+settings, _before_ touching the real streaming dataset or checkpoint
+state. A `CUDA out of memory` here raises immediately with an actionable
+message (lower `batch_size` in config, or add gradient accumulation) —
+deliberately not an automatic halve-and-retry, because silently training
+at a different batch size than the one `learning_rate`/`warmup_steps`
+were set for would produce a quietly-worse run that still "succeeds"
+instead of a loud, obvious, fixable failure.
+
+Doubling batch size also isn't free of coupling to the schedule: halving
+steps-per-epoch means the same `warmup_steps` value now covers twice as
+much of the first epoch as intended, so it's halved alongside the batch
+size (1000 → 500) to keep warmup covering roughly the same number of
+examples seen. `learning_rate` is nudged up using the √2 heuristic
+common for adaptive optimizers (SGD's linear scaling rule doesn't apply
+to AdamW) rather than left unchanged: 3e-4 → 4e-4.
 
 **Conv+BatchNorm fusion — applied only at frozen-artifact export, not
 during training.** BatchNorm needs live batch statistics while training;
@@ -267,11 +304,11 @@ def build_encoder(pretrained: bool = True) -> tuple[nn.Module, int]:
 ```
 
 - `torchvision.models.resnet50(weights=ResNet50_Weights.IMAGENET1K_V2 if
-  pretrained else None)`, then `backbone.maxpool = nn.Identity()`, then
+pretrained else None)`, then `backbone.maxpool = nn.Identity()`, then
   drop `backbone.fc` (replace with `nn.Identity()` or slice it off —
   output is the post-`avgpool`, pre-`fc` 2048-d vector).
 - Channel replication (`frame.repeat(1, 3, 1, 1)`, grayscale → pseudo-RGB)
-  lives *inside* `build_encoder`'s returned module, wrapping the
+  lives _inside_ `build_encoder`'s returned module, wrapping the
   torchvision backbone, not in an external transform. This is
   deliberate: it means both the training pipeline and
   `load_frozen_encoder()` (below) present the exact same external
@@ -280,7 +317,7 @@ def build_encoder(pretrained: bool = True) -> tuple[nn.Module, int]:
   convention both call sites have to separately remember.
 - Projection head (training-only, discarded at export):
   `nn.Sequential(nn.Linear(2048, 2048), nn.ReLU(inplace=True),
-  nn.Linear(2048, 128))`.
+nn.Linear(2048, 128))`.
 - Loss: NT-Xent / InfoNCE over the projector's 128-d output, standard
   SimCLR formulation — every other example in the batch (post-projector,
   both views) is an implicit negative.
@@ -289,16 +326,16 @@ Config defaults (all overridable via `configs/contrastive_pretrain.yaml`,
 all meant to be validated against the first real training run rather
 than treated as final):
 
-| Parameter | Default | Note |
-| --- | --- | --- |
-| `batch_size` | 512 | Tunable to GPU memory; SimCLR benefits from larger batch (more implicit negatives) |
-| `optimizer` | AdamW | LARS (the SimCLR paper's choice) mainly earns its keep at batch sizes ~4096+; not justified at 512 |
-| `learning_rate` | 3e-4 | Cosine decay with linear warmup |
-| `warmup_steps` | 1000 | |
-| `weight_decay` | 1e-6 | Matches SimCLR paper's own small value |
-| `temperature` | 0.1 | NT-Xent temperature |
-| `max_epochs` | 100 | |
-| `projector_dims` | 2048 → 2048 → 128 | Standard SimCLR projector |
+| Parameter        | Default           | Note                                                                                                                |
+| ---------------- | ----------------- | ------------------------------------------------------------------------------------------------------------------- |
+| `batch_size`     | 1024              | Sized for an 80GB A100 (see rationale above); verified at startup by a fail-fast memory probe, not assumed          |
+| `optimizer`      | AdamW             | LARS (the SimCLR paper's choice) mainly earns its keep at batch sizes ~4096+; not justified at 1024                 |
+| `learning_rate`  | 4e-4              | Cosine decay with linear warmup; scaled from a 3e-4/batch=512 baseline via the √2 heuristic for adaptive optimizers |
+| `warmup_steps`   | 500               | Halved from a batch=512 baseline of 1000 so warmup covers the same number of examples seen                          |
+| `weight_decay`   | 1e-6              | Matches SimCLR paper's own small value                                                                              |
+| `temperature`    | 0.1               | NT-Xent temperature                                                                                                 |
+| `max_epochs`     | 100               |                                                                                                                     |
+| `projector_dims` | 2048 → 2048 → 128 | Standard SimCLR projector                                                                                           |
 
 ## Data pipeline
 
@@ -334,9 +371,7 @@ dataloader = StatefulDataLoader(
   videos** instead — one per game, keeping both splits balanced:
   `D1SrSFZrV7A` (red) and `YW29l3jJXr4` (blue) from
   `configs/video_sources.yaml`, filtered via the dataset's `video_id`
-  column. This is a starting proposal, not a hard requirement — revisit
-  once per-video frame counts are inspected, in case one of these two
-  turns out to be disproportionately large or small.
+  column. Confirmed.
 - Multi-epoch iteration: a streaming `IterableDataset` exhausts after one
   full pass over the shards; re-entering the `for batch in dataloader`
   loop for the next epoch starts a fresh pass. Call `dataset.set_epoch(epoch)`
@@ -359,6 +394,7 @@ model = torch.compile(model, mode="default")
 ```
 
 Per-step:
+
 - Forward + loss under `torch.autocast(device_type="cuda", dtype=torch.bfloat16)`.
 - Input batches converted to `channels_last` alongside the model.
 - No `GradScaler` (see rationale above).
@@ -368,7 +404,7 @@ Per-step:
   memory leak PyTorch's own docs warn about when raw loss tensors are
   accumulated directly.
 - `pin_memory=True` (already set on the dataloader) + `.to(device,
-  non_blocking=True)` for host-to-device transfer.
+non_blocking=True)` for host-to-device transfer.
 - Fail-fast: a NaN/Inf loss raises immediately rather than being
   silently skipped — unlike `data_collection.pipeline`'s per-video
   retry (where one video's failure is independent of the others), a NaN
@@ -378,6 +414,14 @@ Per-step:
 `hf_storage.retry.retry_with_backoff` wraps only the actual Hub I/O
 (frozen-artifact upload, dataset access errors), matching
 `data_collection`'s existing precedent — not the training step itself.
+
+**Startup memory probe:** before constructing the streaming dataset or
+touching checkpoint state, run a few dummy forward+backward steps
+through the real (compiled, autocast, channels_last) model at the
+configured `batch_size` using random input. A `torch.cuda.OutOfMemoryError`
+here raises immediately with the actual `batch_size` value and a
+suggestion to lower it or use gradient accumulation — see the batch-size
+rationale above for why this fails fast instead of retrying smaller.
 
 ## Checkpointing & resume
 
@@ -402,6 +446,7 @@ remains loadable with `torch.load(..., weights_only=True)` — cheap
 defense-in-depth even for a same-machine, self-produced file.
 
 Restore order matters and is enforced in `checkpoint.py`:
+
 1. Build model, move to device, apply `channels_last`.
 2. If resuming: `model.load_state_dict()` — **before** `torch.compile`
    wraps it. `torch.compile` can rename state_dict keys (an `_orig_mod.`
@@ -426,12 +471,13 @@ single training run instead of per-video.
 **Frozen encoder artifact** (HF Hub model repo, e.g.
 `objones25/pokemon-contrastive-encoder`, pushed at end-of-epoch and on
 new best validation loss):
+
 - `model.safetensors` — backbone-only state dict (projector dropped),
   with Conv+BN fusion applied to this exported copy only (the live
   training model stays unfused).
 - `config.json` — `{"embedding_dim": 2048, "stem": "no_maxpool",
-  "input_channels": 1, "input_size": [160, 144], "pretrained_init":
-  true}`.
+"input_channels": 1, "input_size": [160, 144], "pretrained_init":
+true}`.
 - `latent_stats.json` — mean/std of the 2048-d backbone output, computed
   over the held-out validation videos, for the sequence-model stage's
   affine normalization layer (see Scope boundary).
@@ -455,7 +501,7 @@ Documented expectations that stage must honor: input is single-channel
 grayscale at native 160x144 resolution (channel replication happens
 inside this function, not the caller's responsibility); output is the
 raw, unnormalized 2048-d backbone feature (the affine normalization
-layer is the *caller's* job, using `latent_stats.json` above); the
+layer is the _caller's_ job, using `latent_stats.json` above); the
 returned module has `requires_grad_(False)` already set and is in
 `eval()` mode — the caller should not need to call either again.
 
@@ -485,6 +531,7 @@ Per this repo's TDD convention, fast unit tests against synthetic
 fixtures (no GPU/network) plus opt-in `slow` integration tests:
 
 Unit:
+
 - `build_encoder()` produces the expected output shape/dim; `maxpool`
   is confirmed absent from the forward path.
 - Conv+BN fusion (`encoder_io`) produces output numerically equivalent
@@ -493,7 +540,7 @@ Unit:
   batch produces the expected loss value/gradient sign.
 - Checkpoint save/load round-trip on a small dummy model/optimizer/
   scheduler preserves state exactly; the restore-order test specifically
-  asserts the scheduler's LR is *not* clobbered by
+  asserts the scheduler's LR is _not_ clobbered by
   `optimizer.load_state_dict()` (regression test for the documented
   PyTorch gotcha).
 - `load_frozen_encoder()` against a fake `HfClient` (no real network).
@@ -501,6 +548,7 @@ Unit:
   unchanged behavior.
 
 Integration (`slow`, opt-in, real network/Hub credentials):
+
 - A real streaming read of a small sample from
   `objones25/pokemon-frames`.
 - A real `StatefulDataLoader` checkpoint/resume round trip against live
@@ -522,9 +570,6 @@ beyond the informed defaults above.
 - **LARS optimizer**: revisit if a later run scales batch size well past
   512 (e.g. via gradient accumulation or a larger GPU) — AdamW is the
   simpler, sufficient choice at the batch sizes this spec targets.
-- **Validation video selection**: `D1SrSFZrV7A`/`YW29l3jJXr4` are a
-  balanced starting guess; confirm once per-video frame counts are
-  known.
 - **torch.compile `mode="max-autotune"`**: a phase-2 tuning experiment
   once the `mode="default"` pipeline is verified stable end-to-end, per
   this repo's convention of not building the next stage before the
