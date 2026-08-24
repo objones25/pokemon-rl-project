@@ -376,3 +376,81 @@ def test_augment_view_composition_order_is_translate_crop_brightness_noise_blur_
     expected = random_jpeg_artifact(expected, config, rng)
 
     assert torch.equal(result, expected)
+
+
+from torchvision.transforms import v2
+
+from contrastive_pretrain.augmentation import AugmentView, MakePair
+
+
+def test_augment_view_transform_matches_function_given_same_seed() -> None:
+    frame = torch.zeros((1, 144, 160), dtype=torch.uint8)
+    frame[0, 70:74, 78:82] = 255
+    config = AugmentationConfig()
+
+    transform = AugmentView(config, torch.Generator().manual_seed(7))
+    result = transform(frame)
+
+    expected = augment_view(frame, config, torch.Generator().manual_seed(7))
+
+    assert torch.equal(result, expected)
+
+
+def test_augment_view_transform_is_an_nn_module() -> None:
+    transform = AugmentView(AugmentationConfig(), torch.Generator().manual_seed(0))
+    assert isinstance(transform, torch.nn.Module)
+
+
+def test_augment_view_transform_composes_with_torchvision_compose() -> None:
+    frame = torch.zeros((1, 144, 160), dtype=torch.uint8)
+    frame[0, 70:74, 78:82] = 255
+    config = AugmentationConfig()
+
+    pipeline = v2.Compose([AugmentView(config, torch.Generator().manual_seed(3))])
+    result = pipeline(frame)
+
+    assert result.shape == frame.shape
+    assert result.dtype == frame.dtype
+
+
+def test_make_pair_transform_matches_function_given_same_seed() -> None:
+    frame = torch.zeros((1, 144, 160), dtype=torch.uint8)
+    frame[0, 70:74, 78:82] = 255
+    config = AugmentationConfig()
+
+    transform = MakePair(config, torch.Generator().manual_seed(9))
+    view_a, view_b = transform(frame)
+
+    expected_a, expected_b = make_pair(frame, config, torch.Generator().manual_seed(9))
+
+    assert torch.equal(view_a, expected_a)
+    assert torch.equal(view_b, expected_b)
+
+
+def test_make_pair_transform_is_an_nn_module() -> None:
+    transform = MakePair(AugmentationConfig(), torch.Generator().manual_seed(0))
+    assert isinstance(transform, torch.nn.Module)
+
+
+def test_make_pair_transform_usable_as_a_dataset_transform_argument() -> None:
+    class _FrameDataset:
+        def __init__(self, frames: list[torch.Tensor], transform: MakePair) -> None:
+            self._frames = frames
+            self.transform = transform
+
+        def __getitem__(self, index: int) -> tuple[torch.Tensor, torch.Tensor]:
+            return self.transform(self._frames[index])
+
+        def __len__(self) -> int:
+            return len(self._frames)
+
+    frame = torch.zeros((1, 144, 160), dtype=torch.uint8)
+    frame[0, 70:74, 78:82] = 255
+    dataset = _FrameDataset(
+        [frame], transform=MakePair(AugmentationConfig(), torch.Generator().manual_seed(11))
+    )
+
+    view_a, view_b = dataset[0]
+
+    assert view_a.shape == frame.shape
+    assert view_b.shape == frame.shape

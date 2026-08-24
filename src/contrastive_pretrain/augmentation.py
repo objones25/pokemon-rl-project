@@ -168,3 +168,23 @@ def make_pair(
     view_a = augment_view(frame, config, rng)
     view_b = augment_view(frame, config, rng)
     return view_a, view_b
+
+
+class AugmentView(torch.nn.Module):
+    def __init__(self, config: AugmentationConfig, rng: torch.Generator) -> None:
+        super().__init__()
+        self.config = config
+        self.rng = rng
+
+    def forward(self, frame: torch.Tensor) -> torch.Tensor:
+        return augment_view(frame, self.config, self.rng)
+
+
+class MakePair(torch.nn.Module):
+    def __init__(self, config: AugmentationConfig, rng: torch.Generator) -> None:
+        super().__init__()
+        self.config = config
+        self.rng = rng
+
+    def forward(self, frame: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        return make_pair(frame, self.config, self.rng)
