@@ -118,6 +118,10 @@ def load_frozen_encoder(repo_id: str, revision: str | None = None) -> nn.Module:
     module mapping (N, 1, 160, 144) grayscale input to (N, 2048) float
     features. Raw, unnormalized output -- the affine normalization layer
     is the caller's job, using that repo's latent_stats.json."""
+    if revision is not None:
+        raise NotImplementedError(
+            "revision pinning is not yet supported — hf_storage.client.HfClient has no revision parameter"
+        )
     from huggingface_hub import HfApi
 
     client = RealHfClient(HfApi(), repo_id, repo_type="model")

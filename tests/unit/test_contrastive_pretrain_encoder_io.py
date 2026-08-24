@@ -1,5 +1,6 @@
 import json
 
+import pytest
 import torch
 import torch.nn as nn
 
@@ -108,12 +109,12 @@ def test_export_frozen_encoder_round_trips_weights() -> None:
 
 def test_export_frozen_encoder_does_not_mutate_input_module() -> None:
     encoder, _ = build_encoder(pretrained=False)
-    original_maxpool_type = type(encoder.backbone.maxpool)
 
     export_frozen_encoder(encoder)
 
-    assert isinstance(encoder.backbone.conv1, torch.nn.Conv2d)  # still unfused
-    assert type(encoder.backbone.maxpool) is original_maxpool_type
+    # Fusion replaces BN layers with nn.Identity(), so if the original module were
+    # fused in place, bn1 would be Identity. Verify it's still BatchNorm2d.
+    assert isinstance(encoder.backbone.bn1, torch.nn.BatchNorm2d)
 
 
 def test_push_frozen_encoder_uploads_three_files() -> None:
@@ -174,3 +175,10 @@ def test_compute_latent_stats_shapes() -> None:
 
     assert mean.shape == (dim,)
     assert std.shape == (dim,)
+
+
+def test_load_frozen_encoder_raises_on_revision_parameter() -> None:
+    from contrastive_pretrain.encoder_io import load_frozen_encoder
+
+    with pytest.raises(NotImplementedError):
+        load_frozen_encoder("objones25/test-repo", revision="v1")
