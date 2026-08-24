@@ -52,9 +52,16 @@ def fuse_conv_bn_modules(module: nn.Module) -> nn.Module:
 def export_frozen_encoder(encoder: nn.Module) -> tuple[bytes, bytes]:
     """`encoder` is the live, unfused training module -- this function
     deep-copies it before fusing, so the caller's training model is
-    never mutated by an export call."""
+    never mutated by an export call.
+
+    `.contiguous()` is required here because the training-side encoder
+    (contrastive_pretrain.train.run_training) is moved to
+    memory_format=torch.channels_last for conv performance, which leaves
+    its parameter tensors non-contiguous in the standard (NCHW) sense --
+    safetensors refuses to save those directly."""
     fused = fuse_conv_bn_modules(copy.deepcopy(encoder).eval())
-    weights_bytes = safetensors_save(fused.state_dict())
+    state_dict = {name: tensor.contiguous() for name, tensor in fused.state_dict().items()}
+    weights_bytes = safetensors_save(state_dict)
     config = {
         "embedding_dim": EMBEDDING_DIM,
         "stem": "no_maxpool",

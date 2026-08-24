@@ -107,6 +107,23 @@ def test_export_frozen_encoder_round_trips_weights() -> None:
     }
 
 
+def test_export_frozen_encoder_handles_channels_last_encoder() -> None:
+    """Regression test: contrastive_pretrain.train.run_training calls
+    encoder.to(device, memory_format=torch.channels_last) on the training
+    encoder for conv performance -- that leaves parameter tensors
+    non-contiguous in the standard sense, which used to make
+    safetensors_save raise ValueError('non contiguous tensor')."""
+    encoder, _ = build_encoder(pretrained=False)
+    encoder.to(torch.device("cpu"), memory_format=torch.channels_last)
+
+    weights_bytes, _ = export_frozen_encoder(encoder)
+
+    from safetensors.torch import load as safetensors_load
+
+    reloaded = safetensors_load(weights_bytes)
+    assert all(tensor.is_contiguous() for tensor in reloaded.values())
+
+
 def test_export_frozen_encoder_does_not_mutate_input_module() -> None:
     encoder, _ = build_encoder(pretrained=False)
 
