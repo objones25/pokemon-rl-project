@@ -24,6 +24,17 @@ Each gets its own spec and implementation plan before code is written.
   drops data (dedup, anomaly detection, reward shaping) logs *why*, and produces
   a periodic visual artifact (contact sheets, sample grids, reward curves) a
   human can sanity-check without reading raw logs.
+- **Interface-fit over spec-compliance**: a component's job is to fit how it
+  will actually be consumed, not just satisfy the literal spec text.
+  Brainstorming must produce concrete, checkable interface contracts before
+  implementation starts — no vague "reusable later." Verify integration
+  requirements against context7 (`ctx7` CLI), official library docs, or the
+  `inspect` module on the actual installed package; never guess a calling
+  convention or interface shape from memory.
+- **Production readiness for long/costly runs**: any component driving a
+  long-running or paid unattended job must have logging, error handling,
+  retries, and resume/checkpointing decided at design time (during
+  brainstorming), not discovered after.
 
 ## Infra
 
