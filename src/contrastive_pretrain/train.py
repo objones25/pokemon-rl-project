@@ -11,6 +11,7 @@ and why a non-finite loss is not silently skipped.
 from __future__ import annotations
 
 import logging
+import os
 from collections.abc import Callable, Iterable
 
 import torch
@@ -136,7 +137,16 @@ def run_training(deps: TrainingDeps) -> None:
             extra={"path": str(latest_checkpoint_path), "global_step": state["global_step"]},
         )
 
-    compiled_encoder = torch.compile(encoder, mode="default")
+    # When TORCH_COMPILE_DISABLE_BY_COUNTER is set (in testing), skip torch.compile
+    # entirely to work around a known torch.compile/yt_dlp incompatibility where
+    # the inductor backend tries to serialize compiled graphs and triggers yt_dlp's
+    # compatibility module loading, which fails on missing 'no_Cryptodome' module.
+    # Production training should not set this env var and will use torch.compile
+    # normally.
+    if os.environ.get("TORCH_COMPILE_DISABLE_BY_COUNTER"):
+        compiled_encoder = encoder
+    else:
+        compiled_encoder = torch.compile(encoder, mode="default")
 
     def _probe_step() -> None:
         dummy = torch.zeros(config.batch_size, 1, 144, 160, device=device).to(
