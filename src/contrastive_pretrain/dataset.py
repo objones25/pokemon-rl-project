@@ -12,6 +12,7 @@ from __future__ import annotations
 import hashlib
 
 import torch
+from torchdata.stateful_dataloader import StatefulDataLoader
 from torchvision.transforms.functional import pil_to_tensor
 
 from contrastive_pretrain.augmentation import AugmentationConfig, make_pair
@@ -28,3 +29,26 @@ def to_pair_transform(example: dict, augmentation_config: AugmentationConfig, ba
     rng = torch.Generator().manual_seed(seed)
     view_a, view_b = make_pair(frame, augmentation_config, rng)
     return {"original": frame, "view_a": view_a, "view_b": view_b}
+
+
+def build_dataloader(
+    dataset,
+    batch_size: int,
+    num_workers: int,
+    snapshot_every_n_steps: int,
+    pin_memory: bool = True,
+) -> StatefulDataLoader:
+    """drop_last=True is required for two reasons: it keeps batch shape
+    fixed (cudnn.benchmark and torch.compile both depend on that), and a
+    variable-size final batch would itself break that fixed-shape
+    assumption. num_workers must stay the same between the run that
+    saved a dataloader checkpoint and the run that resumes it --
+    StatefulDataLoader.load_state_dict requires it."""
+    return StatefulDataLoader(
+        dataset,
+        batch_size=batch_size,
+        num_workers=num_workers,
+        drop_last=True,
+        pin_memory=pin_memory,
+        snapshot_every_n_steps=snapshot_every_n_steps,
+    )

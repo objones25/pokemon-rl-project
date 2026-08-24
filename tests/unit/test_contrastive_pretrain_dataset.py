@@ -48,3 +48,51 @@ def test_to_pair_transform_differs_across_rows() -> None:
     result2 = to_pair_transform(_grayscale_example(timestamp_s=6.0), AugmentationConfig(), base_seed=0)
 
     assert not torch.equal(result1["view_a"], result2["view_a"])
+
+
+import datasets
+
+from contrastive_pretrain.dataset import build_dataloader
+
+
+def _synthetic_iterable_dataset():
+    base = datasets.Dataset.from_dict({"value": list(range(20))})
+    return base.to_iterable_dataset(num_shards=4)
+
+
+def test_build_dataloader_yields_batches_of_configured_size() -> None:
+    loader = build_dataloader(
+        _synthetic_iterable_dataset(), batch_size=4, num_workers=0,
+        snapshot_every_n_steps=1, pin_memory=False,
+    )
+
+    batch = next(iter(loader))
+
+    assert batch["value"].shape == (4,)
+
+
+def test_build_dataloader_resumes_from_exact_position() -> None:
+    """Verifies the StatefulDataLoader checkpoint/resume mechanic the
+    design spec depends on: a fresh dataloader over the same underlying
+    (unconsumed) dataset, given a saved state_dict, continues from
+    exactly where the original left off -- no re-served, no skipped
+    examples."""
+    loader = build_dataloader(
+        _synthetic_iterable_dataset(), batch_size=2, num_workers=0,
+        snapshot_every_n_steps=1, pin_memory=False,
+    )
+
+    it = iter(loader)
+    for _ in range(3):
+        next(it)
+    state = loader.state_dict()
+    expected_next_two_batches = [next(it)["value"].tolist() for _ in range(2)]
+
+    resumed_loader = build_dataloader(
+        _synthetic_iterable_dataset(), batch_size=2, num_workers=0,
+        snapshot_every_n_steps=1, pin_memory=False,
+    )
+    resumed_loader.load_state_dict(state)
+    actual_next_two_batches = [batch["value"].tolist() for _, batch in zip(range(2), resumed_loader)]
+
+    assert actual_next_two_batches == expected_next_two_batches
