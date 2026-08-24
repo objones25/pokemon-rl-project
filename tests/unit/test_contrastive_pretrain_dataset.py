@@ -96,3 +96,53 @@ def test_build_dataloader_resumes_from_exact_position() -> None:
     actual_next_two_batches = [batch["value"].tolist() for _, batch in zip(range(2), resumed_loader)]
 
     assert actual_next_two_batches == expected_next_two_batches
+
+
+import pytest
+
+from contrastive_pretrain.config import TrainingConfig
+from contrastive_pretrain.dataset import build_dataloader, build_train_dataset, build_val_dataset
+
+
+@pytest.mark.slow
+def test_build_train_dataset_excludes_val_videos() -> None:
+    config = TrainingConfig()
+    ds = build_train_dataset(config)
+
+    row = next(iter(ds))
+
+    assert row["video_id"] not in config.val_video_ids
+    assert row["view_a"].shape == (1, 144, 160)
+
+
+@pytest.mark.slow
+def test_build_val_dataset_only_yields_held_out_videos() -> None:
+    config = TrainingConfig()
+    ds = build_val_dataset(config)
+
+    for _, row in zip(range(5), ds):
+        assert row["video_id"] in config.val_video_ids
+
+
+@pytest.mark.slow
+def test_build_dataloader_resumes_against_real_streaming_data() -> None:
+    """Same resume guarantee as Task 9's synthetic test, but against the
+    real Hub-backed streaming dataset -- confirms StatefulDataLoader's
+    shard-skipping behavior holds for real parquet shards, not just an
+    in-memory Dataset."""
+    config = TrainingConfig()
+
+    loader = build_dataloader(build_train_dataset(config), batch_size=2, num_workers=0, snapshot_every_n_steps=1)
+    it = iter(loader)
+    for _ in range(3):
+        next(it)
+    state = loader.state_dict()
+    expected_video_ids = next(it)["video_id"]
+
+    resumed_loader = build_dataloader(
+        build_train_dataset(config), batch_size=2, num_workers=0, snapshot_every_n_steps=1
+    )
+    resumed_loader.load_state_dict(state)
+    actual_video_ids = next(iter(resumed_loader))["video_id"]
+
+    assert actual_video_ids == expected_video_ids

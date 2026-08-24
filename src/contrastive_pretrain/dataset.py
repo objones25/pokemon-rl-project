@@ -9,13 +9,16 @@ given row is always re-derivable from data the row already carries.
 
 from __future__ import annotations
 
+import functools
 import hashlib
 
+import datasets
 import torch
 from torchdata.stateful_dataloader import StatefulDataLoader
 from torchvision.transforms.functional import pil_to_tensor
 
 from contrastive_pretrain.augmentation import AugmentationConfig, make_pair
+from contrastive_pretrain.config import TrainingConfig
 
 
 def row_seed(base_seed: int, video_id: str, timestamp_s: float) -> int:
@@ -52,3 +55,28 @@ def build_dataloader(
         pin_memory=pin_memory,
         snapshot_every_n_steps=snapshot_every_n_steps,
     )
+
+
+def _load_base_stream(config: TrainingConfig):
+    return datasets.load_dataset(config.dataset_repo_id, streaming=True, split="train")
+
+
+def build_train_dataset(config: TrainingConfig):
+    ds = _load_base_stream(config)
+    ds = ds.filter(lambda ex: ex["video_id"] not in config.val_video_ids)
+    ds = ds.shuffle(buffer_size=config.shuffle_buffer_size, seed=config.seed)
+    ds = ds.map(
+        functools.partial(to_pair_transform, augmentation_config=AugmentationConfig(), base_seed=config.seed),
+        remove_columns=["image"],
+    )
+    return ds
+
+
+def build_val_dataset(config: TrainingConfig):
+    ds = _load_base_stream(config)
+    ds = ds.filter(lambda ex: ex["video_id"] in config.val_video_ids)
+    ds = ds.map(
+        functools.partial(to_pair_transform, augmentation_config=AugmentationConfig(), base_seed=config.seed),
+        remove_columns=["image"],
+    )
+    return ds
