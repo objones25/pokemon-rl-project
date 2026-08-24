@@ -71,7 +71,8 @@ def _apply_crop_resize(frame: torch.Tensor, y: int, x: int, crop_h: int, crop_w:
 
 
 def random_crop_resize(frame: torch.Tensor, config: AugmentationConfig, rng: torch.Generator) -> torch.Tensor:
-    y, x, crop_h, crop_w = _resolve_crop_box(frame.shape[-2:], config, rng)
+    h, w = frame.shape[-2:]
+    y, x, crop_h, crop_w = _resolve_crop_box((h, w), config, rng)
     return _apply_crop_resize(frame, y, x, crop_h, crop_w)
 
 
@@ -140,7 +141,10 @@ def _resolve_jpeg_quality(config: AugmentationConfig, rng: torch.Generator) -> i
 
 def _apply_jpeg_artifact(frame: torch.Tensor, quality: int) -> torch.Tensor:
     encoded = encode_jpeg(frame, quality=quality)
-    return decode_jpeg(encoded, mode=ImageReadMode.GRAY)
+    assert isinstance(encoded, torch.Tensor)  # encode_jpeg(Tensor) always returns Tensor, never list[Tensor]
+    decoded = decode_jpeg(encoded, mode=ImageReadMode.GRAY)
+    assert isinstance(decoded, torch.Tensor)  # decode_jpeg(Tensor) always returns Tensor, never list[Tensor]
+    return decoded
 
 
 def random_jpeg_artifact(frame: torch.Tensor, config: AugmentationConfig, rng: torch.Generator) -> torch.Tensor:
