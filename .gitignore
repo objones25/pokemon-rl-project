@@ -10,6 +10,7 @@ uv.lock.bak
 /data/
 /scratch/
 configs/templates/approved/_preview.png
+/augmentation_preview.png
 *.mp4
 *.mkv
 *.webm

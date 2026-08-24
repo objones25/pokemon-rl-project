@@ -1,3 +1,4 @@
+import pytest
 import torch
 
 from contrastive_pretrain.augmentation import (
@@ -17,8 +18,8 @@ from contrastive_pretrain.augmentation import (
 def test_augmentation_config_has_spec_defaults() -> None:
     config = AugmentationConfig()
 
-    assert config.max_translate_px == 4
-    assert config.crop_min_area_fraction == 0.90
+    assert config.max_translate_px == 2
+    assert config.crop_min_area_fraction == 0.93
     assert config.brightness_range == 0.15
     assert config.contrast_range == 0.15
     assert config.noise_sigma_max == 8.0
@@ -321,3 +322,57 @@ def test_make_pair_is_reproducible_given_the_same_seed() -> None:
 
     assert torch.equal(view_a1, view_a2)
     assert torch.equal(view_b1, view_b2)
+
+
+def test_composed_translate_crop_worst_case_meets_spec_retention_floor() -> None:
+    config = AugmentationConfig()
+    h, w = 144, 160
+
+    scale = config.crop_min_area_fraction**0.5
+    crop_h_min = max(1, round(h * scale))
+    crop_w_min = max(1, round(w * scale))
+
+    worst_case_rows_lost = config.max_translate_px + (h - crop_h_min)
+    worst_case_cols_lost = config.max_translate_px + (w - crop_w_min)
+    worst_case_retention = (
+        (h - worst_case_rows_lost) * (w - worst_case_cols_lost) / (h * w)
+    )
+
+    assert worst_case_retention >= 0.90
+
+
+def test_augment_view_rejects_non_uint8_input() -> None:
+    frame = torch.rand((1, 144, 160), dtype=torch.float32)
+    config = AugmentationConfig()
+    rng = torch.Generator().manual_seed(0)
+
+    with pytest.raises(ValueError, match="uint8"):
+        augment_view(frame, config, rng)
+
+
+def test_augment_view_rejects_wrong_shape_input() -> None:
+    frame = torch.zeros((2, 1, 144, 160), dtype=torch.uint8)
+    config = AugmentationConfig()
+    rng = torch.Generator().manual_seed(0)
+
+    with pytest.raises(ValueError, match="shape"):
+        augment_view(frame, config, rng)
+
+
+def test_augment_view_composition_order_is_translate_crop_brightness_noise_blur_jpeg() -> None:
+    frame = torch.zeros((1, 144, 160), dtype=torch.uint8)
+    frame[0, 70:74, 78:82] = 255
+    config = AugmentationConfig()
+
+    result = augment_view(frame, config, torch.Generator().manual_seed(20))
+
+    expected = frame
+    rng = torch.Generator().manual_seed(20)
+    expected = random_translate(expected, config, rng)
+    expected = random_crop_resize(expected, config, rng)
+    expected = random_brightness_contrast(expected, config, rng)
+    expected = random_gaussian_noise(expected, config, rng)
+    expected = random_gaussian_blur(expected, config, rng)
+    expected = random_jpeg_artifact(expected, config, rng)
+
+    assert torch.equal(result, expected)

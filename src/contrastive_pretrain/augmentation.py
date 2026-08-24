@@ -18,8 +18,8 @@ from torchvision.transforms.v2 import functional as TF
 
 @dataclass(frozen=True)
 class AugmentationConfig:
-    max_translate_px: int = 4
-    crop_min_area_fraction: float = 0.90
+    max_translate_px: int = 2
+    crop_min_area_fraction: float = 0.93
     brightness_range: float = 0.15
     contrast_range: float = 0.15
     noise_sigma_max: float = 8.0
@@ -149,6 +149,10 @@ def random_jpeg_artifact(frame: torch.Tensor, config: AugmentationConfig, rng: t
 
 
 def augment_view(frame: torch.Tensor, config: AugmentationConfig, rng: torch.Generator) -> torch.Tensor:
+    if frame.dtype != torch.uint8 or frame.shape != (1, frame.shape[-2], frame.shape[-1]):
+        raise ValueError(
+            f"augment_view expects a (1, H, W) uint8 tensor, got shape={tuple(frame.shape)} dtype={frame.dtype}"
+        )
     view = random_translate(frame, config, rng)
     view = random_crop_resize(view, config, rng)
     view = random_brightness_contrast(view, config, rng)

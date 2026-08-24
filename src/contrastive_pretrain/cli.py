@@ -17,7 +17,15 @@ from observability.visualization import build_augmentation_contact_sheet
 
 def _load_grayscale_frames(frames_dir: Path) -> list[torch.Tensor]:
     paths = sorted(frames_dir.glob("*.png"))
-    return [read_image(str(p), mode=ImageReadMode.GRAY) for p in paths]
+    frames = [read_image(str(p), mode=ImageReadMode.GRAY) for p in paths]
+    if frames:
+        shapes = {tuple(f.shape) for f in frames}
+        if len(shapes) > 1:
+            raise click.ClickException(
+                f"Frames in {frames_dir} have mismatched shapes: {sorted(shapes)}. "
+                "All frames must be the same size to build a contact sheet."
+            )
+    return frames
 
 
 @click.group()
@@ -26,14 +34,23 @@ def main() -> None:
 
 
 @main.command()
-@click.option("--frames-dir", type=click.Path(path_type=Path, exists=True), required=True)
+@click.option("--frames-dir", type=click.Path(path_type=Path, exists=True, file_okay=False), required=True)
 @click.option("--out", type=click.Path(path_type=Path), default=Path("augmentation_preview.png"))
 @click.option("--seed", type=int, default=0)
-def preview(frames_dir: Path, out: Path, seed: int) -> None:
+@click.option(
+    "--limit",
+    type=int,
+    default=12,
+    help="Maximum frames in the preview sheet (sampled evenly across the sorted file list).",
+)
+def preview(frames_dir: Path, out: Path, seed: int, limit: int) -> None:
     """Build an (original, view A, view B) contact sheet from sample frames."""
     frames = _load_grayscale_frames(frames_dir)
     if not frames:
         raise click.ClickException(f"No .png frames found in {frames_dir}")
+    if len(frames) > limit:
+        indices = [round(i * (len(frames) - 1) / (limit - 1)) for i in range(limit)] if limit > 1 else [0]
+        frames = [frames[i] for i in indices]
 
     config = AugmentationConfig()
     rng = torch.Generator().manual_seed(seed)
@@ -45,5 +62,6 @@ def preview(frames_dir: Path, out: Path, seed: int) -> None:
         )
 
     sheet = build_augmentation_contact_sheet(triples)
+    out.parent.mkdir(parents=True, exist_ok=True)
     Image.fromarray(sheet).save(out)
     click.echo(f"Wrote {len(frames)}-frame augmentation preview to {out}")
