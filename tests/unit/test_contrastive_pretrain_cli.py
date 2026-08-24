@@ -74,6 +74,21 @@ class _FakeHfApi:
         pass
 
 
+class _FakeTrackioModule:
+    """`cli.train` constructs a real TrackioRun before calling `run_training`,
+    so this test must fake the `trackio` module itself, not just `run_training`,
+    or it makes a real call into the trackio library on every test run."""
+
+    def init(self, project: str, name: str) -> None:
+        pass
+
+    def log(self, metrics: dict) -> None:
+        pass
+
+    def finish(self) -> None:
+        pass
+
+
 def test_cli_help_lists_train_and_export_commands() -> None:
     runner = CliRunner()
     result = runner.invoke(main, ["--help"])
@@ -92,6 +107,7 @@ def test_train_command_builds_deps_from_config_and_calls_run_training(tmp_path, 
     monkeypatch.setattr("contrastive_pretrain.cli.RealHfClient", lambda *a, **k: object())
     monkeypatch.setattr("contrastive_pretrain.cli.HfApi", lambda: _FakeHfApi())
     monkeypatch.setattr("contrastive_pretrain.cli.get_token", lambda: "fake-token")
+    monkeypatch.setattr("contrastive_pretrain.cli.trackio", _FakeTrackioModule())
 
     runner = CliRunner()
     result = runner.invoke(main, ["train", "--config", str(config_path)])
