@@ -7,8 +7,11 @@ fakes, matching the rest of this codebase's DI conventions.
 from __future__ import annotations
 
 from collections.abc import Callable
+from typing import TypeVar
 
 BackoffFunc = Callable[[int, Exception], float]
+
+T = TypeVar("T")
 
 
 def exponential_backoff(base_delay: float) -> BackoffFunc:
@@ -43,18 +46,17 @@ def rate_limit_aware_backoff(base_delay: float, rate_limit_delay: float) -> Back
 
 
 def retry_with_backoff(
-    func: Callable[[], None],
+    func: Callable[[], T],
     max_retries: int,
     base_delay: float,
     sleep_func: Callable[[float], None],
     backoff_seconds: BackoffFunc | None = None,
-) -> None:
+) -> T:
     backoff = backoff_seconds or exponential_backoff(base_delay)
     attempt = 0
     while True:
         try:
-            func()
-            return
+            return func()
         except Exception as exc:
             attempt += 1
             if attempt >= max_retries:

@@ -79,3 +79,12 @@ def test_rate_limit_aware_backoff_falls_back_to_exponential_for_other_errors() -
 
     assert backoff(1, RuntimeError("connection reset")) == 1.0
     assert backoff(2, RuntimeError("connection reset")) == 2.0
+
+
+def test_retry_with_backoff_returns_the_wrapped_callables_result() -> None:
+    def make_greeting() -> str:
+        return "hello"
+
+    result = retry_with_backoff(make_greeting, max_retries=1, base_delay=1.0, sleep_func=lambda _: None)
+
+    assert result == "hello"
