@@ -322,9 +322,12 @@ def run_training(deps: TrainingDeps) -> None:
         # measured against a datasets.IterableDataset (which, unlike a plain
         # torch IterableDataset, implements state_dict/load_state_dict, so
         # StatefulDataLoader delegates to it), restoring an exhausted state
-        # yields zero batches -- not just for the resumed epoch but for every
-        # epoch after it, i.e. a permanently stalled run that still logs val
-        # losses and re-saves checkpoints as if it were training.
+        # starves the resumed epoch of batches. Because this loop always
+        # calls train_dataset.set_epoch(epoch) with a new value each epoch,
+        # measured behavior in this exact shape is that only the resumed
+        # epoch is starved (zero batches) -- the epoch after it recovers
+        # fully. Not saving stale dataloader state here still eliminates
+        # that starved epoch entirely, at no cost to the epochs after it.
         _save_checkpoint(epoch + 1, None)
 
     deps.trackio_run.finish()

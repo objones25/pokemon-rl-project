@@ -195,10 +195,13 @@ def test_run_training_resumes_projector_and_makes_progress(tmp_path, monkeypatch
     IterableDataset, and StatefulDataLoader only falls back to a naive
     fast-forward for those: measured, restoring an exhausted state to a
     plain fake still re-yields the whole epoch, so the fake CANNOT
-    reproduce the stall. The production stream is a
-    datasets.IterableDataset, which implements state_dict/load_state_dict,
-    and there the measured behavior of restoring an exhausted state is
-    zero batches -- in that epoch and in every epoch after it.
+    reproduce the starvation. The production stream is a
+    datasets.IterableDataset, which implements state_dict/load_state_dict;
+    there, measured in this training loop's actual shape (a new
+    set_epoch(epoch) call every epoch), restoring an exhausted state
+    starves only the resumed epoch of batches -- the epoch after it
+    recovers fully. Not saving stale dataloader state at the epoch
+    boundary eliminates that starved epoch entirely either way.
 
     8 rows at batch_size=4 is 2 steps per epoch, and
     checkpoint_interval_steps=1 makes step 1 a genuine mid-epoch periodic
