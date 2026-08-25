@@ -56,9 +56,12 @@ In scope:
   separate script/command to remember to run first.
 - The corresponding branch in `_load_base_stream` so `build_train_dataset`
   / `build_val_dataset` can read from the local cache instead of the
-  Hub, with zero changes to anything downstream of `_load_base_stream`
-  (filter, resize-map, shuffle, augmentation-pair transform, dataloader
-  construction, checkpoint/resume — all untouched).
+  Hub. `.filter()`, `.shuffle()`, `to_pair_transform`, dataloader
+  construction, and checkpoint/resume are all untouched; the one
+  pipeline-structure change is that the pre-shuffle
+  `_ResizeToCanonicalWithProgress` `.map()` stage is skipped entirely
+  when reading from the cache, since it would otherwise run a whole
+  extra no-op pass over already-canonical data (see rationale below).
 - Widening `hf_storage.retry.retry_with_backoff` to be generic over a
   return value, so shard downloads (which need the downloaded bytes, not
   just success/failure) can reuse it as-is.
@@ -74,10 +77,11 @@ Out of scope:
   right now. If a future pod loses this volume, the next `train` run
   simply rebuilds the cache from the Hub source again — an accepted,
   bounded cost.
-- Any change to `_resize_to_canonical`, the augmentation pipeline, the
-  model, or the training loop itself. This spec touches only how bytes
-  get from the Hub to the dataloader, not what happens to them once
-  they're in it.
+- Any change to `_resize_to_canonical`'s or `to_pair_transform`'s
+  internal logic, the augmentation pipeline, the model, or the training
+  loop itself. This spec changes only how bytes get from the Hub to the
+  dataloader and whether the pre-shuffle resize *stage* runs at all —
+  never what any transform function itself does.
 - Deleting or modifying the original `objones25/pokemon-frames` Hub
   repo. It remains the single source of truth; the local cache is a
   derived, disposable artifact.
@@ -119,14 +123,48 @@ and needing its own new test surface for a project convention
 (`datasets`-library Parquet shards) this repo has already standardized
 on for the Hub-hosted dataset.
 
-**Resize-map stays unconditional (runs again on already-resized
-frames), rather than branching around it for the cache path.**
-`_resize_to_canonical` resizes a 144x160 frame to 144x160 — a near-zero-
-cost identity resize once the frame's decode/tensor-conversion cost is
-already paid, which happens either way. Special-casing the pipeline to
-skip it when reading from the cache would save a negligible amount of
-CPU at the cost of a second, cache-aware `.map()` call site to test and
-maintain. Not worth it.
+**Resize-map is skipped entirely for the cache path — not just cheap,
+actually absent.** Verified via `inspect.getsource` against the
+installed `torchvision` (not assumed): `resize_image`'s kernel
+explicitly short-circuits — `if (new_height, new_width) == (old_height,
+old_width): return image` — and `to_image` on an already-`torch.Tensor`
+input is a plain identity assignment (`output = inpt`) before a cheap
+subclass wrap. So `to_pair_transform`'s own `to_image`+`resize` calls,
+which run on every row regardless of data source, are already free
+no-ops on canonical-sized input in both pipelines — there was never
+duplicate decode or duplicate interpolation math to eliminate. An
+earlier draft of this spec used that fact to justify leaving
+`_ResizeToCanonicalWithProgress`'s `.map()` stage in unconditionally for
+the cache path too ("near-zero-cost, not worth branching around") — that
+was the wrong conclusion from a correct fact. The stage itself is not
+free: every `.map()` in a `datasets` streaming pipeline is a full
+row-wise Python generator hop, paid on all ~296K rows every epoch, and
+for already-canonical cached frames that hop does nothing useful except
+decode the PIL image into a tensor a step early (`to_pair_transform`'s
+own `to_image` does that same decode immediately after `.shuffle()`
+either way) and log a `resize_to_canonical_progress` line that would now
+describe a resize that never happens — actively misleading, not just
+wasteful. `build_train_dataset`/`build_val_dataset` therefore skip this
+`.map()` stage entirely when `config.local_cache_dir` is set:
+
+```python
+if not config.local_cache_dir:
+    ds = ds.map(_ResizeToCanonicalWithProgress())  # BEFORE shuffle -- only
+    # needed for raw, native-resolution Hub frames; cached frames are
+    # already canonical-sized, see _resize_to_canonical's docstring.
+```
+
+This is the one place this spec's pipeline structure differs between
+the two data sources; everything else in the pipeline
+(`.filter()`, `.shuffle()`, `to_pair_transform`, dataloader construction)
+is identical either way. The one accepted trade-off: the cache path
+loses the shuffle-buffer-fill wall-clock visibility
+`_ResizeToCanonicalWithProgress`'s docstring was originally built to
+provide (see its own docstring) — accepted because eliminating exactly
+that multi-minute wait is this entire spec's purpose; local-disk reads
+filling a shuffle buffer are not expected to reintroduce a wait long
+enough to need its own progress log, and `resize_cache_shard_done`
+already gives visibility into the one-time build pass itself.
 
 **Explicit `local_cache_dir` config field, not auto-detection of a fixed
 path.** Auto-detecting a fixed path and silently switching data sources
@@ -232,22 +270,47 @@ def _load_base_stream(config: TrainingConfig):
 
 def build_train_dataset(config: TrainingConfig):
     ensure_local_cache(config)
-    ...  # unchanged from here: _load_base_stream, filter, resize-map, shuffle, to_pair_transform
+    ds = _load_base_stream(config)
+    ds = ds.filter(lambda ex: ex["video_id"] not in config.val_video_ids)
+    if not config.local_cache_dir:
+        ds = ds.map(_ResizeToCanonicalWithProgress())  # BEFORE shuffle -- see its
+        # docstring; skipped for the cache path, see rationale above.
+    ds = ds.shuffle(buffer_size=config.shuffle_buffer_size, seed=config.seed)
+    ds = ds.map(
+        functools.partial(to_pair_transform, augmentation_config=AugmentationConfig(), base_seed=config.seed),
+        remove_columns=["image"],
+    )
+    return ds
 
 
 def build_val_dataset(config: TrainingConfig):
     ensure_local_cache(config)
-    ...  # unchanged
+    ds = _load_base_stream(config)
+    ds = ds.filter(lambda ex: ex["video_id"] in config.val_video_ids)
+    if not config.local_cache_dir:
+        ds = ds.map(_ResizeToCanonicalWithProgress())
+    ds = ds.map(
+        functools.partial(to_pair_transform, augmentation_config=AugmentationConfig(), base_seed=config.seed),
+        remove_columns=["image"],
+    )
+    return ds
 ```
 
 `ensure_local_cache` (from the new `resize_cache` module, imported into
 `dataset.py`) is a no-op single `if not config.local_cache_dir: return`
 when the field is unset — which is every existing test's default, so no
 existing test needs to change. Both existing fast tests that
-monkeypatch `_load_base_stream` directly are also unaffected. A new fast
-test exercises the `_load_base_stream` local-cache branch against a tiny
-on-disk Parquet fixture, and a second confirms `build_train_dataset`
-calls `ensure_local_cache` (monkeypatched) before `_load_base_stream`.
+monkeypatch `_load_base_stream` directly are also unaffected — they
+replace the whole function, and the `if not config.local_cache_dir`
+guard around the resize-map is `False`-by-default-config the same way.
+New fast tests: the `_load_base_stream` local-cache branch against a
+tiny on-disk Parquet fixture; `build_train_dataset` calls
+`ensure_local_cache` (monkeypatched) before `_load_base_stream`; and —
+directly testing this section's fix — `build_train_dataset`/
+`build_val_dataset` with `local_cache_dir` set do *not* invoke
+`_ResizeToCanonicalWithProgress` at all (monkeypatch it as a call
+counter, assert zero calls), while the default (`local_cache_dir=None`)
+config still does.
 
 ### `hf_storage/retry.py` — generic `retry_with_backoff`
 
@@ -385,6 +448,13 @@ Unit (fast, no network, per this repo's TDD convention):
   itself — no real network).
 - `build_train_dataset`/`build_val_dataset` call `ensure_local_cache`
   before `_load_base_stream` (monkeypatch both, assert call order).
+- `build_train_dataset`/`build_val_dataset` skip
+  `_ResizeToCanonicalWithProgress` entirely when `local_cache_dir` is
+  set (monkeypatch it as a call counter, assert zero calls over a
+  synthetic cached-style row stream), and still invoke it when
+  `local_cache_dir` is `None` (regression test for the existing
+  resize-before-shuffle OOM fix — confirms this change doesn't
+  resurrect it for the Hub-streaming path).
 - `retry_with_backoff`'s widened generic signature: existing tests
   (moved/kept as-is) plus one new case confirming a `Callable[[], T]`'s
   return value passes through on success.
