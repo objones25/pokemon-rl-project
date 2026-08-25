@@ -194,7 +194,7 @@ def compute_latent_stats(
     was_training = encoder.training
     encoder.eval()
     features = []
-    with torch.no_grad():
+    with torch.inference_mode():
         for i, row in enumerate(rows):
             if i >= max_examples:
                 break

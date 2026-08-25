@@ -1,6 +1,7 @@
 """Training loop orchestration: startup memory probe, resume-from-checkpoint,
-per-step training under bf16 autocast, periodic checkpointing, periodic
-frozen-artifact export, and structured logging / Trackio reporting.
+per-step training under autocast (bf16 on CUDA/CPU, fp16 on MPS -- see
+autocast_dtype), periodic checkpointing, periodic frozen-artifact export,
+and structured logging / Trackio reporting.
 
 run_memory_probe and check_finite_loss are the two places this module
 deliberately fails fast rather than silently degrading -- see the design
@@ -19,6 +20,18 @@ from torch import nn
 from contrastive_pretrain.losses import nt_xent_loss
 
 logger = logging.getLogger(__name__)
+
+
+def autocast_dtype(device: torch.device) -> torch.dtype:
+    """bf16 everywhere except MPS. The target production hardware is a CUDA
+    A100 (bf16-native, Ampere+), and CPU's own recommended autocast dtype is
+    also bf16 -- but MPS has weak bf16 kernel coverage and torch's own
+    per-device guidance there is fp16 (see scripts/check_env.py's autocast
+    table in the pytorch skill). No GradScaler is used anywhere in this loop
+    (torch reports none available on MPS either), so this only changes local
+    MPS dev-loop numerics -- never the CUDA A100 production path.
+    """
+    return torch.float16 if device.type == "mps" else torch.bfloat16
 
 
 def run_memory_probe(probe_step: Callable[[], None], batch_size: int) -> None:
@@ -53,7 +66,7 @@ def compute_val_loss(
 
     total_loss = 0.0
     n_batches = 0
-    with torch.no_grad():
+    with torch.inference_mode():
         for i, batch in enumerate(val_batches):
             if i >= max_batches:
                 break
@@ -61,10 +74,10 @@ def compute_val_loss(
             view_b = batch["view_b"].to(device).float()
             # Matches the training step's autocast context -- otherwise
             # validation runs in full fp32 at the training batch size, and
-            # the startup memory probe (which only exercises the bf16
-            # training step) doesn't actually cover validation's memory
-            # profile.
-            with torch.autocast(device_type=device.type, dtype=torch.bfloat16):
+            # the startup memory probe (which only exercises the training
+            # step's autocast dtype) doesn't actually cover validation's
+            # memory profile.
+            with torch.autocast(device_type=device.type, dtype=autocast_dtype(device)):
                 z_a = projector(encoder(view_a))
                 z_b = projector(encoder(view_b))
                 loss = nt_xent_loss(z_a, z_b, temperature)
@@ -198,7 +211,7 @@ def run_training(deps: TrainingDeps) -> None:
         dummy_b = torch.zeros(config.batch_size, 1, 144, 160, device=device).to(
             memory_format=torch.channels_last
         )
-        with torch.autocast(device_type=device.type, dtype=torch.bfloat16):
+        with torch.autocast(device_type=device.type, dtype=autocast_dtype(device)):
             z_a = projector(compiled_encoder(dummy_a))
             z_b = projector(compiled_encoder(dummy_b))
             loss = nt_xent_loss(z_a, z_b, config.temperature)
@@ -334,7 +347,7 @@ def run_training(deps: TrainingDeps) -> None:
                 contact_sheet_logged_this_epoch = True
 
             optimizer.zero_grad(set_to_none=True)
-            with torch.autocast(device_type=device.type, dtype=torch.bfloat16):
+            with torch.autocast(device_type=device.type, dtype=autocast_dtype(device)):
                 z_a = projector(compiled_encoder(view_a))
                 z_b = projector(compiled_encoder(view_b))
                 loss = nt_xent_loss(z_a, z_b, config.temperature)
