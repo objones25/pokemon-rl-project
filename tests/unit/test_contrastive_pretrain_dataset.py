@@ -3,7 +3,11 @@ import torch
 from PIL import Image
 
 from contrastive_pretrain.augmentation import AugmentationConfig
-from contrastive_pretrain.dataset import row_seed, to_pair_transform
+from contrastive_pretrain.dataset import (
+    _resize_to_canonical,
+    row_seed,
+    to_pair_transform,
+)
 
 
 def _grayscale_example(video_id: str = "abc123", timestamp_s: float = 5.0) -> dict:
@@ -55,6 +59,16 @@ def test_to_pair_transform_resizes_non_canonical_resolution_frames() -> None:
     assert result["view_a"].shape == (1, 144, 160)
     assert result["view_b"].shape == (1, 144, 160)
     assert result["original"].dtype == torch.uint8
+
+
+def test_resize_to_canonical_resizes_native_resolution_frames() -> None:
+    pixels = np.random.default_rng(0).integers(0, 256, (2160, 2400), dtype=np.uint8)
+    example = {"image": Image.fromarray(pixels, mode="L")}
+
+    result = _resize_to_canonical(example)
+
+    assert result["image"].shape == (1, 144, 160)
+    assert result["image"].dtype == torch.uint8
 
 
 def test_to_pair_transform_is_deterministic_for_the_same_row() -> None:
@@ -170,7 +184,10 @@ def _synthetic_frame_stream(video_ids: list[str]):
             "game": datasets.Value("string"),
         }
     )
-    rows = [_grayscale_example(video_id=vid, timestamp_s=float(i)) for i, vid in enumerate(video_ids)]
+    rows = [
+        _grayscale_example(video_id=vid, timestamp_s=float(i))
+        for i, vid in enumerate(video_ids)
+    ]
     return datasets.Dataset.from_list(rows, features=features).to_iterable_dataset()
 
 
@@ -181,7 +198,9 @@ def test_build_train_dataset_excludes_val_videos_fast(monkeypatch) -> None:
     would previously ship undetected by the fast suite."""
     monkeypatch.setattr(
         "contrastive_pretrain.dataset._load_base_stream",
-        lambda config: _synthetic_frame_stream(["train_a", "val_a", "val_b", "train_b"]),
+        lambda config: _synthetic_frame_stream(
+            ["train_a", "val_a", "val_b", "train_b"]
+        ),
     )
     config = TrainingConfig(val_video_ids=("val_a", "val_b"))
 
@@ -193,13 +212,61 @@ def test_build_train_dataset_excludes_val_videos_fast(monkeypatch) -> None:
 def test_build_val_dataset_only_yields_held_out_videos_fast(monkeypatch) -> None:
     monkeypatch.setattr(
         "contrastive_pretrain.dataset._load_base_stream",
-        lambda config: _synthetic_frame_stream(["train_a", "val_a", "val_b", "train_b"]),
+        lambda config: _synthetic_frame_stream(
+            ["train_a", "val_a", "val_b", "train_b"]
+        ),
     )
     config = TrainingConfig(val_video_ids=("val_a", "val_b"))
 
     ds = build_val_dataset(config)
 
     assert [row["video_id"] for row in ds] == ["val_a", "val_b"]
+
+
+def test_build_train_dataset_resizes_native_resolution_frames_before_shuffling(
+    monkeypatch,
+) -> None:
+    """Regression test for a real production OOM: .shuffle()'s buffer holds
+    buffer_size examples PER WORKER (independent, unshared buffers), so it
+    must run on already-small frames, not raw native-resolution ones --
+    real source videos are stored up to 2400x2160 (see
+    configs/video_sources.yaml), and buffering those at
+    shuffle_buffer_size=10_000 x num_workers=8 OOM-killed a real training
+    pod. This asserts the full build_train_dataset pipeline (filter ->
+    resize -> shuffle -> to_pair_transform) still produces correctly-shaped
+    views when fed an oversized frame -- i.e. the resize-before-shuffle
+    reordering didn't break the pipeline."""
+    features = datasets.Features(
+        {
+            "image": datasets.Image(),
+            "video_id": datasets.Value("string"),
+            "timestamp_s": datasets.Value("float64"),
+            "game": datasets.Value("string"),
+        }
+    )
+
+    def _large_frame_stream(config):
+        pixels = np.random.default_rng(0).integers(0, 256, (2160, 2400), dtype=np.uint8)
+        rows = [
+            {
+                "image": Image.fromarray(pixels, mode="L"),
+                "video_id": "train_a",
+                "timestamp_s": 0.0,
+                "game": "red",
+            }
+        ]
+        return datasets.Dataset.from_list(rows, features=features).to_iterable_dataset()
+
+    monkeypatch.setattr(
+        "contrastive_pretrain.dataset._load_base_stream", _large_frame_stream
+    )
+    config = TrainingConfig(val_video_ids=("val_a",))
+
+    ds = build_train_dataset(config)
+    row = next(iter(ds))
+
+    assert row["view_a"].shape == (1, 144, 160)
+    assert row["view_b"].shape == (1, 144, 160)
 
 
 @pytest.mark.slow

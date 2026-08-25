@@ -27,6 +27,22 @@ def row_seed(base_seed: int, video_id: str, timestamp_s: float) -> int:
     return int.from_bytes(digest[:8], "big")
 
 
+def _resize_to_canonical(example: dict) -> dict:
+    """Must run BEFORE .shuffle() in build_train_dataset -- source videos are
+    stored at their native crop resolution (up to 2400x2160, per
+    configs/video_sources.yaml), not pre-resized to the model's 144x160
+    input. .shuffle()'s buffer holds buffer_size examples PER WORKER
+    (independent buffers, not shared), so buffering native-resolution
+    frames there is what actually OOM-killed a real training pod at
+    shuffle_buffer_size=10_000 x num_workers=8: up to 80,000 buffered
+    frames at ~5MB each (2400x2160 uint8) is tens of GB, not the
+    design spec's ~460MB estimate, which assumed already-small frames.
+    Resizing first means the buffer only ever holds ~23KB (144x160) frames."""
+    frame = TF.to_image(example["image"])  # (1, H, W) uint8
+    frame = TF.resize(frame, [INPUT_HEIGHT, INPUT_WIDTH], antialias=True)
+    return {"image": frame}
+
+
 def to_pair_transform(example: dict, augmentation_config: AugmentationConfig, base_seed: int) -> dict:
     frame = TF.to_image(example["image"])  # (1, H, W) uint8
     frame = TF.resize(frame, [INPUT_HEIGHT, INPUT_WIDTH], antialias=True)
@@ -72,6 +88,7 @@ def _load_base_stream(config: TrainingConfig):
 def build_train_dataset(config: TrainingConfig):
     ds = _load_base_stream(config)
     ds = ds.filter(lambda ex: ex["video_id"] not in config.val_video_ids)
+    ds = ds.map(_resize_to_canonical)  # BEFORE shuffle -- see its docstring
     ds = ds.shuffle(buffer_size=config.shuffle_buffer_size, seed=config.seed)
     ds = ds.map(
         functools.partial(to_pair_transform, augmentation_config=AugmentationConfig(), base_seed=config.seed),
@@ -83,6 +100,7 @@ def build_train_dataset(config: TrainingConfig):
 def build_val_dataset(config: TrainingConfig):
     ds = _load_base_stream(config)
     ds = ds.filter(lambda ex: ex["video_id"] in config.val_video_ids)
+    ds = ds.map(_resize_to_canonical)
     ds = ds.map(
         functools.partial(to_pair_transform, augmentation_config=AugmentationConfig(), base_seed=config.seed),
         remove_columns=["image"],
