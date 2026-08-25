@@ -1,5 +1,5 @@
 from observability.logging_config import JSONFormatter, configure_logging
-from observability.tracking import TrackioRun
+from observability.tracking import WandbRun
 from observability.visualization import (
     build_augmentation_contact_sheet,
     build_contact_sheet,
@@ -8,7 +8,7 @@ from observability.visualization import (
 
 __all__ = [
     "JSONFormatter",
-    "TrackioRun",
+    "WandbRun",
     "build_augmentation_contact_sheet",
     "build_contact_sheet",
     "build_pair_preview",

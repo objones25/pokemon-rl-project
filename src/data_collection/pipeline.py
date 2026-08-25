@@ -28,7 +28,7 @@ from data_collection.dedup import PerceptualHashDeduper
 from data_collection.hf_uploader import HfUploader, Manifest
 from data_collection.registry import VideoSource
 from hf_storage.retry import retry_with_backoff
-from observability.tracking import NullTrackioRun, TrackioRunLike
+from observability.tracking import ExperimentRunLike, NullExperimentRun
 from observability.visualization import build_contact_sheet
 
 logger = logging.getLogger(__name__)
@@ -47,7 +47,7 @@ class PipelineDeps:
     # content on a resumed video, via ffmpeg's -ss (see extract.stream_frames).
     frame_source: Callable[[VideoSource, float], Iterator[np.ndarray]]
     uploader: HfUploader
-    trackio_run: TrackioRunLike = field(default_factory=NullTrackioRun)
+    wandb_run: ExperimentRunLike = field(default_factory=NullExperimentRun)
     batch_size: int = 500
     max_retries: int = 3
     sleep_func: Callable[[float], None] = field(default=time.sleep)
@@ -89,14 +89,14 @@ def _checkpoint_progress(
     logger.info("video_progress", extra=metrics)
 
     # Checkpoint persistence is the critical path -- it must happen
-    # regardless of Trackio's outcome. Trackio logging comes last and is
-    # best-effort (see observability.tracking.TrackioRun): a resume
+    # regardless of W&B's outcome. W&B logging comes last and is
+    # best-effort (see observability.tracking.WandbRun): a resume
     # checkpoint must never be lost because a dashboard call failed.
     with manifest_lock:
         manifest.save_progress(video.video_id, resume_seconds, shard_index)
         deps.uploader.save_manifest(manifest)
 
-    deps.trackio_run.log(metrics)
+    deps.wandb_run.log(metrics)
 
 
 def _process_video(
@@ -167,10 +167,10 @@ def _process_video(
     # "video_processed" (not "video_complete"): this event fires whenever the
     # frame loop finishes for any reason, including a zero-frame extraction,
     # which is about to be raised as a failure below. Logging/reporting
-    # happens first so accurate counts reach Trackio even though the video
+    # happens first so accurate counts reach W&B even though the video
     # will be marked failed, not complete.
     logger.info("video_processed", extra=metrics)
-    deps.trackio_run.log(metrics)
+    deps.wandb_run.log(metrics)
 
     if sampled == 0:
         raise RuntimeError(f"no frames extracted for video {video.video_id}")
@@ -260,6 +260,6 @@ def run_pipeline(registry: list[VideoSource], deps: PipelineDeps) -> PipelineRes
                 else:
                     failed += 1
 
-    deps.trackio_run.finish()
+    deps.wandb_run.finish()
 
     return PipelineResult(completed=completed, failed=failed)

@@ -20,10 +20,13 @@ Each gets its own spec and implementation plan before code is written.
 - **Karpathy guidelines**: minimal surgical diffs, no speculative abstraction,
   verify one stage works end-to-end before building the next stage on top of it.
 - **Observability first**: every pipeline/training component logs structured
-  (JSON-lines) progress and emits a live Trackio run. Anything that filters or
-  drops data (dedup, anomaly detection, reward shaping) logs *why*, and produces
-  a periodic visual artifact (contact sheets, sample grids, reward curves) a
-  human can sanity-check without reading raw logs.
+  (JSON-lines) progress and emits a live Weights & Biases (W&B) run. Anything
+  that filters or drops data (dedup, anomaly detection, reward shaping) logs
+  *why*, and produces a periodic visual artifact (contact sheets, sample grids,
+  reward curves) a human can sanity-check without reading raw logs.
+  (Migrated from Trackio: self-hosting Trackio's dashboard on a RunPod pod
+  requires port-forwarding/tunneling to view it from outside the pod, which
+  made it unusable in practice for actually monitoring a run in progress.)
 - **Interface-fit over spec-compliance**: a component's job is to fit how it
   will actually be consumed, not just satisfy the literal spec text.
   Brainstorming must produce concrete, checkable interface contracts before

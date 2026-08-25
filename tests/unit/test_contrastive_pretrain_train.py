@@ -387,7 +387,7 @@ def test_run_training_skips_publish_when_val_loss_does_not_improve(
     assert client.upload_calls.count("model.safetensors") == 1
 
 
-class _SpyTrackioRun:
+class _SpyWandbRun:
     def __init__(self) -> None:
         self.logged: list[dict] = []
 
@@ -410,7 +410,7 @@ def test_run_training_logs_contact_sheet_exactly_once_per_epoch(
         lambda config: _FakeStreamingDataset(n=4),
     )
 
-    trackio_run = _SpyTrackioRun()
+    wandb_run = _SpyWandbRun()
     config = TrainingConfig(
         pretrained=False,
         batch_size=2,
@@ -424,12 +424,12 @@ def test_run_training_logs_contact_sheet_exactly_once_per_epoch(
         TrainingDeps(
             config=config,
             frozen_encoder_client=_FakeHfClient(),
-            trackio_run=trackio_run,
+            wandb_run=wandb_run,
             device=torch.device("cpu"),
         )
     )
 
-    contact_sheet_logs = [m for m in trackio_run.logged if "augmentation_contact_sheet" in m]
+    contact_sheet_logs = [m for m in wandb_run.logged if "augmentation_contact_sheet" in m]
     assert len(contact_sheet_logs) == config.max_epochs  # once per epoch, not once per step
 
 

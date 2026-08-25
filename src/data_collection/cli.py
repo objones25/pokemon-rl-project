@@ -3,10 +3,11 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import click
-import trackio
+import wandb
 from dotenv import load_dotenv
 from huggingface_hub import HfApi, get_token
 
@@ -15,7 +16,7 @@ from data_collection.hf_uploader import HfUploader
 from data_collection.registry import load_registry
 from hf_storage.client import HfClient, RealHfClient
 from observability.logging_config import configure_logging
-from observability.tracking import TrackioRun
+from observability.tracking import WandbRun
 
 _DEFAULT_REGISTRY = Path("configs/video_sources.yaml")
 _DEFAULT_APPROVED_DIR = Path("configs/templates/approved")
@@ -73,12 +74,17 @@ def run(
             "No Hugging Face credentials found. Set HF_TOKEN (e.g. in a "
             ".env file) or run `hf auth login` before using this command."
         )
+    if not os.environ.get("WANDB_API_KEY"):
+        raise click.ClickException(
+            "No W&B credentials found. Set WANDB_API_KEY (e.g. in a "
+            ".env file) or run `wandb login` before using this command."
+        )
 
     sources = load_registry(registry)
 
     client: HfClient = RealHfClient(HfApi(), repo_id)
     uploader = HfUploader(client, repo_id)
-    trackio_run = TrackioRun(trackio, project="pokemon-data-collection", name=repo_id)
+    wandb_run = WandbRun(wandb, project="pokemon-data-collection", name=repo_id)
 
     def frame_source(video_source, resume_seconds: float = 0.0):
         stream_url, _, _, headers = extract.get_stream_info(video_source.url)
@@ -95,7 +101,7 @@ def run(
     deps = pipeline.PipelineDeps(
         frame_source=frame_source,
         uploader=uploader,
-        trackio_run=trackio_run,
+        wandb_run=wandb_run,
         batch_size=batch_size,
         checkpoint_interval_samples=checkpoint_interval,
         max_concurrent_videos=max_concurrent_videos,

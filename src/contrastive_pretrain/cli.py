@@ -4,11 +4,13 @@ the augmentation policy before spending GPU time on a training run."""
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import click
 import torch
-import trackio
+import wandb
+from dotenv import load_dotenv
 from huggingface_hub import HfApi, get_token
 from PIL import Image
 from torchvision.io import ImageReadMode, read_image
@@ -21,7 +23,7 @@ from contrastive_pretrain.encoder_io import compute_latent_stats, push_frozen_en
 from contrastive_pretrain.model import build_encoder
 from contrastive_pretrain.train import TrainingDeps, run_training
 from hf_storage.client import RealHfClient
-from observability.tracking import TrackioRun
+from observability.tracking import WandbRun
 from observability.visualization import build_augmentation_contact_sheet
 
 _DEFAULT_CONFIG = Path("configs/contrastive_pretrain.yaml")
@@ -43,6 +45,7 @@ def _load_grayscale_frames(frames_dir: Path) -> list[torch.Tensor]:
 @click.group()
 def main() -> None:
     """Pokemon Red/Blue contrastive-pretraining tools."""
+    load_dotenv()
 
 
 @main.command()
@@ -88,13 +91,18 @@ def train(config_path: Path) -> None:
             "No Hugging Face credentials found. Set HF_TOKEN (e.g. in a "
             ".env file) or run `hf auth login` before using this command."
         )
+    if not os.environ.get("WANDB_API_KEY"):
+        raise click.ClickException(
+            "No W&B credentials found. Set WANDB_API_KEY (e.g. in a "
+            ".env file) or run `wandb login` before using this command."
+        )
 
     config = load_config(config_path)
     HfApi().create_repo(config.frozen_encoder_repo_id, repo_type="model", exist_ok=True, private=True)
     frozen_client = RealHfClient(HfApi(), config.frozen_encoder_repo_id, repo_type="model")
-    trackio_run = TrackioRun(trackio, project="pokemon-contrastive-pretrain", name=config.frozen_encoder_repo_id)
+    wandb_run = WandbRun(wandb, project="pokemon-contrastive-pretrain", name=config.frozen_encoder_repo_id)
 
-    deps = TrainingDeps(config=config, frozen_encoder_client=frozen_client, trackio_run=trackio_run)
+    deps = TrainingDeps(config=config, frozen_encoder_client=frozen_client, wandb_run=wandb_run)
     run_training(deps)
 
 

@@ -1,27 +1,28 @@
-"""Thin wrapper around an injected `trackio` module, for testability.
+"""Thin wrapper around an injected `wandb` module, for testability.
 
-Trackio is a best-effort live dashboard, not a correctness dependency --
-the pipeline's JSON-lines logs and manifest checkpoints are the source of
+W&B is a best-effort live dashboard, not a correctness dependency -- the
+pipeline's JSON-lines logs and manifest checkpoints are the source of
 truth. `log`/`finish` swallow any exception from the underlying module
-rather than propagate: an internal trackio failure (e.g. its live-server
-sync going down) must never fail real extraction work.
+rather than propagate: an internal W&B failure (e.g. its sync going down)
+must never fail real extraction/training work.
 
-Root cause of a previously-unfixed bug: every `trackio.log()` call made
-from a `ThreadPoolExecutor` worker thread failed with "Call trackio.init()
-before trackio.log().", even right after a successful `trackio.init()`.
-trackio's module-level `init`/`log`/`finish` functions track the active
-run via a `contextvars.ContextVar` (`trackio.context_vars.current_run`),
-and contextvars state set on one thread is NOT visible to a new OS thread
--- a `ThreadPoolExecutor` worker starts with a fresh, empty context, so it
-always saw no current run. `trackio.init()` also returns the `Run`
-instance it created, and that instance's own `log`/`finish` methods
-operate on `self` with no thread-local state, so routing through the
-returned instance (as `TrackioRun` does below) sidesteps the problem
-entirely instead of depending on trackio's global/thread-local state.
+Migrated from trackio (see git history): `wandb.init()` returns a `Run`
+object whose `log`/`finish` are plain instance methods operating on
+`self`, not the `wandb` module's own global `wandb.log()`/`wandb.finish()`
+functions -- this project deliberately routes through the returned
+instance rather than those module-level functions. That is what trackio's
+own SDK required to avoid a real bug this project hit: trackio's
+module-level `log`/`finish` read a `contextvars.ContextVar` that is not
+inherited by a new OS thread, so calling them from a
+`ThreadPoolExecutor` worker (data_collection.pipeline processes videos
+concurrently) always failed with "Call trackio.init() before
+trackio.log().", even right after a successful `init()`. Routing through
+the `Run` instance sidesteps that class of bug regardless of whether the
+tracking SDK in use has the same internal mechanism.
 
-`TrackioRunLike` implementations must never raise -- callers (e.g.
+`ExperimentRunLike` implementations must never raise -- callers (e.g.
 data_collection.pipeline) are not required to guard calls against
-failures from this interface; `TrackioRun` and `NullTrackioRun` below
+failures from this interface; `WandbRun` and `NullExperimentRun` below
 are expected to enforce that themselves.
 """
 
@@ -33,31 +34,31 @@ from typing import Protocol
 logger = logging.getLogger(__name__)
 
 
-class TrackioRunLike(Protocol):
+class ExperimentRunLike(Protocol):
     def log(self, metrics: dict) -> None: ...
     def finish(self) -> None: ...
 
 
-class TrackioRun:
-    def __init__(self, trackio_module, project: str, name: str) -> None:
-        self._run = trackio_module.init(project=project, name=name)
+class WandbRun:
+    def __init__(self, wandb_module, project: str, name: str) -> None:
+        self._run = wandb_module.init(project=project, name=name)
 
     def log(self, metrics: dict) -> None:
         try:
             self._run.log(metrics)
-        except Exception as exc:  # noqa: BLE001 -- must swallow any trackio failure, whatever its type
-            logger.warning("trackio_log_failed", extra={"reason": str(exc)})
+        except Exception as exc:  # noqa: BLE001 -- must swallow any wandb failure, whatever its type
+            logger.warning("wandb_log_failed", extra={"reason": str(exc)})
 
     def finish(self) -> None:
         try:
             self._run.finish()
-        except Exception as exc:  # noqa: BLE001 -- must swallow any trackio failure, whatever its type
-            logger.warning("trackio_finish_failed", extra={"reason": str(exc)})
+        except Exception as exc:  # noqa: BLE001 -- must swallow any wandb failure, whatever its type
+            logger.warning("wandb_finish_failed", extra={"reason": str(exc)})
 
 
-class NullTrackioRun:
-    """No-op TrackioRunLike, used as PipelineDeps.trackio_run's default so
-    callers never need to special-case "no trackio configured"."""
+class NullExperimentRun:
+    """No-op ExperimentRunLike, used as *Deps.wandb_run's default so
+    callers never need to special-case "no experiment tracker configured"."""
 
     def log(self, metrics: dict) -> None:
         pass

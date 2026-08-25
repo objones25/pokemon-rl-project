@@ -76,10 +76,10 @@ class _FakeHfApi:
         pass
 
 
-class _FakeTrackioModule:
-    """`cli.train` constructs a real TrackioRun before calling `run_training`,
-    so this test must fake the `trackio` module itself, not just `run_training`,
-    or it makes a real call into the trackio library on every test run."""
+class _FakeWandbModule:
+    """`cli.train` constructs a real WandbRun before calling `run_training`,
+    so this test must fake the `wandb` module itself, not just `run_training`,
+    or it makes a real call into the wandb library on every test run."""
 
     def init(self, project: str, name: str) -> None:
         pass
@@ -109,7 +109,8 @@ def test_train_command_builds_deps_from_config_and_calls_run_training(tmp_path, 
     monkeypatch.setattr("contrastive_pretrain.cli.RealHfClient", lambda *a, **k: object())
     monkeypatch.setattr("contrastive_pretrain.cli.HfApi", lambda: _FakeHfApi())
     monkeypatch.setattr("contrastive_pretrain.cli.get_token", lambda: "fake-token")
-    monkeypatch.setattr("contrastive_pretrain.cli.trackio", _FakeTrackioModule())
+    monkeypatch.setenv("WANDB_API_KEY", "fake-key")
+    monkeypatch.setattr("contrastive_pretrain.cli.wandb", _FakeWandbModule())
 
     runner = CliRunner()
     result = runner.invoke(main, ["train", "--config", str(config_path)])
@@ -128,6 +129,26 @@ def test_train_command_fails_fast_with_no_hf_credentials(tmp_path, monkeypatch) 
 
     assert result.exit_code != 0
     assert "HF_TOKEN" in result.output
+
+
+def test_train_command_fails_fast_with_no_wandb_credentials(tmp_path, monkeypatch) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("batch_size: 8\n")
+    monkeypatch.setattr("contrastive_pretrain.cli.get_token", lambda: "fake-token")
+    # main()'s own load_dotenv() call would otherwise repopulate WANDB_API_KEY
+    # from a real .env file on the machine running this test, silently
+    # defeating the "missing credentials" scenario and -- worse -- letting a
+    # real wandb.init() fire against a real account. Neutralize it so this
+    # test's outcome depends only on the deleted env var, not on what's in
+    # some developer's local .env.
+    monkeypatch.setattr("contrastive_pretrain.cli.load_dotenv", lambda: None)
+    monkeypatch.delenv("WANDB_API_KEY", raising=False)
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["train", "--config", str(config_path)])
+
+    assert result.exit_code != 0
+    assert "WANDB_API_KEY" in result.output
 
 
 def test_export_frozen_encoder_command_requires_checkpoint_option() -> None:

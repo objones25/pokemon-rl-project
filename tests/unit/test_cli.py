@@ -41,10 +41,32 @@ def test_run_command_fails_fast_with_no_hf_credentials(tmp_path, monkeypatch) ->
     assert "HF_TOKEN" in result.output
 
 
-class _FakeTrackioModule:
-    """`cli.run` constructs a real TrackioRun before calling `pipeline.run_pipeline`,
-    so this test must fake the `trackio` module itself, not just `run_pipeline`,
-    or it makes a real call into the trackio library on every test run."""
+def test_run_command_fails_fast_with_no_wandb_credentials(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr("data_collection.cli.get_token", lambda: "fake-token")
+    # main()'s own load_dotenv() call would otherwise repopulate WANDB_API_KEY
+    # from a real .env file on the machine running this test, silently
+    # defeating the "missing credentials" scenario and -- worse -- letting a
+    # real wandb.init() fire against a real account. Neutralize it so this
+    # test's outcome depends only on the deleted env var, not on what's in
+    # some developer's local .env.
+    monkeypatch.setattr("data_collection.cli.load_dotenv", lambda: None)
+    monkeypatch.delenv("WANDB_API_KEY", raising=False)
+    registry_path = tmp_path / "video_sources.yaml"
+    registry_path.write_text("videos: []\n")
+
+    runner = CliRunner()
+    result = runner.invoke(
+        main, ["run", "--repo-id", "me/pokemon-frames", "--registry", str(registry_path)]
+    )
+
+    assert result.exit_code != 0
+    assert "WANDB_API_KEY" in result.output
+
+
+class _FakeWandbModule:
+    """`cli.run` constructs a real WandbRun before calling `pipeline.run_pipeline`,
+    so this test must fake the `wandb` module itself, not just `run_pipeline`,
+    or it makes a real call into the wandb library on every test run."""
 
     def init(self, project: str, name: str) -> None:
         pass
@@ -58,7 +80,8 @@ class _FakeTrackioModule:
 
 def test_run_command_exits_nonzero_when_pipeline_reports_failures(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr("data_collection.cli.get_token", lambda: "fake-token")
-    monkeypatch.setattr("data_collection.cli.trackio", _FakeTrackioModule())
+    monkeypatch.setenv("WANDB_API_KEY", "fake-key")
+    monkeypatch.setattr("data_collection.cli.wandb", _FakeWandbModule())
     monkeypatch.setattr(
         "data_collection.cli.pipeline.run_pipeline",
         lambda sources, deps: pipeline.PipelineResult(completed=0, failed=1),

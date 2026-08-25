@@ -1,7 +1,7 @@
 """Training loop orchestration: startup memory probe, resume-from-checkpoint,
 per-step training under autocast (bf16 on CUDA/CPU, fp16 on MPS -- see
 autocast_dtype), periodic checkpointing, periodic frozen-artifact export,
-and structured logging / Trackio reporting.
+and structured logging / Weights & Biases reporting.
 
 run_memory_probe and check_finite_loss are the two places this module
 deliberately fails fast rather than silently degrading -- see the design
@@ -96,7 +96,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-import trackio
+import wandb
 
 from contrastive_pretrain.checkpoint import (
     build_checkpoint_state,
@@ -114,7 +114,7 @@ from contrastive_pretrain.dataset import (
 from contrastive_pretrain.encoder_io import compute_latent_stats, push_frozen_encoder
 from contrastive_pretrain.model import build_encoder, build_projector
 from hf_storage.client import AtomicHfClient
-from observability.tracking import NullTrackioRun, TrackioRunLike
+from observability.tracking import ExperimentRunLike, NullExperimentRun
 from observability.visualization import build_augmentation_contact_sheet
 
 # objones25/pokemon-frames has 296,040 rows across 7 videos; excluding the
@@ -135,7 +135,7 @@ _TRAIN_ROW_COUNT = 198_193
 class TrainingDeps:
     config: TrainingConfig
     frozen_encoder_client: AtomicHfClient
-    trackio_run: TrackioRunLike = field(default_factory=NullTrackioRun)
+    wandb_run: ExperimentRunLike = field(default_factory=NullExperimentRun)
     device: torch.device = field(
         default_factory=lambda: (
             torch.accelerator.current_accelerator(check_available=True)
@@ -333,13 +333,14 @@ def run_training(deps: TrainingDeps) -> None:
                     for i in range(min(4, batch["original"].shape[0]))
                 ]
                 contact_sheet = build_augmentation_contact_sheet(triples)
-                # trackio.Run.log only renders known media wrapper types --
-                # a raw ndarray is silently dropped (TrackioRun.log swallows
-                # all exceptions by design), so the sanity-check image would
-                # never actually appear anywhere without this wrapper.
-                deps.trackio_run.log(
+                # A raw ndarray isn't rendered as an image by wandb.Run.log --
+                # it must be wrapped in wandb.Image first (WandbRun.log
+                # swallows all exceptions by design, so a wrapper mismatch
+                # would fail silently rather than error), or the sanity-check
+                # image would never actually appear anywhere.
+                deps.wandb_run.log(
                     {
-                        "augmentation_contact_sheet": trackio.Image(
+                        "augmentation_contact_sheet": wandb.Image(
                             contact_sheet, caption=f"epoch {epoch}"
                         )
                     }
@@ -364,7 +365,7 @@ def run_training(deps: TrainingDeps) -> None:
                     "lr": scheduler.get_last_lr()[0],
                 }
                 logger.info("train_step", extra=metrics)
-                deps.trackio_run.log(metrics)
+                deps.wandb_run.log(metrics)
 
             if global_step % config.checkpoint_interval_steps == 0:
                 # Mid-epoch: the dataloader's state is a real mid-stream
@@ -395,7 +396,7 @@ def run_training(deps: TrainingDeps) -> None:
                 "best_val_loss": best_val_loss,
             },
         )
-        deps.trackio_run.log({"val_loss": val_loss, "epoch": epoch})
+        deps.wandb_run.log({"val_loss": val_loss, "epoch": epoch})
 
         if val_loss < best_val_loss:
             best_val_loss = val_loss
@@ -439,4 +440,4 @@ def run_training(deps: TrainingDeps) -> None:
         # that epoch-boundary work, misreporting it as a streaming stall.
         prev_step_end = time.monotonic()
 
-    deps.trackio_run.finish()
+    deps.wandb_run.finish()
