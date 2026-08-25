@@ -15,12 +15,18 @@ class TrainingConfig:
     frozen_encoder_repo_id: str = "objones25/pokemon-contrastive-encoder"
     val_video_ids: tuple[str, ...] = ("D1SrSFZrV7A", "YW29l3jJXr4")
     pretrained: bool = True
-    batch_size: int = 1024
+    # 512, not 1024: 1024 OOM'd in practice on an 80GB A100 pod (the design
+    # spec's memory arithmetic was an estimate, not a measurement). Dropping
+    # back to 512 also reverts learning_rate/warmup_steps to their coupled
+    # batch=512 baseline (spec's sqrt(2) LR-scaling heuristic and
+    # warmup-covers-the-same-number-of-examples rule) rather than leaving
+    # them tuned for a batch size this pod can't actually run.
+    batch_size: int = 512
     num_workers: int = 8
     shuffle_buffer_size: int = 10_000
     seed: int = 0
-    learning_rate: float = 4e-4
-    warmup_steps: int = 500
+    learning_rate: float = 3e-4
+    warmup_steps: int = 1000
     weight_decay: float = 1e-6
     temperature: float = 0.1
     max_epochs: int = 100

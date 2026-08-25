@@ -16,3 +16,4 @@ configs/templates/approved/_preview.png
 *.webm
 *.log
 .DS_Store
+RUNPOD_SETUP.md
