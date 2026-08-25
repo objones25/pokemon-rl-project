@@ -40,17 +40,23 @@ assumed — this spec is the correction.
 
 In scope:
 
-- A new one-time preprocessing script/CLI command that downloads every
-  shard of `objones25/pokemon-frames`, resizes every row to canonical
-  144x160 via the existing, already-tested `_resize_to_canonical`, and
-  writes the result as local Parquet shards under a configured directory
-  on the pod's `/workspace` volume.
-- Resumability: the script must be safe to kill and rerun at any point
+- A one-time preprocessing step that downloads every shard of
+  `objones25/pokemon-frames`, resizes every row to canonical 144x160 via
+  the existing, already-tested `_resize_to_canonical`, and writes the
+  result as local Parquet shards under a configured directory on the
+  pod's `/workspace` volume. Triggered automatically — not via a
+  separate command — the first time `build_train_dataset` or
+  `build_val_dataset` runs with `TrainingConfig.local_cache_dir` set;
+  every call after that is a fast no-op (see resumability below).
+- Resumability: the step must be safe to kill and rerun at any point
   (RunPod pods restart), picking up only unfinished shards.
-- A new `TrainingConfig.local_cache_dir` field and the corresponding
-  branch in `_load_base_stream` so `build_train_dataset` /
-  `build_val_dataset` can read from the local cache instead of the Hub,
-  with zero changes to anything downstream of `_load_base_stream`
+- A new `TrainingConfig.local_cache_dir` field — the *only* new
+  operator-facing surface this spec adds. Setting it in
+  `configs/contrastive_pretrain.yaml` is the entire opt-in; there is no
+  separate script/command to remember to run first.
+- The corresponding branch in `_load_base_stream` so `build_train_dataset`
+  / `build_val_dataset` can read from the local cache instead of the
+  Hub, with zero changes to anything downstream of `_load_base_stream`
   (filter, resize-map, shuffle, augmentation-pair transform, dataloader
   construction, checkpoint/resume — all untouched).
 - Widening `hf_storage.retry.retry_with_backoff` to be generic over a
@@ -65,8 +71,9 @@ Out of scope:
   hit once during data collection — see `hf_uploader.py`'s
   rate-limit-aware retry and the project's own incident memory) for a
   benefit — durability across a lost pod/volume — that isn't needed
-  right now. If a future pod loses this volume, rerunning the script
-  once against the Hub source is an accepted, bounded cost.
+  right now. If a future pod loses this volume, the next `train` run
+  simply rebuilds the cache from the Hub source again — an accepted,
+  bounded cost.
 - Any change to `_resize_to_canonical`, the augmentation pipeline, the
   model, or the training loop itself. This spec touches only how bytes
   get from the Hub to the dataloader, not what happens to them once
@@ -88,7 +95,7 @@ persistent for a training pod (already established in
 `TrainingConfig.network_volume_checkpoint_dir`'s docstring), so the
 common case — the same pod resuming training, possibly many times — is
 fully covered without any Hub-write exposure. The uncommon case — losing
-the volume entirely — costs one re-run of the script, which is
+the volume entirely — costs one more automatic rebuild pass, which is
 acceptable given resized frames are ~200x smaller than native-resolution
 ones (per `_resize_to_canonical`'s own docstring: ~5MB native vs. ~23KB
 resized) and therefore fast to re-download and re-resize from scratch.
@@ -121,15 +128,34 @@ skip it when reading from the cache would save a negligible amount of
 CPU at the cost of a second, cache-aware `.map()` call site to test and
 maintain. Not worth it.
 
-**Explicit `local_cache_dir` config field, not auto-detection.**
-Auto-detecting a fixed path and silently switching data sources based on
-its presence risks training silently against a stale or partially-built
-cache (e.g., a previous run's script was killed midway) without any
+**Explicit `local_cache_dir` config field, not auto-detection of a fixed
+path.** Auto-detecting a fixed path and silently switching data sources
+based on its presence risks training silently against a stale or
+partially-built cache (e.g., a previous run was killed midway) with no
 signal in the config that this happened. An explicit field, defaulting
 to `None` (today's Hub-streaming behavior, unchanged), makes the data
 source a visible, deliberate choice recorded in
-`configs/contrastive_pretrain.yaml` — flipped on only once the cache
-script has finished.
+`configs/contrastive_pretrain.yaml`.
+
+**Cache build is automatic (inside `build_train_dataset`/
+`build_val_dataset`), not a separate CLI command.** An earlier draft of
+this spec had the operator run a standalone `resize-cache` command
+before flipping `local_cache_dir` on — rejected as needless ceremony:
+two manual steps that have to stay in sync (nothing stops the config
+pointing at a directory that was never actually built) for what should
+be a single operator action. Instead, `build_train_dataset`/
+`build_val_dataset` call a new `resize_cache.ensure_local_cache(config)`
+as their first step whenever `local_cache_dir` is set, before touching
+`_load_base_stream`. This does not remove the one-time cost — the first
+`contrastive-pretrain train` invocation after setting the field still
+pays for the full download+resize pass — it just makes that pass
+transparent and automatic instead of a prerequisite the operator has to
+remember. Every subsequent call is a fast no-op, via the same per-shard
+existence check that already gives the step its resumability. This
+mirrors the precedent `_ResizeToCanonicalWithProgress`'s own docstring
+already sets for this exact pipeline: surface a real, sometimes-long
+wait through structured logs rather than hide it, but never make the
+operator manually gate it.
 
 **Shard-level existence check as the entire resume mechanism, not a
 separate manifest file.** `data_collection/hf_uploader.py` already has a
@@ -160,14 +186,19 @@ callers are unaffected).
 
 ```
 src/contrastive_pretrain/
-    dataset.py          # existing — one new branch in _load_base_stream
-    resize_cache.py      # new — one-time preprocessing orchestration
-    config.py            # existing — one new field on TrainingConfig
-    cli.py                # existing — one new `resize-cache` command
+    dataset.py           # existing — new _load_base_stream branch + one call
+                          # to ensure_local_cache at the top of each builder
+    resize_cache.py       # new — one-time preprocessing orchestration
+    config.py             # existing — one new field on TrainingConfig
 
 src/hf_storage/
-    retry.py             # existing — retry_with_backoff widened to generic T
+    retry.py              # existing — retry_with_backoff widened to generic T
 ```
+
+No CLI changes: `cli.py`'s existing `train` and `export-frozen-encoder`
+commands already call `build_train_dataset`/`build_val_dataset`, so they
+pick up the cache-build step automatically once `local_cache_dir` is set
+in the config they load.
 
 ### `config.py`
 
@@ -177,13 +208,15 @@ class TrainingConfig:
     ...
     # None (default): stream objones25/pokemon-frames directly from the
     # Hub, resizing per-row on the fly, exactly as before this spec. Set
-    # to a directory populated by `contrastive-pretrain resize-cache` to
-    # read already-resized local Parquet shards instead -- eliminates
-    # both the per-epoch network round-trips and per-epoch resize work.
+    # to a /workspace-backed directory to cache already-resized frames
+    # there instead -- build_train_dataset/build_val_dataset populate it
+    # automatically on first use (see resize_cache.ensure_local_cache),
+    # eliminating both the per-epoch network round-trips and per-epoch
+    # resize work on every call after that.
     local_cache_dir: str | None = None
 ```
 
-### `dataset.py` — `_load_base_stream`
+### `dataset.py` — `_load_base_stream` and the two builder functions
 
 ```python
 def _load_base_stream(config: TrainingConfig):
@@ -195,12 +228,26 @@ def _load_base_stream(config: TrainingConfig):
             streaming=True,
         )
     return datasets.load_dataset(config.dataset_repo_id, streaming=True, split="train")
+
+
+def build_train_dataset(config: TrainingConfig):
+    ensure_local_cache(config)
+    ...  # unchanged from here: _load_base_stream, filter, resize-map, shuffle, to_pair_transform
+
+
+def build_val_dataset(config: TrainingConfig):
+    ensure_local_cache(config)
+    ...  # unchanged
 ```
 
-This is the entire change to `dataset.py`. Both existing fast tests that
-monkeypatch `_load_base_stream` itself are unaffected (they replace the
-whole function); a new fast test exercises this branch directly against
-a tiny on-disk Parquet fixture.
+`ensure_local_cache` (from the new `resize_cache` module, imported into
+`dataset.py`) is a no-op single `if not config.local_cache_dir: return`
+when the field is unset — which is every existing test's default, so no
+existing test needs to change. Both existing fast tests that
+monkeypatch `_load_base_stream` directly are also unaffected. A new fast
+test exercises the `_load_base_stream` local-cache branch against a tiny
+on-disk Parquet fixture, and a second confirms `build_train_dataset`
+calls `ensure_local_cache` (monkeypatched) before `_load_base_stream`.
 
 ### `hf_storage/retry.py` — generic `retry_with_backoff`
 
@@ -275,22 +322,42 @@ def build_local_resize_cache(
   applies here since no filtering or data-dropping decision is being
   made, only a lossless resize.
 
-### `cli.py` — new `resize-cache` command
+The module's second, thin public function is the one `dataset.py`
+actually calls:
 
-Matches the existing `train`/`export-frozen-encoder` command shape:
-
+```python
+def ensure_local_cache(config: TrainingConfig) -> None:
+    """No-op if config.local_cache_dir is unset. Otherwise wires
+    build_local_resize_cache to the real Hub (HfApi.list_repo_files +
+    RealHfClient.download_bytes, retried with
+    hf_storage.retry.rate_limit_aware_backoff) and runs it against
+    config.local_cache_dir. Safe to call on every build_train_dataset/
+    build_val_dataset invocation -- already-built shards are skipped, so
+    a fully-populated cache makes this a handful of fast filesystem
+    existence checks, not a re-download."""
+    if not config.local_cache_dir:
+        return
+    api = HfApi()
+    client = RealHfClient(api, config.dataset_repo_id, repo_type="dataset")
+    build_local_resize_cache(
+        list_shard_paths=lambda: [
+            p for p in api.list_repo_files(config.dataset_repo_id, repo_type="dataset")
+            if p.startswith("shards/")
+        ],
+        download_shard=lambda path: retry_with_backoff(
+            lambda: client.download_bytes(path),
+            max_retries=5,
+            base_delay=2.0,
+            sleep_func=time.sleep,
+            backoff_seconds=rate_limit_aware_backoff(base_delay=2.0, rate_limit_delay=3600.0),
+        ),
+        local_cache_dir=Path(config.local_cache_dir),
+    )
 ```
-contrastive-pretrain resize-cache --config configs/contrastive_pretrain.yaml --local-cache-dir /workspace/contrastive_pretrain/resized_cache
-```
 
-Checks for HF credentials up front (same pattern as `train`), calls
-`load_config`, then `build_local_resize_cache` with production
-`list_shard_paths`/`download_shard` implementations bound to
-`config.dataset_repo_id`.
-
-Once the script completes, the operator sets `local_cache_dir` in
-`configs/contrastive_pretrain.yaml` to the same path and starts/resumes
-training as normal.
+This is the only place `resize_cache.py` talks to the real Hub;
+`build_local_resize_cache` itself stays dependency-injected and
+network-free for testing, per this codebase's existing DI conventions.
 
 ## Testing strategy
 
@@ -312,6 +379,12 @@ Unit (fast, no network, per this repo's TDD convention):
   pattern used to empirically verify the Image-feature round-trip
   above) — confirms `build_train_dataset`/`build_val_dataset` work
   unchanged when fed from this branch.
+- `ensure_local_cache`: a no-op (doesn't call `build_local_resize_cache`)
+  when `config.local_cache_dir` is `None`; calls it with the expected
+  `local_cache_dir` when set (monkeypatching `build_local_resize_cache`
+  itself — no real network).
+- `build_train_dataset`/`build_val_dataset` call `ensure_local_cache`
+  before `_load_base_stream` (monkeypatch both, assert call order).
 - `retry_with_backoff`'s widened generic signature: existing tests
   (moved/kept as-is) plus one new case confirming a `Callable[[], T]`'s
   return value passes through on success.
@@ -332,15 +405,17 @@ parallelizing the resize script.
 ## Open questions / future extensions
 
 - **Concurrent shard processing**: if the one-time resize cost (network
-  + CPU resize across all shards) turns out to matter in practice,
-  processing multiple shards concurrently (e.g. a small thread/process
-  pool over `list_shard_paths()`'s output) is a natural follow-up — the
-  per-shard atomic-write design already makes this safe, since shards
-  don't share any state. Deferred until the sequential cost is actually
-  measured.
+  - CPU resize across all shards) turns out to matter in practice,
+    processing multiple shards concurrently (e.g. a small thread/process
+    pool over `list_shard_paths()`'s output) is a natural follow-up — the
+    per-shard atomic-write design already makes this safe, since shards
+    don't share any state. Deferred until the sequential cost is actually
+    measured.
 - **Revisit "local-only" if a second training pod is ever provisioned**:
   the local-only decision assumes one pod's `/workspace` volume persists
   across that pod's own restarts. If this project ever needs to resume
-  training on a genuinely different pod/volume, the cost is one re-run
-  of `resize-cache` — acceptable now, but worth revisiting (pushing the
-  resized set to the Hub instead) if multi-pod training becomes routine.
+  training on a genuinely different pod/volume, the cost is one more
+  automatic build pass (same `local_cache_dir`, empty directory) the
+  next time `train` runs — acceptable now, but worth revisiting (pushing
+  the resized set to the Hub instead) if multi-pod training becomes
+  routine.
