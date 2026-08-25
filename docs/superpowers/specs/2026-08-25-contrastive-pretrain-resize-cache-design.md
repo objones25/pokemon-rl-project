@@ -371,8 +371,32 @@ def build_local_resize_cache(
      skip (log `resize_cache_shard_skipped`).
   2. `raw_bytes = download_shard(shard_path)`.
   3. Write `raw_bytes` to a temp file; `datasets.Dataset.from_parquet(tmp_raw_path)`.
-  4. `.map(_resize_to_canonical)` — the exact function `dataset.py`
-     already uses and already unit-tests; zero duplication.
+  4. `.map(_resize_row_for_cache)`, a thin wrapper (defined in
+     `resize_cache.py`, not `dataset.py`) around the exact
+     `_resize_to_canonical` function `dataset.py` already uses and
+     already unit-tests — zero duplication of the actual resize logic.
+     The wrapper exists because `_resize_to_canonical` returns a
+     channel-first `(1, H, W)` `torch.Tensor`, correct for the
+     streaming pipeline (which never re-serializes it) but **silently
+     corrupted** if written straight into a `datasets.Image()`-typed
+     column: verified empirically that both a raw tensor and a raw
+     `(H, W)` numpy array round-trip through `.map()` + `.to_parquet()`
+     incorrectly — a bare tensor collapses the column to a nested-list
+     type (losing the `Image` feature entirely), and even a numpy array
+     under an explicitly-preserved `Image()` schema gets corrupted to
+     32-bit int-mode pixels on reload, because `datasets`' internal
+     write path round-trips the returned value through a Python-list
+     intermediate that loses the `uint8` dtype before the image encoder
+     ever sees it. Returning an actual `PIL.Image` object sidesteps
+     this entirely — `datasets` recognizes it directly and encodes it
+     as PNG bytes under the `Image()` feature, no explicit `features=`
+     needed on `.map()`, verified to round-trip pixel-identical through
+     a full write+reload cycle:
+     ```python
+     def _resize_row_for_cache(example: dict) -> dict:
+         frame = _resize_to_canonical(example)["image"]  # (1, H, W) uint8
+         return {"image": Image.fromarray(frame.squeeze(0).numpy(), mode="L")}
+     ```
   5. `resized.to_parquet(output_path.with_suffix(".tmp"))`, then
      `os.replace(tmp_output_path, output_path)` — atomic, crash-safe.
   6. Delete the temp raw-bytes file.
