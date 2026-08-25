@@ -23,6 +23,7 @@ from contrastive_pretrain.encoder_io import compute_latent_stats, push_frozen_en
 from contrastive_pretrain.model import build_encoder
 from contrastive_pretrain.train import TrainingDeps, run_training
 from hf_storage.client import RealHfClient
+from observability.logging_config import configure_logging
 from observability.tracking import WandbRun
 from observability.visualization import build_augmentation_contact_sheet
 
@@ -46,6 +47,7 @@ def _load_grayscale_frames(frames_dir: Path) -> list[torch.Tensor]:
 def main() -> None:
     """Pokemon Red/Blue contrastive-pretraining tools."""
     load_dotenv()
+    configure_logging()
 
 
 @main.command()

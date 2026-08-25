@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import functools
 import hashlib
+import logging
 
 import datasets
 import torch
@@ -20,6 +21,8 @@ from torchvision.transforms.v2 import functional as TF
 from contrastive_pretrain.augmentation import AugmentationConfig, make_pair
 from contrastive_pretrain.config import TrainingConfig
 from contrastive_pretrain.model import INPUT_HEIGHT, INPUT_WIDTH
+
+logger = logging.getLogger(__name__)
 
 
 def row_seed(base_seed: int, video_id: str, timestamp_s: float) -> int:
@@ -41,6 +44,35 @@ def _resize_to_canonical(example: dict) -> dict:
     frame = TF.to_image(example["image"])  # (1, H, W) uint8
     frame = TF.resize(frame, [INPUT_HEIGHT, INPUT_WIDTH], antialias=True)
     return {"image": frame}
+
+
+class _ResizeToCanonicalWithProgress:
+    """Wraps _resize_to_canonical with periodic progress logging, kept as a
+    separate class rather than baked into _resize_to_canonical itself so
+    that function stays a plain, stateless, directly-unit-testable
+    transform. This is the step that runs while .shuffle()'s buffer is
+    filling (up to shuffle_buffer_size rows per DataLoader worker, before
+    ANY training batch can be produced) -- previously the only wall-clock
+    evidence of that multi-minute wait was tqdm progress bars from
+    unrelated Hub calls, with nothing from this project's own pipeline in
+    between. Runs inside each DataLoader worker subprocess when
+    num_workers > 0 (forked on Linux, inheriting the parent's already-
+    configured root logger), so `rows_processed` counts per-worker, not
+    globally across all workers."""
+
+    def __init__(self, log_every_n: int = 1000) -> None:
+        self._log_every_n = log_every_n
+        self._count = 0
+
+    def __call__(self, example: dict) -> dict:
+        result = _resize_to_canonical(example)
+        self._count += 1
+        if self._count % self._log_every_n == 0:
+            logger.info(
+                "resize_to_canonical_progress",
+                extra={"rows_processed": self._count, "video_id": example.get("video_id")},
+            )
+        return result
 
 
 def to_pair_transform(example: dict, augmentation_config: AugmentationConfig, base_seed: int) -> dict:
@@ -86,9 +118,17 @@ def _load_base_stream(config: TrainingConfig):
 
 
 def build_train_dataset(config: TrainingConfig):
+    logger.info(
+        "build_train_dataset",
+        extra={
+            "dataset_repo_id": config.dataset_repo_id,
+            "shuffle_buffer_size": config.shuffle_buffer_size,
+            "val_video_ids": config.val_video_ids,
+        },
+    )
     ds = _load_base_stream(config)
     ds = ds.filter(lambda ex: ex["video_id"] not in config.val_video_ids)
-    ds = ds.map(_resize_to_canonical)  # BEFORE shuffle -- see its docstring
+    ds = ds.map(_ResizeToCanonicalWithProgress())  # BEFORE shuffle -- see its docstring
     ds = ds.shuffle(buffer_size=config.shuffle_buffer_size, seed=config.seed)
     ds = ds.map(
         functools.partial(to_pair_transform, augmentation_config=AugmentationConfig(), base_seed=config.seed),
@@ -98,9 +138,13 @@ def build_train_dataset(config: TrainingConfig):
 
 
 def build_val_dataset(config: TrainingConfig):
+    logger.info(
+        "build_val_dataset",
+        extra={"dataset_repo_id": config.dataset_repo_id, "val_video_ids": config.val_video_ids},
+    )
     ds = _load_base_stream(config)
     ds = ds.filter(lambda ex: ex["video_id"] in config.val_video_ids)
-    ds = ds.map(_resize_to_canonical)
+    ds = ds.map(_ResizeToCanonicalWithProgress())
     ds = ds.map(
         functools.partial(to_pair_transform, augmentation_config=AugmentationConfig(), base_seed=config.seed),
         remove_columns=["image"],

@@ -4,6 +4,7 @@ from PIL import Image
 
 from contrastive_pretrain.augmentation import AugmentationConfig
 from contrastive_pretrain.dataset import (
+    _ResizeToCanonicalWithProgress,
     _resize_to_canonical,
     row_seed,
     to_pair_transform,
@@ -69,6 +70,29 @@ def test_resize_to_canonical_resizes_native_resolution_frames() -> None:
 
     assert result["image"].shape == (1, 144, 160)
     assert result["image"].dtype == torch.uint8
+
+
+def test_resize_to_canonical_with_progress_delegates_to_resize_to_canonical() -> None:
+    example = _grayscale_example()
+
+    result = _ResizeToCanonicalWithProgress()(example)
+
+    assert result["image"].shape == (1, 144, 160)
+    assert result["image"].dtype == torch.uint8
+
+
+def test_resize_to_canonical_with_progress_logs_every_n_rows(caplog) -> None:
+    import logging
+
+    transform = _ResizeToCanonicalWithProgress(log_every_n=3)
+
+    with caplog.at_level(logging.INFO, logger="contrastive_pretrain.dataset"):
+        for i in range(7):
+            transform(_grayscale_example(timestamp_s=float(i)))
+
+    progress_logs = [r for r in caplog.records if r.message == "resize_to_canonical_progress"]
+    # Rows 3 and 6 (1-indexed count % 3 == 0), not every row and not row 7.
+    assert [r.rows_processed for r in progress_logs] == [3, 6]
 
 
 def test_to_pair_transform_is_deterministic_for_the_same_row() -> None:
