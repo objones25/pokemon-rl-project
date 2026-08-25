@@ -27,19 +27,27 @@ import torch
 
 
 class FakeHfClient:
-    """In-memory stand-in for hf_storage.client.HfClient's Protocol
-    (upload_bytes/download_bytes) -- shared by every contrastive_pretrain
-    test that needs an HfClient without a real Hub call. upload_calls
-    records every path written, in order, so tests can assert not just
-    final file contents but how many upload attempts/publishes happened."""
+    """In-memory stand-in for hf_storage.client.AtomicHfClient's Protocol
+    (upload_bytes/upload_many_bytes/download_bytes) -- shared by every
+    contrastive_pretrain test that needs an HfClient without a real Hub
+    call. upload_calls records every path written, in order (a
+    upload_many_bytes call appends all its paths at once, matching it
+    landing as one commit), so tests can assert not just final file
+    contents but how many upload attempts/publishes happened."""
 
     def __init__(self) -> None:
         self.files: dict[str, bytes] = {}
         self.upload_calls: list[str] = []
+        self.commits: list[dict] = []
 
     def upload_bytes(self, data: bytes, path_in_repo: str) -> None:
         self.upload_calls.append(path_in_repo)
         self.files[path_in_repo] = data
+
+    def upload_many_bytes(self, files: dict[str, bytes], commit_message: str) -> None:
+        self.commits.append({"paths": sorted(files), "commit_message": commit_message})
+        self.upload_calls.extend(files.keys())
+        self.files.update(files)
 
     def download_bytes(self, path_in_repo: str) -> bytes | None:
         return self.files.get(path_in_repo)

@@ -100,20 +100,28 @@ from contrastive_pretrain.dataset import (
 )
 from contrastive_pretrain.encoder_io import compute_latent_stats, push_frozen_encoder
 from contrastive_pretrain.model import build_encoder, build_projector
-from hf_storage.client import HfClient
+from hf_storage.client import AtomicHfClient
 from observability.tracking import NullTrackioRun, TrackioRunLike
 from observability.visualization import build_augmentation_contact_sheet
 
-# objones25/pokemon-frames has 296,000 rows (confirmed via the HF Hub API
-# at spec time) -- used only to size the cosine LR schedule's T_max for a
-# streaming dataset where "total steps" isn't otherwise knowable upfront.
-_DATASET_ROW_COUNT = 296_000
+# objones25/pokemon-frames has 296,040 rows across 7 videos; excluding the
+# two default val_video_ids (D1SrSFZrV7A: 51,967 rows, YW29l3jJXr4: 45,880
+# rows) leaves 198,193 training rows. Confirmed by reading just the
+# video_id column (column-pruned, no image bytes) out of every parquet
+# shard via the HF Hub API -- not a guess, and not the whole-dataset count:
+# the val split is ~33% of the dataset here, not a rounding error, and
+# build_train_dataset always excludes it before training. Used only to
+# size the cosine LR schedule's T_max for a streaming dataset where "total
+# steps" isn't otherwise knowable upfront -- if TrainingConfig.val_video_ids
+# is ever changed from its default, this constant needs re-deriving the
+# same way.
+_TRAIN_ROW_COUNT = 198_193
 
 
 @dataclass
 class TrainingDeps:
     config: TrainingConfig
-    frozen_encoder_client: HfClient
+    frozen_encoder_client: AtomicHfClient
     trackio_run: TrackioRunLike = field(default_factory=NullTrackioRun)
     device: torch.device = field(
         default_factory=lambda: (
@@ -205,7 +213,7 @@ def run_training(deps: TrainingDeps) -> None:
         lr=config.learning_rate,
         weight_decay=config.weight_decay,
     )
-    steps_per_epoch_estimate = max(1, _DATASET_ROW_COUNT // config.batch_size)
+    steps_per_epoch_estimate = max(1, _TRAIN_ROW_COUNT // config.batch_size)
     warmup = torch.optim.lr_scheduler.LinearLR(
         optimizer, start_factor=1e-3, total_iters=config.warmup_steps
     )

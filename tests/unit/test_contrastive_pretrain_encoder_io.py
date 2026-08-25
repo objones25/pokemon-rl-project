@@ -11,7 +11,6 @@ from contrastive_pretrain.encoder_io import (
     push_frozen_encoder,
 )
 from contrastive_pretrain.model import GrayscaleResNetEncoder, build_encoder
-from hf_storage.client import HfClient
 from tests.conftest import FakeHfClient as _FakeHfClient
 
 
@@ -59,18 +58,22 @@ def test_fuse_conv_bn_modules_on_real_encoder() -> None:
 
 
 class _FlakyThenWorksHfClient:
-    """Fails upload_bytes twice, then succeeds -- verifies push_frozen_encoder
-    actually retries rather than propagating the first failure."""
+    """Fails the whole publish commit twice, then succeeds -- verifies
+    push_frozen_encoder actually retries rather than propagating the first
+    failure. A single attempt counter (not per-path) matches
+    upload_many_bytes's one-commit-for-everything semantics: either the
+    whole batch lands or none of it does, so there's no such thing as a
+    partial per-file attempt count anymore."""
 
     def __init__(self) -> None:
         self.files: dict[str, bytes] = {}
-        self.attempts: dict[str, int] = {}
+        self.attempts = 0
 
-    def upload_bytes(self, data: bytes, path_in_repo: str) -> None:
-        self.attempts[path_in_repo] = self.attempts.get(path_in_repo, 0) + 1
-        if self.attempts[path_in_repo] < 3:
+    def upload_many_bytes(self, files: dict[str, bytes], commit_message: str) -> None:
+        self.attempts += 1
+        if self.attempts < 3:
             raise RuntimeError("transient upload failure")
-        self.files[path_in_repo] = data
+        self.files.update(files)
 
     def download_bytes(self, path_in_repo: str) -> bytes | None:
         return self.files.get(path_in_repo)
@@ -158,6 +161,24 @@ def test_push_frozen_encoder_uploads_three_files() -> None:
     assert len(stats["std"]) == 2048
 
 
+def test_push_frozen_encoder_publishes_all_three_files_as_one_atomic_commit() -> None:
+    """Regression test for the non-atomic-publish fix: weights, config,
+    and latent stats must land as a single Hub commit, not three
+    independent ones -- otherwise a mid-publish failure could leave the
+    repo with weights but no config.json, which
+    _load_frozen_encoder_from_client then hard-fails on."""
+    encoder, _ = build_encoder(pretrained=False)
+    client = _FakeHfClient()
+
+    push_frozen_encoder(
+        client, encoder, latent_mean=torch.zeros(2048), latent_std=torch.ones(2048),
+        sleep_func=lambda _: None,
+    )
+
+    assert len(client.commits) == 1
+    assert client.commits[0]["paths"] == ["config.json", "latent_stats.json", "model.safetensors"]
+
+
 def test_push_frozen_encoder_retries_transient_upload_failures() -> None:
     encoder, _ = build_encoder(pretrained=False)
     client = _FlakyThenWorksHfClient()
@@ -176,7 +197,7 @@ class _AlwaysRateLimitedClient:
     push_frozen_encoder's rate_limit_aware_backoff actually has to match
     is_rate_limited's string check rather than just any failure."""
 
-    def upload_bytes(self, data: bytes, path_in_repo: str) -> None:
+    def upload_many_bytes(self, files: dict[str, bytes], commit_message: str) -> None:
         raise RuntimeError(
             "429 Too Many Requests for url: ...\n"
             "You have exceeded the rate limit for repository commits (256 per hour)."

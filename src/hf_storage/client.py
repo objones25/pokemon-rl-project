@@ -11,13 +11,28 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Protocol
 
-from huggingface_hub import HfApi
+from huggingface_hub import CommitOperationAdd, HfApi
 from huggingface_hub.errors import EntryNotFoundError
 
 
 class HfClient(Protocol):
     def upload_bytes(self, data: bytes, path_in_repo: str) -> None: ...
     def download_bytes(self, path_in_repo: str) -> bytes | None: ...
+
+
+class AtomicHfClient(HfClient, Protocol):
+    """An HfClient that can also publish several files as one atomic
+    commit. Kept as its own (narrower) Protocol rather than added to
+    HfClient directly: data_collection's per-shard uploads are correctly
+    modeled as independent single-file commits and never need this, so
+    adding it to the base Protocol would force every HfClient fake in this
+    project to implement a method most of them never call (interface
+    segregation). Only consumers that publish a multi-file artifact where
+    partial-upload is not an acceptable state -- e.g.
+    contrastive_pretrain's frozen encoder (weights + config + latent
+    stats) -- should require this Protocol."""
+
+    def upload_many_bytes(self, files: dict[str, bytes], commit_message: str) -> None: ...
 
 
 class RealHfClient:
@@ -34,6 +49,18 @@ class RealHfClient:
             path_in_repo=path_in_repo,
             repo_id=self._repo_id,
             repo_type=self._repo_type,
+        )
+
+    def upload_many_bytes(self, files: dict[str, bytes], commit_message: str) -> None:
+        operations = [
+            CommitOperationAdd(path_in_repo=path_in_repo, path_or_fileobj=data)
+            for path_in_repo, data in files.items()
+        ]
+        self._api.create_commit(
+            repo_id=self._repo_id,
+            repo_type=self._repo_type,
+            operations=operations,
+            commit_message=commit_message,
         )
 
     def download_bytes(self, path_in_repo: str) -> bytes | None:

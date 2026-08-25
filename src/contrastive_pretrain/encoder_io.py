@@ -21,7 +21,7 @@ from torch import nn
 from torch.nn.utils import fusion
 
 from contrastive_pretrain.model import EMBEDDING_DIM, build_encoder
-from hf_storage.client import HfClient, RealHfClient
+from hf_storage.client import AtomicHfClient, HfClient, RealHfClient
 from hf_storage.retry import rate_limit_aware_backoff, retry_with_backoff
 
 _INPUT_SIZE = [160, 144]  # [W, H], matches the augmentation spec's convention
@@ -92,7 +92,7 @@ def export_frozen_encoder(encoder: nn.Module) -> tuple[bytes, bytes]:
 
 
 def push_frozen_encoder(
-    client: HfClient,
+    client: AtomicHfClient,
     encoder: nn.Module,
     latent_mean: torch.Tensor,
     latent_std: torch.Tensor,
@@ -101,24 +101,30 @@ def push_frozen_encoder(
     rate_limit_delay: float = 120.0,
     sleep_func: Callable[[float], None] = time.sleep,
 ) -> None:
+    """Publishes weights, config, and latent stats as a single atomic Hub
+    commit -- not three independent uploads. Three separate commits could
+    leave the repo with weights but no config.json (or vice versa) on a
+    mid-publish failure, which _load_frozen_encoder_from_client then hard-
+    fails on; one commit either lands completely or not at all, and the
+    retry below retries the whole publish as one unit."""
     weights_bytes, config_bytes = export_frozen_encoder(encoder)
     stats_bytes = json.dumps(
         {"mean": latent_mean.tolist(), "std": latent_std.tolist()}
     ).encode("utf-8")
+    files = {
+        "model.safetensors": weights_bytes,
+        "config.json": config_bytes,
+        "latent_stats.json": stats_bytes,
+    }
 
     backoff = rate_limit_aware_backoff(base_delay, rate_limit_delay)
-    for data, path_in_repo in (
-        (weights_bytes, "model.safetensors"),
-        (config_bytes, "config.json"),
-        (stats_bytes, "latent_stats.json"),
-    ):
-        retry_with_backoff(
-            lambda data=data, path_in_repo=path_in_repo: client.upload_bytes(data, path_in_repo),
-            max_retries=max_retries,
-            base_delay=base_delay,
-            sleep_func=sleep_func,
-            backoff_seconds=backoff,
-        )
+    retry_with_backoff(
+        lambda: client.upload_many_bytes(files, commit_message="Publish frozen encoder artifact"),
+        max_retries=max_retries,
+        base_delay=base_delay,
+        sleep_func=sleep_func,
+        backoff_seconds=backoff,
+    )
 
 
 def _load_frozen_encoder_from_client(client: HfClient) -> nn.Module:
