@@ -12,4 +12,4 @@ weight_decay: 0.000001
 temperature: 0.1
 max_epochs: 100
 checkpoint_interval_steps: 1000
-network_volume_checkpoint_dir: /runpod-volume/contrastive_pretrain/checkpoints
+network_volume_checkpoint_dir: /workspace/contrastive_pretrain/checkpoints

@@ -25,7 +25,11 @@ class TrainingConfig:
     temperature: float = 0.1
     max_epochs: int = 100
     checkpoint_interval_steps: int = 1000
-    network_volume_checkpoint_dir: str = "/runpod-volume/contrastive_pretrain/checkpoints"
+    # /workspace, not /runpod-volume -- /runpod-volume is where a network
+    # volume mounts for a Serverless *worker*; a persistent training Pod
+    # (what this config targets) mounts its network volume at /workspace by
+    # default. Confirmed against current RunPod docs, not assumed.
+    network_volume_checkpoint_dir: str = "/workspace/contrastive_pretrain/checkpoints"
 
 
 def load_config(path: str | Path) -> TrainingConfig:
