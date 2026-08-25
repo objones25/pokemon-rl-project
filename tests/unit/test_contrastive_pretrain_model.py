@@ -1,6 +1,6 @@
 import pytest
 import torch
-import torch.nn as nn
+from torch import nn
 
 from contrastive_pretrain.model import (
     EMBEDDING_DIM,

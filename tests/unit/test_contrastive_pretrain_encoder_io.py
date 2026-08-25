@@ -2,7 +2,7 @@ import json
 
 import pytest
 import torch
-import torch.nn as nn
+from torch import nn
 
 from contrastive_pretrain.encoder_io import (
     compute_latent_stats,
@@ -68,6 +68,12 @@ class _FlakyThenWorksHfClient:
     def __init__(self) -> None:
         self.files: dict[str, bytes] = {}
         self.attempts = 0
+
+    def upload_bytes(self, data: bytes, path_in_repo: str) -> None:
+        # Never called by push_frozen_encoder (it only calls
+        # upload_many_bytes) -- present only so this fake structurally
+        # satisfies AtomicHfClient's base HfClient requirement.
+        self.files[path_in_repo] = data
 
     def upload_many_bytes(self, files: dict[str, bytes], commit_message: str) -> None:
         self.attempts += 1
@@ -196,6 +202,11 @@ class _AlwaysRateLimitedClient:
     a real observed HF Hub 429 message, not a generic RuntimeError, so
     push_frozen_encoder's rate_limit_aware_backoff actually has to match
     is_rate_limited's string check rather than just any failure."""
+
+    def upload_bytes(self, data: bytes, path_in_repo: str) -> None:
+        # Never called by push_frozen_encoder -- present only so this fake
+        # structurally satisfies AtomicHfClient's base HfClient requirement.
+        raise NotImplementedError
 
     def upload_many_bytes(self, files: dict[str, bytes], commit_message: str) -> None:
         raise RuntimeError(

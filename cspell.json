@@ -33,6 +33,9 @@
     "IMAGENET",
     "xent",
     "Monkeypatches",
-    "checkpointed"
+    "checkpointed",
+    "randn",
+    "allclose",
+    "monkeypatched"
   ]
 }

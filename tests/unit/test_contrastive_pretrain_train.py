@@ -114,7 +114,6 @@ import contrastive_pretrain.train
 from contrastive_pretrain import checkpoint
 from contrastive_pretrain.config import TrainingConfig
 from contrastive_pretrain.train import TrainingDeps, run_training
-
 from tests.conftest import FakeHfClient as _FakeHfClient
 
 

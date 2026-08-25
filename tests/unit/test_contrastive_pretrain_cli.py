@@ -5,8 +5,8 @@ import torch
 from click.testing import CliRunner
 from PIL import Image
 
-from contrastive_pretrain.cli import main
 from contrastive_pretrain.checkpoint import save_checkpoint
+from contrastive_pretrain.cli import main
 from contrastive_pretrain.model import build_encoder
 
 
