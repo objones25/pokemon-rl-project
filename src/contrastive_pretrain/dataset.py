@@ -22,7 +22,7 @@ from contrastive_pretrain.config import TrainingConfig
 
 
 def row_seed(base_seed: int, video_id: str, timestamp_s: float) -> int:
-    digest = hashlib.sha256(f"{base_seed}:{video_id}:{timestamp_s}".encode("utf-8")).digest()
+    digest = hashlib.sha256(f"{base_seed}:{video_id}:{timestamp_s}".encode()).digest()
     return int.from_bytes(digest[:8], "big")
 
 

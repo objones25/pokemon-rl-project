@@ -1,6 +1,6 @@
 import pytest
 import torch
-import torch.nn as nn
+from torch import nn
 
 from contrastive_pretrain.checkpoint import (
     build_checkpoint_state,
@@ -14,7 +14,9 @@ from contrastive_pretrain.checkpoint import (
 def test_build_checkpoint_state_captures_all_expected_keys() -> None:
     model = nn.Linear(2, 2)
     projector = nn.Linear(2, 4)
-    optimizer = torch.optim.AdamW(list(model.parameters()) + list(projector.parameters()), lr=1e-3)
+    optimizer = torch.optim.AdamW(
+        list(model.parameters()) + list(projector.parameters()), lr=1e-3
+    )
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=10)
 
     state = build_checkpoint_state(
@@ -49,12 +51,20 @@ def test_build_checkpoint_state_accepts_none_dataloader_state() -> None:
     would make the resumed epoch yield nothing."""
     model = nn.Linear(2, 2)
     projector = nn.Linear(2, 4)
-    optimizer = torch.optim.AdamW(list(model.parameters()) + list(projector.parameters()), lr=1e-3)
+    optimizer = torch.optim.AdamW(
+        list(model.parameters()) + list(projector.parameters()), lr=1e-3
+    )
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=10)
 
     state = build_checkpoint_state(
-        epoch=3, global_step=150, model=model, projector=projector, optimizer=optimizer,
-        scheduler=scheduler, dataloader_state=None, best_val_loss=1.23,
+        epoch=3,
+        global_step=150,
+        model=model,
+        projector=projector,
+        optimizer=optimizer,
+        scheduler=scheduler,
+        dataloader_state=None,
+        best_val_loss=1.23,
     )
 
     assert state["dataloader"] is None
@@ -66,8 +76,14 @@ def test_save_and_load_checkpoint_round_trip(tmp_path) -> None:
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=10)
     projector = nn.Linear(2, 4)
     state = build_checkpoint_state(
-        epoch=3, global_step=150, model=model, projector=projector, optimizer=optimizer,
-        scheduler=scheduler, dataloader_state={"fake": "state"}, best_val_loss=1.23,
+        epoch=3,
+        global_step=150,
+        model=model,
+        projector=projector,
+        optimizer=optimizer,
+        scheduler=scheduler,
+        dataloader_state={"fake": "state"},
+        best_val_loss=1.23,
     )
     path = tmp_path / "checkpoint_step00000150.pt"
 
@@ -111,8 +127,14 @@ def test_restore_optimizer_and_scheduler_restores_correct_lr() -> None:
     for _ in range(10):
         scheduler.step()
     state = build_checkpoint_state(
-        epoch=0, global_step=10, model=model, projector=nn.Linear(2, 4), optimizer=optimizer,
-        scheduler=scheduler, dataloader_state={}, best_val_loss=1.0,
+        epoch=0,
+        global_step=10,
+        model=model,
+        projector=nn.Linear(2, 4),
+        optimizer=optimizer,
+        scheduler=scheduler,
+        dataloader_state={},
+        best_val_loss=1.0,
     )
     restored_lr_from_original = optimizer.param_groups[0]["lr"]
 

@@ -12,7 +12,7 @@ the raw uint8 [0, 255] scale, cast to float), 2048-d feature out.
 from __future__ import annotations
 
 import torch
-import torch.nn as nn
+from torch import nn
 from torchvision.models import ResNet50_Weights, resnet50
 
 EMBEDDING_DIM = 2048
@@ -25,8 +25,13 @@ class GrayscaleResNetEncoder(nn.Module):
         super().__init__()
         weights = ResNet50_Weights.IMAGENET1K_V2 if pretrained else None
         backbone = resnet50(weights=weights)
-        backbone.maxpool = nn.Identity()
-        backbone.fc = nn.Identity()
+        # ResNet's stubs declare maxpool/fc as MaxPool2d/Linear; overriding
+        # them with Identity is a deliberate, fully weight-compatible
+        # override (maxpool owns zero learnable params; fc is dropped
+        # since the backbone's job ends at the pooled feature) -- not a
+        # type error at runtime, just a narrower stub than nn.Module allows.
+        backbone.maxpool = nn.Identity()  # type: ignore[assignment]
+        backbone.fc = nn.Identity()  # type: ignore[assignment]
         self.backbone = backbone
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -41,7 +46,9 @@ class GrayscaleResNetEncoder(nn.Module):
                 f"expected a 4-D (N, 1, {INPUT_HEIGHT}, {INPUT_WIDTH}) tensor, got shape {tuple(x.shape)}"
             )
         if x.shape[1] != 1:
-            raise ValueError(f"expected 1-channel grayscale input, got shape {tuple(x.shape)}")
+            raise ValueError(
+                f"expected 1-channel grayscale input, got shape {tuple(x.shape)}"
+            )
         if x.shape[2] != INPUT_HEIGHT or x.shape[3] != INPUT_WIDTH:
             raise ValueError(
                 f"expected {INPUT_HEIGHT}x{INPUT_WIDTH} (height x width) input, got shape {tuple(x.shape)}"
@@ -55,7 +62,9 @@ def build_encoder(pretrained: bool = True) -> tuple[nn.Module, int]:
 
 
 class SimCLRProjector(nn.Module):
-    def __init__(self, in_dim: int = 2048, hidden_dim: int = 2048, out_dim: int = 128) -> None:
+    def __init__(
+        self, in_dim: int = 2048, hidden_dim: int = 2048, out_dim: int = 128
+    ) -> None:
         super().__init__()
         self.net = nn.Sequential(
             nn.Linear(in_dim, hidden_dim),
@@ -67,5 +76,7 @@ class SimCLRProjector(nn.Module):
         return self.net(x)
 
 
-def build_projector(in_dim: int = 2048, hidden_dim: int = 2048, out_dim: int = 128) -> nn.Module:
+def build_projector(
+    in_dim: int = 2048, hidden_dim: int = 2048, out_dim: int = 128
+) -> nn.Module:
     return SimCLRProjector(in_dim, hidden_dim, out_dim)

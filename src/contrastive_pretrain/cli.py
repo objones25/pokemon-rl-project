@@ -24,7 +24,6 @@ from hf_storage.client import RealHfClient
 from observability.tracking import TrackioRun
 from observability.visualization import build_augmentation_contact_sheet
 
-
 _DEFAULT_CONFIG = Path("configs/contrastive_pretrain.yaml")
 
 

@@ -14,7 +14,7 @@ import logging
 from collections.abc import Callable, Iterable
 
 import torch
-import torch.nn as nn
+from torch import nn
 
 from contrastive_pretrain.losses import nt_xent_loss
 
@@ -33,7 +33,9 @@ def run_memory_probe(probe_step: Callable[[], None], batch_size: int) -> None:
 
 def check_finite_loss(loss: torch.Tensor, global_step: int) -> None:
     if not torch.isfinite(loss).all():
-        raise RuntimeError(f"non-finite loss ({loss.item()}) at step {global_step} -- stopping (fail-fast).")
+        raise RuntimeError(
+            f"non-finite loss ({loss.item()}) at step {global_step} -- stopping (fail-fast)."
+        )
 
 
 def compute_val_loss(
@@ -91,7 +93,11 @@ from contrastive_pretrain.checkpoint import (
     save_checkpoint,
 )
 from contrastive_pretrain.config import TrainingConfig
-from contrastive_pretrain.dataset import build_dataloader, build_train_dataset, build_val_dataset
+from contrastive_pretrain.dataset import (
+    build_dataloader,
+    build_train_dataset,
+    build_val_dataset,
+)
 from contrastive_pretrain.encoder_io import compute_latent_stats, push_frozen_encoder
 from contrastive_pretrain.model import build_encoder, build_projector
 from hf_storage.client import HfClient
@@ -110,8 +116,10 @@ class TrainingDeps:
     frozen_encoder_client: HfClient
     trackio_run: TrackioRunLike = field(default_factory=NullTrackioRun)
     device: torch.device = field(
-        default_factory=lambda: torch.accelerator.current_accelerator(check_available=True)
-        or torch.device("cpu")
+        default_factory=lambda: (
+            torch.accelerator.current_accelerator(check_available=True)
+            or torch.device("cpu")
+        )
     )
 
 
@@ -130,24 +138,43 @@ def run_training(deps: TrainingDeps) -> None:
 
     encoder, embedding_dim = build_encoder(pretrained=config.pretrained)
     projector = build_projector(in_dim=embedding_dim)
-    encoder.to(device, memory_format=torch.channels_last)
+    # nn.Module.to()'s @overload stubs omit memory_format entirely (verified
+    # via inspect.getsource on the installed torch), even though the method's
+    # own docstring documents `to(memory_format=torch.channels_last)` as a
+    # valid call form -- a stub gap, not a real type error.
+    encoder.to(device, memory_format=torch.channels_last)  # type: ignore[call-overload]
     projector.to(device)
 
     checkpoint_dir = Path(config.network_volume_checkpoint_dir)
     latest_checkpoint_path = find_latest_checkpoint(checkpoint_dir)
-    state = load_checkpoint(latest_checkpoint_path) if latest_checkpoint_path is not None else None
+    state = (
+        load_checkpoint(latest_checkpoint_path)
+        if latest_checkpoint_path is not None
+        else None
+    )
     if state is not None:
-        encoder.load_state_dict(state["model"])  # BEFORE torch.compile -- see checkpoint.py's docstring
+        encoder.load_state_dict(
+            state["model"]
+        )  # BEFORE torch.compile -- see checkpoint.py's docstring
         # The optimizer below is built over BOTH modules' parameters, so the
         # projector must be restored too -- otherwise the old projector's Adam
         # moments would be loaded onto a freshly-random projection head.
         projector.load_state_dict(state["projector"])
         logger.info(
             "resumed_from_checkpoint",
-            extra={"path": str(latest_checkpoint_path), "global_step": state["global_step"]},
+            extra={
+                "path": str(latest_checkpoint_path),
+                "global_step": state["global_step"],
+            },
         )
 
     compiled_encoder = torch.compile(encoder, mode="default")
+    # torch.compile's stub types its return as a generic Callable, not
+    # nn.Module, since it also accepts/returns plain functions -- given an
+    # nn.Module input it always returns an OptimizedModule (an nn.Module
+    # subclass) at runtime. Asserted, not just annotated, so the claim is
+    # backed by a real runtime check rather than silently trusted.
+    assert isinstance(compiled_encoder, nn.Module)
 
     def _probe_step() -> None:
         # TWO forward passes, mirroring the real training step: view_a and
@@ -179,9 +206,14 @@ def run_training(deps: TrainingDeps) -> None:
         weight_decay=config.weight_decay,
     )
     steps_per_epoch_estimate = max(1, _DATASET_ROW_COUNT // config.batch_size)
-    warmup = torch.optim.lr_scheduler.LinearLR(optimizer, start_factor=1e-3, total_iters=config.warmup_steps)
+    warmup = torch.optim.lr_scheduler.LinearLR(
+        optimizer, start_factor=1e-3, total_iters=config.warmup_steps
+    )
     cosine = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, T_max=max(1, config.max_epochs * steps_per_epoch_estimate - config.warmup_steps)
+        optimizer,
+        T_max=max(
+            1, config.max_epochs * steps_per_epoch_estimate - config.warmup_steps
+        ),
     )
     scheduler = torch.optim.lr_scheduler.SequentialLR(
         optimizer, schedulers=[warmup, cosine], milestones=[config.warmup_steps]
@@ -189,7 +221,10 @@ def run_training(deps: TrainingDeps) -> None:
 
     train_dataset = build_train_dataset(config)
     dataloader = build_dataloader(
-        train_dataset, config.batch_size, config.num_workers, config.checkpoint_interval_steps
+        train_dataset,
+        config.batch_size,
+        config.num_workers,
+        config.checkpoint_interval_steps,
     )
     val_dataset = build_val_dataset(config)
 
@@ -211,9 +246,18 @@ def run_training(deps: TrainingDeps) -> None:
 
     def _save_checkpoint(epoch: int, dataloader_state: dict | None) -> None:
         ckpt_state = build_checkpoint_state(
-            epoch, global_step, encoder, projector, optimizer, scheduler, dataloader_state, best_val_loss
+            epoch,
+            global_step,
+            encoder,
+            projector,
+            optimizer,
+            scheduler,
+            dataloader_state,
+            best_val_loss,
         )
-        save_checkpoint(checkpoint_dir / f"checkpoint_step{global_step:08d}.pt", ckpt_state)
+        save_checkpoint(
+            checkpoint_dir / f"checkpoint_step{global_step:08d}.pt", ckpt_state
+        )
         logger.info("checkpoint_saved", extra={"global_step": global_step})
 
     prev_step_end = time.monotonic()
@@ -228,15 +272,28 @@ def run_training(deps: TrainingDeps) -> None:
             # inside this one (which would just measure the trivial H2D
             # transfer below and read ~0 regardless of streaming stalls).
             data_wait_s = time.monotonic() - prev_step_end
-            view_a = batch["view_a"].to(device, non_blocking=True).float().to(memory_format=torch.channels_last)
-            view_b = batch["view_b"].to(device, non_blocking=True).float().to(memory_format=torch.channels_last)
+            view_a = (
+                batch["view_a"]
+                .to(device, non_blocking=True)
+                .float()
+                .to(memory_format=torch.channels_last)
+            )
+            view_b = (
+                batch["view_b"]
+                .to(device, non_blocking=True)
+                .float()
+                .to(memory_format=torch.channels_last)
+            )
 
             # Logged every step (not gated behind the 50-step interval below):
             # data_wait_s is a plain wall-clock float, not a GPU read, so
             # this costs no extra device sync -- and the whole point of
             # this metric is catching a streaming-throughput bottleneck
             # immediately, not up to 50 steps late.
-            logger.info("data_wait", extra={"global_step": global_step, "data_wait_s": data_wait_s})
+            logger.info(
+                "data_wait",
+                extra={"global_step": global_step, "data_wait_s": data_wait_s},
+            )
 
             if not contact_sheet_logged_this_epoch:
                 # Per the design spec's observability section: the same
@@ -260,7 +317,11 @@ def run_training(deps: TrainingDeps) -> None:
                 # all exceptions by design), so the sanity-check image would
                 # never actually appear anywhere without this wrapper.
                 deps.trackio_run.log(
-                    {"augmentation_contact_sheet": trackio.Image(contact_sheet, caption=f"epoch {epoch}")}
+                    {
+                        "augmentation_contact_sheet": trackio.Image(
+                            contact_sheet, caption=f"epoch {epoch}"
+                        )
+                    }
                 )
                 contact_sheet_logged_this_epoch = True
 
@@ -294,18 +355,38 @@ def run_training(deps: TrainingDeps) -> None:
             # `for batch in dataloader` and blocks on the next batch.
             prev_step_end = time.monotonic()
 
-        val_dataloader = build_dataloader(val_dataset, config.batch_size, 0, 1, pin_memory=False)
-        val_loss = compute_val_loss(
-            compiled_encoder, projector, val_dataloader, config.temperature, device, max_batches=20
+        val_dataloader = build_dataloader(
+            val_dataset, config.batch_size, 0, 1, pin_memory=False
         )
-        logger.info("epoch_complete", extra={"epoch": epoch, "val_loss": val_loss, "best_val_loss": best_val_loss})
+        val_loss = compute_val_loss(
+            compiled_encoder,
+            projector,
+            val_dataloader,
+            config.temperature,
+            device,
+            max_batches=20,
+        )
+        logger.info(
+            "epoch_complete",
+            extra={
+                "epoch": epoch,
+                "val_loss": val_loss,
+                "best_val_loss": best_val_loss,
+            },
+        )
         deps.trackio_run.log({"val_loss": val_loss, "epoch": epoch})
 
         if val_loss < best_val_loss:
             best_val_loss = val_loss
-            latent_mean, latent_std = compute_latent_stats(compiled_encoder, val_dataset, device)
-            push_frozen_encoder(deps.frozen_encoder_client, encoder, latent_mean, latent_std)
-            logger.info("frozen_artifact_pushed", extra={"epoch": epoch, "val_loss": val_loss})
+            latent_mean, latent_std = compute_latent_stats(
+                compiled_encoder, val_dataset, device
+            )
+            push_frozen_encoder(
+                deps.frozen_encoder_client, encoder, latent_mean, latent_std
+            )
+            logger.info(
+                "frozen_artifact_pushed", extra={"epoch": epoch, "val_loss": val_loss}
+            )
 
         # Checkpoint at every epoch boundary, not just every
         # checkpoint_interval_steps: best_val_loss just changed in memory

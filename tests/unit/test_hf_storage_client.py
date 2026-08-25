@@ -28,7 +28,9 @@ class _FakeHfApi:
 
 def test_real_hf_client_round_trips_bytes(tmp_path) -> None:
     api = _FakeHfApi(tmp_path)
-    client = RealHfClient(api, "me/repo", repo_type="model")
+    # _FakeHfApi structurally satisfies what RealHfClient actually calls
+    # (upload_file/hf_hub_download) but isn't nominally an HfApi.
+    client = RealHfClient(api, "me/repo", repo_type="model")  # type: ignore[arg-type]
 
     client.upload_bytes(b"hello", "config.json")
     result = client.download_bytes("config.json")
@@ -39,14 +41,14 @@ def test_real_hf_client_round_trips_bytes(tmp_path) -> None:
 
 def test_real_hf_client_download_bytes_returns_none_when_missing(tmp_path) -> None:
     api = _FakeHfApi(tmp_path)
-    client = RealHfClient(api, "me/repo")
+    client = RealHfClient(api, "me/repo")  # type: ignore[arg-type]
 
     assert client.download_bytes("missing.json") is None
 
 
 def test_real_hf_client_defaults_to_dataset_repo_type(tmp_path) -> None:
     api = _FakeHfApi(tmp_path)
-    client = RealHfClient(api, "me/repo")
+    client = RealHfClient(api, "me/repo")  # type: ignore[arg-type]
 
     client.upload_bytes(b"x", "manifest.json")
 

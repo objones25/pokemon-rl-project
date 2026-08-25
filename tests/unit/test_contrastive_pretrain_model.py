@@ -2,7 +2,12 @@ import pytest
 import torch
 import torch.nn as nn
 
-from contrastive_pretrain.model import EMBEDDING_DIM, build_encoder, build_projector
+from contrastive_pretrain.model import (
+    EMBEDDING_DIM,
+    GrayscaleResNetEncoder,
+    build_encoder,
+    build_projector,
+)
 
 
 def test_build_encoder_returns_2048_dim() -> None:
@@ -21,6 +26,7 @@ def test_build_encoder_output_shape() -> None:
 
 def test_build_encoder_has_no_maxpool() -> None:
     encoder, _ = build_encoder(pretrained=False)
+    assert isinstance(encoder, GrayscaleResNetEncoder)  # narrows for .backbone below
     assert isinstance(encoder.backbone.maxpool, nn.Identity)
 
 

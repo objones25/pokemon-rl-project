@@ -44,8 +44,12 @@ def test_to_pair_transform_is_deterministic_for_the_same_row() -> None:
 
 
 def test_to_pair_transform_differs_across_rows() -> None:
-    result1 = to_pair_transform(_grayscale_example(timestamp_s=5.0), AugmentationConfig(), base_seed=0)
-    result2 = to_pair_transform(_grayscale_example(timestamp_s=6.0), AugmentationConfig(), base_seed=0)
+    result1 = to_pair_transform(
+        _grayscale_example(timestamp_s=5.0), AugmentationConfig(), base_seed=0
+    )
+    result2 = to_pair_transform(
+        _grayscale_example(timestamp_s=6.0), AugmentationConfig(), base_seed=0
+    )
 
     assert not torch.equal(result1["view_a"], result2["view_a"])
 
@@ -62,8 +66,11 @@ def _synthetic_iterable_dataset():
 
 def test_build_dataloader_yields_batches_of_configured_size() -> None:
     loader = build_dataloader(
-        _synthetic_iterable_dataset(), batch_size=4, num_workers=0,
-        snapshot_every_n_steps=1, pin_memory=False,
+        _synthetic_iterable_dataset(),
+        batch_size=4,
+        num_workers=0,
+        snapshot_every_n_steps=1,
+        pin_memory=False,
     )
 
     batch = next(iter(loader))
@@ -78,8 +85,11 @@ def test_build_dataloader_resumes_from_exact_position() -> None:
     exactly where the original left off -- no re-served, no skipped
     examples."""
     loader = build_dataloader(
-        _synthetic_iterable_dataset(), batch_size=2, num_workers=0,
-        snapshot_every_n_steps=1, pin_memory=False,
+        _synthetic_iterable_dataset(),
+        batch_size=2,
+        num_workers=0,
+        snapshot_every_n_steps=1,
+        pin_memory=False,
     )
 
     it = iter(loader)
@@ -89,11 +99,16 @@ def test_build_dataloader_resumes_from_exact_position() -> None:
     expected_next_two_batches = [next(it)["value"].tolist() for _ in range(2)]
 
     resumed_loader = build_dataloader(
-        _synthetic_iterable_dataset(), batch_size=2, num_workers=0,
-        snapshot_every_n_steps=1, pin_memory=False,
+        _synthetic_iterable_dataset(),
+        batch_size=2,
+        num_workers=0,
+        snapshot_every_n_steps=1,
+        pin_memory=False,
     )
     resumed_loader.load_state_dict(state)
-    actual_next_two_batches = [batch["value"].tolist() for _, batch in zip(range(2), resumed_loader)]
+    actual_next_two_batches = [
+        batch["value"].tolist() for _, batch in zip(range(2), resumed_loader)
+    ]
 
     assert actual_next_two_batches == expected_next_two_batches
 
@@ -101,7 +116,7 @@ def test_build_dataloader_resumes_from_exact_position() -> None:
 import pytest
 
 from contrastive_pretrain.config import TrainingConfig
-from contrastive_pretrain.dataset import build_dataloader, build_train_dataset, build_val_dataset
+from contrastive_pretrain.dataset import build_train_dataset, build_val_dataset
 
 
 @pytest.mark.slow
@@ -132,7 +147,12 @@ def test_build_dataloader_resumes_against_real_streaming_data() -> None:
     in-memory Dataset."""
     config = TrainingConfig()
 
-    loader = build_dataloader(build_train_dataset(config), batch_size=2, num_workers=0, snapshot_every_n_steps=1)
+    loader = build_dataloader(
+        build_train_dataset(config),
+        batch_size=2,
+        num_workers=0,
+        snapshot_every_n_steps=1,
+    )
     it = iter(loader)
     for _ in range(3):
         next(it)
@@ -140,7 +160,10 @@ def test_build_dataloader_resumes_against_real_streaming_data() -> None:
     expected_video_ids = next(it)["video_id"]
 
     resumed_loader = build_dataloader(
-        build_train_dataset(config), batch_size=2, num_workers=0, snapshot_every_n_steps=1
+        build_train_dataset(config),
+        batch_size=2,
+        num_workers=0,
+        snapshot_every_n_steps=1,
     )
     resumed_loader.load_state_dict(state)
     actual_video_ids = next(iter(resumed_loader))["video_id"]

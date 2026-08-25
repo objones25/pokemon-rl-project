@@ -15,10 +15,10 @@ import time
 from collections.abc import Callable, Iterable
 
 import torch
-import torch.nn as nn
-import torch.nn.utils.fusion as fusion
 from safetensors.torch import load as safetensors_load
 from safetensors.torch import save as safetensors_save
+from torch import nn
+from torch.nn.utils import fusion
 
 from contrastive_pretrain.model import EMBEDDING_DIM, build_encoder
 from hf_storage.client import HfClient, RealHfClient
@@ -38,12 +38,17 @@ _INPUT_SHAPE_NCHW = [1, 144, 160]
 _INPUT_SCALE = "uint8_0_255"
 
 
-def fuse_conv_bn_modules(module: nn.Module) -> nn.Module:
+def fuse_conv_bn_modules[ModuleT: nn.Module](module: ModuleT) -> ModuleT:
     """Recursively fuses every adjacent (Conv2d, BatchNorm2d) pair in
     `module` in-place, for eval-mode inference only. Relies on
     torchvision's Bottleneck blocks (and this project's own
     GrayscaleResNetEncoder) declaring/iterating children in
-    conv-then-bn order, which fuse_conv_bn_eval requires."""
+    conv-then-bn order, which fuse_conv_bn_eval requires.
+
+    Generic over its input type: this always mutates and returns the exact
+    same object it was given, so preserving the caller's concrete type
+    (e.g. GrayscaleResNetEncoder, or nn.Sequential for indexing) is both
+    accurate and useful, not just a wider annotation."""
     module.eval()
     for child in module.children():
         fuse_conv_bn_modules(child)
@@ -122,6 +127,17 @@ def _load_frozen_encoder_from_client(client: HfClient) -> nn.Module:
     if config_bytes is None or weights_bytes is None:
         raise FileNotFoundError("model.safetensors or config.json missing from the target repo")
     config = json.loads(config_bytes)
+    # build_encoder(pretrained=False) below always constructs the same fixed
+    # architecture regardless of what config.json says -- so a repo whose
+    # config doesn't match what we're about to build must fail loudly here,
+    # not be silently ignored. Checked, not just parsed.
+    if config.get("input_shape_nchw") != _INPUT_SHAPE_NCHW or config.get("input_scale") != _INPUT_SCALE:
+        raise ValueError(
+            f"config.json contract mismatch: expected input_shape_nchw={_INPUT_SHAPE_NCHW}, "
+            f"input_scale={_INPUT_SCALE!r}, got input_shape_nchw={config.get('input_shape_nchw')!r}, "
+            f"input_scale={config.get('input_scale')!r}. This repo's artifact was not exported "
+            "with a contract this loader understands."
+        )
 
     encoder, _ = build_encoder(pretrained=False)
     fused = fuse_conv_bn_modules(encoder.eval())

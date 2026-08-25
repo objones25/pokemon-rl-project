@@ -5,7 +5,6 @@ from click.testing import CliRunner
 from PIL import Image
 
 from contrastive_pretrain.cli import main
-from contrastive_pretrain.config import TrainingConfig
 
 
 def test_preview_command_writes_contact_sheet(tmp_path: Path) -> None:

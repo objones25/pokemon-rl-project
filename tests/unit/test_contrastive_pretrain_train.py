@@ -1,8 +1,13 @@
 import pytest
 import torch
+from torch import nn
 
-from contrastive_pretrain.model import build_encoder, build_projector
-from contrastive_pretrain.train import check_finite_loss, compute_val_loss, run_memory_probe
+from contrastive_pretrain.model import SimCLRProjector, build_encoder, build_projector
+from contrastive_pretrain.train import (
+    check_finite_loss,
+    compute_val_loss,
+    run_memory_probe,
+)
 
 
 def test_run_memory_probe_raises_actionable_error_on_oom() -> None:
@@ -53,7 +58,12 @@ def test_compute_val_loss_averages_over_batches() -> None:
             }
 
     loss = compute_val_loss(
-        encoder, projector, fake_batches(), temperature=0.5, device=torch.device("cpu"), max_batches=3,
+        encoder,
+        projector,
+        fake_batches(),
+        temperature=0.5,
+        device=torch.device("cpu"),
+        max_batches=3,
     )
 
     assert isinstance(loss, float)
@@ -73,7 +83,12 @@ def test_compute_val_loss_restores_train_mode() -> None:
         }
 
     compute_val_loss(
-        encoder, projector, fake_batches(), temperature=0.5, device=torch.device("cpu"), max_batches=1,
+        encoder,
+        projector,
+        fake_batches(),
+        temperature=0.5,
+        device=torch.device("cpu"),
+        max_batches=1,
     )
 
     assert encoder.training is True
@@ -85,10 +100,15 @@ def test_compute_val_loss_raises_when_no_batches_produced() -> None:
     projector = build_projector()
 
     with pytest.raises(RuntimeError, match="no batches"):
-        compute_val_loss(encoder, projector, iter([]), temperature=0.5, device=torch.device("cpu"), max_batches=3)
+        compute_val_loss(
+            encoder,
+            projector,
+            iter([]),
+            temperature=0.5,
+            device=torch.device("cpu"),
+            max_batches=3,
+        )
 
-
-import pytest
 
 import contrastive_pretrain.train
 from contrastive_pretrain import checkpoint
@@ -129,7 +149,9 @@ class _FakeStreamingDataset(torch.utils.data.IterableDataset):
             }
 
 
-def test_run_training_completes_and_checkpoints_at_epoch_boundary(tmp_path, monkeypatch) -> None:
+def test_run_training_completes_and_checkpoints_at_epoch_boundary(
+    tmp_path, monkeypatch
+) -> None:
     """Fast, network/credential-free regression coverage for run_training --
     the plan's highest-fan-in function otherwise had zero automated
     coverage protecting its checkpoint-restore ordering (model state loaded
@@ -144,8 +166,14 @@ def test_run_training_completes_and_checkpoints_at_epoch_boundary(tmp_path, monk
     regression-tests the epoch-boundary checkpoint fix (a crash between a
     val-loss improvement and the next periodic save must not be able to
     resume with a stale best_val_loss)."""
-    monkeypatch.setattr("contrastive_pretrain.train.build_train_dataset", lambda config: _FakeStreamingDataset(n=8))
-    monkeypatch.setattr("contrastive_pretrain.train.build_val_dataset", lambda config: _FakeStreamingDataset(n=8))
+    monkeypatch.setattr(
+        "contrastive_pretrain.train.build_train_dataset",
+        lambda config: _FakeStreamingDataset(n=8),
+    )
+    monkeypatch.setattr(
+        "contrastive_pretrain.train.build_val_dataset",
+        lambda config: _FakeStreamingDataset(n=8),
+    )
 
     config = TrainingConfig(
         pretrained=False,
@@ -155,7 +183,9 @@ def test_run_training_completes_and_checkpoints_at_epoch_boundary(tmp_path, monk
         checkpoint_interval_steps=1000,
         network_volume_checkpoint_dir=str(tmp_path / "checkpoints"),
     )
-    deps = TrainingDeps(config=config, frozen_encoder_client=_FakeHfClient(), device=torch.device("cpu"))
+    deps = TrainingDeps(
+        config=config, frozen_encoder_client=_FakeHfClient(), device=torch.device("cpu")
+    )
 
     run_training(deps)
 
@@ -177,7 +207,9 @@ class _EpochRecordingFakeDataset(_FakeStreamingDataset):
         self.epochs_seen.append(epoch)
 
 
-def test_run_training_resumes_projector_and_makes_progress(tmp_path, monkeypatch) -> None:
+def test_run_training_resumes_projector_and_makes_progress(
+    tmp_path, monkeypatch
+) -> None:
     """Regression guard for the two resume bugs the `state is not None`
     branch shipped with, neither of which any earlier test entered:
 
@@ -221,47 +253,86 @@ def test_run_training_resumes_projector_and_makes_progress(tmp_path, monkeypatch
         )
 
     first_train_dataset = _EpochRecordingFakeDataset(n=8)
-    monkeypatch.setattr("contrastive_pretrain.train.build_train_dataset", lambda config: first_train_dataset)
-    monkeypatch.setattr("contrastive_pretrain.train.build_val_dataset", lambda config: _FakeStreamingDataset(n=8))
+    monkeypatch.setattr(
+        "contrastive_pretrain.train.build_train_dataset",
+        lambda config: first_train_dataset,
+    )
+    monkeypatch.setattr(
+        "contrastive_pretrain.train.build_val_dataset",
+        lambda config: _FakeStreamingDataset(n=8),
+    )
 
-    run_training(TrainingDeps(config=_config(1), frozen_encoder_client=_FakeHfClient(), device=torch.device("cpu")))
+    run_training(
+        TrainingDeps(
+            config=_config(1),
+            frozen_encoder_client=_FakeHfClient(),
+            device=torch.device("cpu"),
+        )
+    )
 
     assert first_train_dataset.epochs_seen == [0]
-    mid_epoch_state = checkpoint.load_checkpoint(checkpoint_dir / "checkpoint_step00000001.pt")
+    mid_epoch_state = checkpoint.load_checkpoint(
+        checkpoint_dir / "checkpoint_step00000001.pt"
+    )
     assert mid_epoch_state["epoch"] == 0
     assert mid_epoch_state["dataloader"]  # mid-epoch: a real, resumable stream position
 
     first_run_path = checkpoint.find_latest_checkpoint(checkpoint_dir)
+    assert (
+        first_run_path is not None
+    )  # run 1 above must have saved at least one checkpoint
     first_state = checkpoint.load_checkpoint(first_run_path)
     assert first_state["global_step"] == 2
-    assert first_state["epoch"] == 1  # epoch 0 is DONE -- resume must start at 1, not re-run 0
-    assert first_state["dataloader"] is None  # the epoch's iterator is exhausted; nothing to restore
+    assert (
+        first_state["epoch"] == 1
+    )  # epoch 0 is DONE -- resume must start at 1, not re-run 0
+    assert (
+        first_state["dataloader"] is None
+    )  # the epoch's iterator is exhausted; nothing to restore
     saved_projector_weight = first_state["projector"]["net.0.weight"].clone()
 
     # Snapshot the live projector at the exact moment the resume path hands
     # its (encoder + projector) optimizer state back: if the projector were
     # not checkpointed/restored, this would be freshly random instead.
-    built_projectors: list[torch.nn.Module] = []
+    built_projectors: list[SimCLRProjector] = []
     real_build_projector = contrastive_pretrain.train.build_projector
     real_restore = contrastive_pretrain.train.restore_optimizer_and_scheduler
     projector_at_restore: list[torch.Tensor] = []
 
     def _spy_build_projector(*args, **kwargs):
         projector = real_build_projector(*args, **kwargs)
+        assert isinstance(projector, SimCLRProjector)  # narrows for .net[0] below
         built_projectors.append(projector)
         return projector
 
     def _spy_restore(optimizer, scheduler, state):
-        projector_at_restore.append(built_projectors[-1].net[0].weight.detach().clone())
+        first_linear = built_projectors[-1].net[0]
+        assert isinstance(
+            first_linear, nn.Linear
+        )  # Sequential.__getitem__ returns Sequential | Module
+        projector_at_restore.append(first_linear.weight.detach().clone())
         return real_restore(optimizer, scheduler, state)
 
-    monkeypatch.setattr("contrastive_pretrain.train.build_projector", _spy_build_projector)
-    monkeypatch.setattr("contrastive_pretrain.train.restore_optimizer_and_scheduler", _spy_restore)
+    monkeypatch.setattr(
+        "contrastive_pretrain.train.build_projector", _spy_build_projector
+    )
+    monkeypatch.setattr(
+        "contrastive_pretrain.train.restore_optimizer_and_scheduler", _spy_restore
+    )
 
     second_train_dataset = _EpochRecordingFakeDataset(n=8)
-    monkeypatch.setattr("contrastive_pretrain.train.build_train_dataset", lambda config: second_train_dataset)
+    monkeypatch.setattr(
+        "contrastive_pretrain.train.build_train_dataset",
+        lambda config: second_train_dataset,
+    )
 
-    run_training(TrainingDeps(config=_config(2), frozen_encoder_client=_FakeHfClient(), device=torch.device("cpu")))
+    run_training(
+        TrainingDeps(
+            config=_config(2),
+            frozen_encoder_client=_FakeHfClient(),
+            device=torch.device("cpu"),
+        )
+    )
 
     # The resume branch really ran, and it did not re-enter the completed epoch 0.
     assert len(projector_at_restore) == 1
@@ -269,7 +340,11 @@ def test_run_training_resumes_projector_and_makes_progress(tmp_path, monkeypatch
 
     # The resumed epoch trained real steps -- a restored-exhausted dataloader
     # would leave global_step pinned at the first run's 2.
-    second_state = checkpoint.load_checkpoint(checkpoint.find_latest_checkpoint(checkpoint_dir))
+    second_run_path = checkpoint.find_latest_checkpoint(checkpoint_dir)
+    assert (
+        second_run_path is not None
+    )  # run 2 above must have saved at least one checkpoint
+    second_state = checkpoint.load_checkpoint(second_run_path)
     assert second_state["global_step"] == 4
     assert second_state["epoch"] == 2
 
@@ -292,7 +367,9 @@ def test_run_training_completes_a_few_steps_without_nan(tmp_path) -> None:
         checkpoint_interval_steps=2,
         network_volume_checkpoint_dir=str(tmp_path / "checkpoints"),
     )
-    deps = TrainingDeps(config=config, frozen_encoder_client=_FakeHfClient(), device=torch.device("cpu"))
+    deps = TrainingDeps(
+        config=config, frozen_encoder_client=_FakeHfClient(), device=torch.device("cpu")
+    )
 
     # A 1-epoch run over the full streaming dataset is too slow for a
     # smoke test; monkeypatch max_epochs's effective loop bound isn't

@@ -10,7 +10,7 @@ from contrastive_pretrain.encoder_io import (
     fuse_conv_bn_modules,
     push_frozen_encoder,
 )
-from contrastive_pretrain.model import build_encoder
+from contrastive_pretrain.model import GrayscaleResNetEncoder, build_encoder
 from hf_storage.client import HfClient
 
 
@@ -18,12 +18,22 @@ def test_fuse_conv_bn_modules_preserves_output() -> None:
     torch.manual_seed(0)
     module = nn.Sequential(nn.Conv2d(1, 4, 3, padding=1), nn.BatchNorm2d(4))
     module.eval()
+    bn = module[1]
+    assert isinstance(bn, nn.BatchNorm2d)  # narrows for the buffer/param access below
+    # weight/bias are only Optional because affine=False would drop them, and
+    # running_mean/running_var only because track_running_stats=False would
+    # drop them; this BatchNorm2d uses both defaults (True), so all four
+    # always exist.
+    assert bn.weight is not None
+    assert bn.bias is not None
+    assert bn.running_mean is not None
+    assert bn.running_var is not None
     with torch.no_grad():
         # Non-trivial BN stats so fusion isn't testing a no-op identity case.
-        module[1].running_mean.copy_(torch.randn(4))
-        module[1].running_var.copy_(torch.rand(4) + 0.5)
-        module[1].weight.copy_(torch.randn(4))
-        module[1].bias.copy_(torch.randn(4))
+        bn.running_mean.copy_(torch.randn(4))
+        bn.running_var.copy_(torch.rand(4) + 0.5)
+        bn.weight.copy_(torch.randn(4))
+        bn.bias.copy_(torch.randn(4))
 
     x = torch.randn(2, 1, 8, 8)
     before = module(x)
@@ -122,7 +132,9 @@ def test_export_frozen_encoder_handles_channels_last_encoder() -> None:
     non-contiguous in the standard sense, which used to make
     safetensors_save raise ValueError('non contiguous tensor')."""
     encoder, _ = build_encoder(pretrained=False)
-    encoder.to(torch.device("cpu"), memory_format=torch.channels_last)
+    # nn.Module.to()'s @overload stubs omit memory_format -- see train.py's
+    # matching comment; same stub gap, not a real type error.
+    encoder.to(torch.device("cpu"), memory_format=torch.channels_last)  # type: ignore[call-overload]
 
     weights_bytes, _ = export_frozen_encoder(encoder)
 
@@ -134,6 +146,7 @@ def test_export_frozen_encoder_handles_channels_last_encoder() -> None:
 
 def test_export_frozen_encoder_does_not_mutate_input_module() -> None:
     encoder, _ = build_encoder(pretrained=False)
+    assert isinstance(encoder, GrayscaleResNetEncoder)  # narrows for .backbone below
 
     export_frozen_encoder(encoder)
 
@@ -187,6 +200,25 @@ def test_load_frozen_encoder_from_client_matches_exported_weights() -> None:
     assert torch.allclose(expected, actual, atol=1e-3)
     assert all(not p.requires_grad for p in loaded.parameters())
     assert loaded.training is False
+
+
+def test_load_frozen_encoder_from_client_rejects_mismatched_config() -> None:
+    """The architecture build_encoder(pretrained=False) always produces is
+    fixed regardless of what config.json says, so a repo whose published
+    contract doesn't match must fail loudly here rather than be silently
+    ignored -- a caller would otherwise get an encoder trained/exported
+    under different shape/scale assumptions with no error."""
+    from contrastive_pretrain.encoder_io import _load_frozen_encoder_from_client
+
+    encoder, _ = build_encoder(pretrained=False)
+    client = _FakeHfClient()
+    push_frozen_encoder(client, encoder, latent_mean=torch.zeros(2048), latent_std=torch.ones(2048))
+    stored_config = json.loads(client.files["config.json"])
+    stored_config["input_shape_nchw"] = [1, 160, 144]  # transposed -- a real mismatch
+    client.files["config.json"] = json.dumps(stored_config).encode("utf-8")
+
+    with pytest.raises(ValueError, match="contract mismatch"):
+        _load_frozen_encoder_from_client(client)
 
 
 def test_compute_latent_stats_shapes() -> None:
