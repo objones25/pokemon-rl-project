@@ -115,16 +115,7 @@ from contrastive_pretrain import checkpoint
 from contrastive_pretrain.config import TrainingConfig
 from contrastive_pretrain.train import TrainingDeps, run_training
 
-
-class _FakeHfClient:
-    def __init__(self) -> None:
-        self.files: dict[str, bytes] = {}
-
-    def upload_bytes(self, data: bytes, path_in_repo: str) -> None:
-        self.files[path_in_repo] = data
-
-    def download_bytes(self, path_in_repo: str) -> bytes | None:
-        return self.files.get(path_in_repo)
+from tests.conftest import FakeHfClient as _FakeHfClient
 
 
 class _FakeStreamingDataset(torch.utils.data.IterableDataset):
@@ -351,6 +342,156 @@ def test_run_training_resumes_projector_and_makes_progress(
     # Continuity: the projection head resumed from the checkpointed weights,
     # not from a fresh random init.
     assert torch.equal(projector_at_restore[0], saved_projector_weight)
+
+
+def test_run_training_skips_publish_when_val_loss_does_not_improve(
+    tmp_path, monkeypatch
+) -> None:
+    """Regression test for the `val_loss < best_val_loss` gate: prior
+    coverage always started from best_val_loss=inf and ran <=2 epochs, so
+    the gate was always true and never exercised the skip path. A flipped
+    comparison would publish a worse model as "best" on every epoch,
+    undetected. compute_val_loss is monkeypatched to a controlled
+    improve-then-regress sequence -- independent of the fake dataset's
+    random per-epoch content -- so the outcome is deterministic rather than
+    incidental."""
+    monkeypatch.setattr(
+        "contrastive_pretrain.train.build_train_dataset",
+        lambda config: _FakeStreamingDataset(n=4),
+    )
+    monkeypatch.setattr(
+        "contrastive_pretrain.train.build_val_dataset",
+        lambda config: _FakeStreamingDataset(n=4),
+    )
+    val_losses = iter([1.0, 2.0])  # epoch 0: inf -> 1.0 improves; epoch 1: 1.0 -> 2.0 regresses
+    monkeypatch.setattr(
+        "contrastive_pretrain.train.compute_val_loss",
+        lambda *args, **kwargs: next(val_losses),
+    )
+
+    client = _FakeHfClient()
+    config = TrainingConfig(
+        pretrained=False,
+        batch_size=2,
+        num_workers=0,
+        max_epochs=2,
+        checkpoint_interval_steps=1000,
+        network_volume_checkpoint_dir=str(tmp_path / "checkpoints"),
+    )
+
+    run_training(
+        TrainingDeps(config=config, frozen_encoder_client=client, device=torch.device("cpu"))
+    )
+
+    # Exactly one publish happened (epoch 0's improvement) -- epoch 1's
+    # regression must not trigger a second push.
+    assert client.upload_calls.count("model.safetensors") == 1
+
+
+class _SpyTrackioRun:
+    def __init__(self) -> None:
+        self.logged: list[dict] = []
+
+    def log(self, metrics: dict) -> None:
+        self.logged.append(metrics)
+
+    def finish(self) -> None:
+        pass
+
+
+def test_run_training_logs_contact_sheet_exactly_once_per_epoch(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setattr(
+        "contrastive_pretrain.train.build_train_dataset",
+        lambda config: _FakeStreamingDataset(n=8),
+    )
+    monkeypatch.setattr(
+        "contrastive_pretrain.train.build_val_dataset",
+        lambda config: _FakeStreamingDataset(n=4),
+    )
+
+    trackio_run = _SpyTrackioRun()
+    config = TrainingConfig(
+        pretrained=False,
+        batch_size=2,
+        num_workers=0,
+        max_epochs=2,
+        checkpoint_interval_steps=1000,
+        network_volume_checkpoint_dir=str(tmp_path / "checkpoints"),
+    )
+
+    run_training(
+        TrainingDeps(
+            config=config,
+            frozen_encoder_client=_FakeHfClient(),
+            trackio_run=trackio_run,
+            device=torch.device("cpu"),
+        )
+    )
+
+    contact_sheet_logs = [m for m in trackio_run.logged if "augmentation_contact_sheet" in m]
+    assert len(contact_sheet_logs) == config.max_epochs  # once per epoch, not once per step
+
+
+def test_data_wait_metric_excludes_epoch_boundary_overhead(tmp_path, monkeypatch) -> None:
+    """Regression test for the prev_step_end reset at the epoch boundary:
+    without it, the next epoch's first data_wait_s would include
+    validation + Hub-push + checkpoint-save time, misreporting it as a
+    streaming stall. Freezes time.monotonic() except for one deliberate
+    500s jump injected inside compute_val_loss (standing in for slow
+    epoch-boundary work), so the next epoch's first data_wait_s is
+    unambiguous: near-zero if the reset fired between the jump and that
+    step, ~500s if it didn't."""
+    monkeypatch.setattr(
+        "contrastive_pretrain.train.build_train_dataset",
+        lambda config: _FakeStreamingDataset(n=4),
+    )
+    monkeypatch.setattr(
+        "contrastive_pretrain.train.build_val_dataset",
+        lambda config: _FakeStreamingDataset(n=4),
+    )
+
+    clock = [0.0]
+    monkeypatch.setattr(contrastive_pretrain.train.time, "monotonic", lambda: clock[0])
+
+    real_compute_val_loss = contrastive_pretrain.train.compute_val_loss
+
+    def _slow_compute_val_loss(*args, **kwargs):
+        clock[0] += 500.0
+        return real_compute_val_loss(*args, **kwargs)
+
+    monkeypatch.setattr("contrastive_pretrain.train.compute_val_loss", _slow_compute_val_loss)
+
+    logged_data_wait: list[dict] = []
+    real_info = contrastive_pretrain.train.logger.info
+
+    def _spy_info(event, *args, **kwargs):
+        if event == "data_wait":
+            logged_data_wait.append(kwargs.get("extra", {}))
+        return real_info(event, *args, **kwargs)
+
+    monkeypatch.setattr(contrastive_pretrain.train.logger, "info", _spy_info)
+
+    config = TrainingConfig(
+        pretrained=False,
+        batch_size=2,
+        num_workers=0,
+        max_epochs=2,
+        checkpoint_interval_steps=1000,
+        network_volume_checkpoint_dir=str(tmp_path / "checkpoints"),
+    )
+
+    run_training(
+        TrainingDeps(
+            config=config, frozen_encoder_client=_FakeHfClient(), device=torch.device("cpu")
+        )
+    )
+
+    # n=4 rows / batch_size=2 is 2 steps/epoch -- index 2 is epoch 1's first
+    # step, the one immediately after the injected 500s validation jump.
+    assert len(logged_data_wait) == 4
+    assert logged_data_wait[2]["data_wait_s"] < 1.0
 
 
 @pytest.mark.slow

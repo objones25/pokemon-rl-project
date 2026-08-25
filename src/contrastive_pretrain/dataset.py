@@ -15,10 +15,11 @@ import hashlib
 import datasets
 import torch
 from torchdata.stateful_dataloader import StatefulDataLoader
-from torchvision.transforms.functional import pil_to_tensor
+from torchvision.transforms.v2 import functional as TF
 
 from contrastive_pretrain.augmentation import AugmentationConfig, make_pair
 from contrastive_pretrain.config import TrainingConfig
+from contrastive_pretrain.model import INPUT_HEIGHT, INPUT_WIDTH
 
 
 def row_seed(base_seed: int, video_id: str, timestamp_s: float) -> int:
@@ -27,7 +28,8 @@ def row_seed(base_seed: int, video_id: str, timestamp_s: float) -> int:
 
 
 def to_pair_transform(example: dict, augmentation_config: AugmentationConfig, base_seed: int) -> dict:
-    frame = pil_to_tensor(example["image"])  # (1, H, W) uint8
+    frame = TF.to_image(example["image"])  # (1, H, W) uint8
+    frame = TF.resize(frame, [INPUT_HEIGHT, INPUT_WIDTH], antialias=True)
     seed = row_seed(base_seed, example["video_id"], example["timestamp_s"])
     rng = torch.Generator().manual_seed(seed)
     view_a, view_b = make_pair(frame, augmentation_config, rng)
@@ -40,18 +42,24 @@ def build_dataloader(
     num_workers: int,
     snapshot_every_n_steps: int,
     pin_memory: bool = True,
+    drop_last: bool = True,
 ) -> StatefulDataLoader:
-    """drop_last=True is required for two reasons: it keeps batch shape
-    fixed (cudnn.benchmark and torch.compile both depend on that), and a
-    variable-size final batch would itself break that fixed-shape
-    assumption. num_workers must stay the same between the run that
-    saved a dataloader checkpoint and the run that resumes it --
-    StatefulDataLoader.load_state_dict requires it."""
+    """drop_last defaults to True for the training loader for two reasons:
+    it keeps batch shape fixed (cudnn.benchmark and torch.compile both
+    depend on that), and a variable-size final batch would itself break
+    that fixed-shape assumption. The validation loader has no such
+    requirement (compute_val_loss runs eval-mode, batch-shape-agnostic) and
+    must pass drop_last=False -- the held-out val_video_ids can easily
+    total fewer rows than one training batch_size, and drop_last=True on a
+    dataset smaller than one batch yields zero batches, which
+    compute_val_loss treats as a hard failure. num_workers must stay the
+    same between the run that saved a dataloader checkpoint and the run
+    that resumes it -- StatefulDataLoader.load_state_dict requires it."""
     return StatefulDataLoader(
         dataset,
         batch_size=batch_size,
         num_workers=num_workers,
-        drop_last=True,
+        drop_last=drop_last,
         pin_memory=pin_memory,
         snapshot_every_n_steps=snapshot_every_n_steps,
     )

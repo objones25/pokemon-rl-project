@@ -35,6 +35,28 @@ def test_to_pair_transform_produces_original_and_two_views() -> None:
     assert result["original"].dtype == torch.uint8
 
 
+def test_to_pair_transform_resizes_non_canonical_resolution_frames() -> None:
+    """Real dataset frames are stored at 2400x2160 (15x the Game Boy's
+    native 160x144), not pre-resized to canonical resolution. Regression
+    test for that mismatch: any input resolution must come out at
+    (1, 144, 160), since both augmentation.py's pixel-tuned parameters and
+    model.py's encoder hard-require that exact shape."""
+    pixels = np.random.default_rng(0).integers(0, 256, (2160, 2400), dtype=np.uint8)
+    example = {
+        "image": Image.fromarray(pixels, mode="L"),
+        "video_id": "abc123",
+        "timestamp_s": 5.0,
+        "game": "red",
+    }
+
+    result = to_pair_transform(example, AugmentationConfig(), base_seed=0)
+
+    assert result["original"].shape == (1, 144, 160)
+    assert result["view_a"].shape == (1, 144, 160)
+    assert result["view_b"].shape == (1, 144, 160)
+    assert result["original"].dtype == torch.uint8
+
+
 def test_to_pair_transform_is_deterministic_for_the_same_row() -> None:
     result1 = to_pair_transform(_grayscale_example(), AugmentationConfig(), base_seed=0)
     result2 = to_pair_transform(_grayscale_example(), AugmentationConfig(), base_seed=0)
@@ -78,6 +100,26 @@ def test_build_dataloader_yields_batches_of_configured_size() -> None:
     assert batch["value"].shape == (4,)
 
 
+def test_build_dataloader_drop_last_false_yields_a_final_partial_batch() -> None:
+    """The validation loader must pass drop_last=False: held-out
+    val_video_ids can easily total fewer rows than one training
+    batch_size, and drop_last=True on a stream smaller than one batch
+    yields zero batches -- which compute_val_loss treats as a hard
+    failure that would kill an unattended training run."""
+    loader = build_dataloader(
+        _synthetic_iterable_dataset(),
+        batch_size=8,
+        num_workers=0,
+        snapshot_every_n_steps=1,
+        pin_memory=False,
+        drop_last=False,
+    )
+
+    batches = list(loader)
+
+    assert [b["value"].shape[0] for b in batches] == [8, 8, 4]
+
+
 def test_build_dataloader_resumes_from_exact_position() -> None:
     """Verifies the StatefulDataLoader checkpoint/resume mechanic the
     design spec depends on: a fresh dataloader over the same underlying
@@ -117,6 +159,47 @@ import pytest
 
 from contrastive_pretrain.config import TrainingConfig
 from contrastive_pretrain.dataset import build_train_dataset, build_val_dataset
+
+
+def _synthetic_frame_stream(video_ids: list[str]):
+    features = datasets.Features(
+        {
+            "image": datasets.Image(),
+            "video_id": datasets.Value("string"),
+            "timestamp_s": datasets.Value("float64"),
+            "game": datasets.Value("string"),
+        }
+    )
+    rows = [_grayscale_example(video_id=vid, timestamp_s=float(i)) for i, vid in enumerate(video_ids)]
+    return datasets.Dataset.from_list(rows, features=features).to_iterable_dataset()
+
+
+def test_build_train_dataset_excludes_val_videos_fast(monkeypatch) -> None:
+    """Fast, network-free regression test for the train/val split filter
+    itself -- the only prior coverage of this exact filter logic was
+    @pytest.mark.slow and needs real Hub access, so a swapped in/not-in
+    would previously ship undetected by the fast suite."""
+    monkeypatch.setattr(
+        "contrastive_pretrain.dataset._load_base_stream",
+        lambda config: _synthetic_frame_stream(["train_a", "val_a", "val_b", "train_b"]),
+    )
+    config = TrainingConfig(val_video_ids=("val_a", "val_b"))
+
+    ds = build_train_dataset(config)
+
+    assert [row["video_id"] for row in ds] == ["train_a", "train_b"]
+
+
+def test_build_val_dataset_only_yields_held_out_videos_fast(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "contrastive_pretrain.dataset._load_base_stream",
+        lambda config: _synthetic_frame_stream(["train_a", "val_a", "val_b", "train_b"]),
+    )
+    config = TrainingConfig(val_video_ids=("val_a", "val_b"))
+
+    ds = build_val_dataset(config)
+
+    assert [row["video_id"] for row in ds] == ["val_a", "val_b"]
 
 
 @pytest.mark.slow

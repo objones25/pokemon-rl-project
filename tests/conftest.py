@@ -19,3 +19,44 @@ module, regardless of import order.
 import os
 
 os.environ.setdefault("TORCHINDUCTOR_FX_GRAPH_CACHE", "0")
+
+from collections.abc import Callable
+
+import pytest
+import torch
+
+
+class FakeHfClient:
+    """In-memory stand-in for hf_storage.client.HfClient's Protocol
+    (upload_bytes/download_bytes) -- shared by every contrastive_pretrain
+    test that needs an HfClient without a real Hub call. upload_calls
+    records every path written, in order, so tests can assert not just
+    final file contents but how many upload attempts/publishes happened."""
+
+    def __init__(self) -> None:
+        self.files: dict[str, bytes] = {}
+        self.upload_calls: list[str] = []
+
+    def upload_bytes(self, data: bytes, path_in_repo: str) -> None:
+        self.upload_calls.append(path_in_repo)
+        self.files[path_in_repo] = data
+
+    def download_bytes(self, path_in_repo: str) -> bytes | None:
+        return self.files.get(path_in_repo)
+
+
+@pytest.fixture
+def fake_hf_client() -> FakeHfClient:
+    return FakeHfClient()
+
+
+@pytest.fixture
+def random_frame() -> Callable[..., torch.Tensor]:
+    """Factory for a synthetic (1, H, W) uint8 frame -- defaults to the
+    canonical Game Boy resolution (144, 160) that contrastive_pretrain.model
+    hard-requires."""
+
+    def _make(height: int = 144, width: int = 160) -> torch.Tensor:
+        return torch.randint(0, 256, (1, height, width), dtype=torch.uint8)
+
+    return _make

@@ -1,10 +1,13 @@
 from pathlib import Path
 
 import numpy as np
+import torch
 from click.testing import CliRunner
 from PIL import Image
 
 from contrastive_pretrain.cli import main
+from contrastive_pretrain.checkpoint import save_checkpoint
+from contrastive_pretrain.model import build_encoder
 
 
 def test_preview_command_writes_contact_sheet(tmp_path: Path) -> None:
@@ -132,3 +135,60 @@ def test_export_frozen_encoder_command_requires_checkpoint_option() -> None:
     result = runner.invoke(main, ["export-frozen-encoder"])
 
     assert result.exit_code != 0
+
+
+def test_export_frozen_encoder_command_success_path(tmp_path, monkeypatch) -> None:
+    """Prior coverage only checked the missing---checkpoint failure path;
+    the command body itself (load checkpoint -> build encoder -> compute
+    latent stats -> push) was never exercised, so a wiring bug (wrong
+    load_state_dict key, wrong arg order into push_frozen_encoder) could
+    ship silently. Monkeypatches build_val_dataset/HfApi/RealHfClient the
+    same way the `train` command test already does, so this needs no
+    network or HF credentials."""
+    encoder, _ = build_encoder(pretrained=False)
+    checkpoint_path = tmp_path / "checkpoint_step00000001.pt"
+    save_checkpoint(checkpoint_path, {"model": encoder.state_dict()})
+
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("batch_size: 2\n")
+
+    captured = {}
+
+    monkeypatch.setattr(
+        "contrastive_pretrain.cli.build_val_dataset",
+        lambda config: [
+            {"original": torch.randint(0, 256, (1, 144, 160), dtype=torch.uint8)}
+            for _ in range(2)
+        ],
+    )
+    monkeypatch.setattr("contrastive_pretrain.cli.HfApi", lambda: _FakeHfApi())
+    monkeypatch.setattr("contrastive_pretrain.cli.RealHfClient", lambda *a, **k: "the-client")
+
+    def _fake_push(client, pushed_encoder, latent_mean, latent_std):
+        captured["client"] = client
+        captured["encoder"] = pushed_encoder
+        captured["latent_mean"] = latent_mean
+        captured["latent_std"] = latent_std
+
+    monkeypatch.setattr("contrastive_pretrain.cli.push_frozen_encoder", _fake_push)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        main,
+        [
+            "export-frozen-encoder",
+            "--checkpoint",
+            str(checkpoint_path),
+            "--config",
+            str(config_path),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["client"] == "the-client"
+    assert captured["latent_mean"].shape == (2048,)
+    assert captured["latent_std"].shape == (2048,)
+    # The loaded checkpoint's weights actually landed on the encoder that
+    # gets pushed, not a fresh/mismatched one.
+    for key, value in encoder.state_dict().items():
+        assert torch.equal(value, captured["encoder"].state_dict()[key])

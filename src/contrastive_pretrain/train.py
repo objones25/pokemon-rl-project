@@ -356,7 +356,7 @@ def run_training(deps: TrainingDeps) -> None:
             prev_step_end = time.monotonic()
 
         val_dataloader = build_dataloader(
-            val_dataset, config.batch_size, 0, 1, pin_memory=False
+            val_dataset, config.batch_size, 0, 1, pin_memory=False, drop_last=False
         )
         val_loss = compute_val_loss(
             compiled_encoder,
@@ -410,5 +410,12 @@ def run_training(deps: TrainingDeps) -> None:
         # fully. Not saving stale dataloader state here still eliminates
         # that starved epoch entirely, at no cost to the epochs after it.
         _save_checkpoint(epoch + 1, None)
+
+        # Reset here, not just at the end of each batch iteration above:
+        # validation, the conditional Hub push, and this checkpoint save all
+        # ran since the last batch's prev_step_end update. Without this,
+        # data_wait_s for the next epoch's first batch would include all of
+        # that epoch-boundary work, misreporting it as a streaming stall.
+        prev_step_end = time.monotonic()
 
     deps.trackio_run.finish()

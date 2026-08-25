@@ -12,6 +12,7 @@ from contrastive_pretrain.encoder_io import (
 )
 from contrastive_pretrain.model import GrayscaleResNetEncoder, build_encoder
 from hf_storage.client import HfClient
+from tests.conftest import FakeHfClient as _FakeHfClient
 
 
 def test_fuse_conv_bn_modules_preserves_output() -> None:
@@ -55,19 +56,6 @@ def test_fuse_conv_bn_modules_on_real_encoder() -> None:
         after = fused(x)
 
     assert torch.allclose(before, after, atol=1e-3)
-
-
-class _FakeHfClient:
-    def __init__(self) -> None:
-        self.files: dict[str, bytes] = {}
-        self.upload_calls: list[str] = []
-
-    def upload_bytes(self, data: bytes, path_in_repo: str) -> None:
-        self.upload_calls.append(path_in_repo)
-        self.files[path_in_repo] = data
-
-    def download_bytes(self, path_in_repo: str) -> bytes | None:
-        return self.files.get(path_in_repo)
 
 
 class _FlakyThenWorksHfClient:
@@ -180,6 +168,50 @@ def test_push_frozen_encoder_retries_transient_upload_failures() -> None:
     )
 
     assert set(client.files.keys()) == {"model.safetensors", "config.json", "latent_stats.json"}
+
+
+class _AlwaysRateLimitedClient:
+    """Mirrors test_hf_uploader.py's _AlwaysRateLimitedClient precedent --
+    a real observed HF Hub 429 message, not a generic RuntimeError, so
+    push_frozen_encoder's rate_limit_aware_backoff actually has to match
+    is_rate_limited's string check rather than just any failure."""
+
+    def upload_bytes(self, data: bytes, path_in_repo: str) -> None:
+        raise RuntimeError(
+            "429 Too Many Requests for url: ...\n"
+            "You have exceeded the rate limit for repository commits (256 per hour)."
+        )
+
+    def download_bytes(self, path_in_repo: str) -> bytes | None:
+        return None
+
+
+def test_push_frozen_encoder_waits_the_dedicated_rate_limit_delay_not_the_short_schedule() -> None:
+    """Regression test for the exact mechanism behind the documented HF
+    rate-limit incident (objones25/pokemon-frames hit the 256
+    commits/hour quota): a rate-limit error must select rate_limit_delay
+    (minutes-scale), not the ordinary seconds-scale exponential backoff --
+    retrying sooner just re-hits the same quota wall. Prior coverage only
+    exercised a generic transient RuntimeError, which can't tell these two
+    backoff schedules apart."""
+    encoder, _ = build_encoder(pretrained=False)
+    client = _AlwaysRateLimitedClient()
+    sleeps: list[float] = []
+
+    with pytest.raises(RuntimeError, match="429"):
+        push_frozen_encoder(
+            client,
+            encoder,
+            latent_mean=torch.zeros(2048),
+            latent_std=torch.ones(2048),
+            max_retries=3,
+            base_delay=1.0,
+            rate_limit_delay=120.0,
+            sleep_func=sleeps.append,
+        )
+
+    assert sleeps
+    assert all(s == 120.0 for s in sleeps)
 
 
 def test_load_frozen_encoder_from_client_matches_exported_weights() -> None:
