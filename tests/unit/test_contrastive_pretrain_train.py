@@ -90,6 +90,8 @@ def test_compute_val_loss_raises_when_no_batches_produced() -> None:
 
 import pytest
 
+import contrastive_pretrain.train
+from contrastive_pretrain import checkpoint
 from contrastive_pretrain.config import TrainingConfig
 from contrastive_pretrain.train import TrainingDeps, run_training
 
@@ -159,6 +161,118 @@ def test_run_training_completes_and_checkpoints_at_epoch_boundary(tmp_path, monk
 
     checkpoints = list((tmp_path / "checkpoints").glob("checkpoint_step*.pt"))
     assert len(checkpoints) == 1
+
+
+class _EpochRecordingFakeDataset(_FakeStreamingDataset):
+    """Same fake stream, but records every epoch run_training announces --
+    the only externally observable signal for "which epochs did this run
+    actually enter?", which is what the resume off-by-one corrupts."""
+
+    def __init__(self, n: int) -> None:
+        super().__init__(n)
+        self.epochs_seen: list[int] = []
+
+    def set_epoch(self, epoch: int) -> None:
+        super().set_epoch(epoch)
+        self.epochs_seen.append(epoch)
+
+
+def test_run_training_resumes_projector_and_makes_progress(tmp_path, monkeypatch) -> None:
+    """Regression guard for the two resume bugs the `state is not None`
+    branch shipped with, neither of which any earlier test entered:
+
+    1. The projector was never checkpointed, so every resume built a fresh
+       random projection head and then loaded the OLD projector's Adam
+       moments onto it via restore_optimizer_and_scheduler.
+    2. The epoch-boundary checkpoint stored the just-completed epoch (so
+       resume re-entered an epoch already finished) AND the just-exhausted
+       dataloader state.
+
+    The stored-epoch half of (2) is asserted behaviorally below (which
+    epochs the resumed run actually enters). The dataloader half is
+    asserted structurally -- "an epoch-boundary checkpoint carries no
+    dataloader state" -- because this fake is a plain torch
+    IterableDataset, and StatefulDataLoader only falls back to a naive
+    fast-forward for those: measured, restoring an exhausted state to a
+    plain fake still re-yields the whole epoch, so the fake CANNOT
+    reproduce the stall. The production stream is a
+    datasets.IterableDataset, which implements state_dict/load_state_dict,
+    and there the measured behavior of restoring an exhausted state is
+    zero batches -- in that epoch and in every epoch after it.
+
+    8 rows at batch_size=4 is 2 steps per epoch, and
+    checkpoint_interval_steps=1 makes step 1 a genuine mid-epoch periodic
+    checkpoint -- so this covers the periodic call site too, and asserts it
+    still stores real dataloader state (that path is correct and must stay).
+    """
+    checkpoint_dir = tmp_path / "checkpoints"
+
+    def _config(max_epochs: int) -> TrainingConfig:
+        return TrainingConfig(
+            pretrained=False,
+            batch_size=4,
+            num_workers=0,
+            max_epochs=max_epochs,
+            checkpoint_interval_steps=1,
+            network_volume_checkpoint_dir=str(checkpoint_dir),
+        )
+
+    first_train_dataset = _EpochRecordingFakeDataset(n=8)
+    monkeypatch.setattr("contrastive_pretrain.train.build_train_dataset", lambda config: first_train_dataset)
+    monkeypatch.setattr("contrastive_pretrain.train.build_val_dataset", lambda config: _FakeStreamingDataset(n=8))
+
+    run_training(TrainingDeps(config=_config(1), frozen_encoder_client=_FakeHfClient(), device=torch.device("cpu")))
+
+    assert first_train_dataset.epochs_seen == [0]
+    mid_epoch_state = checkpoint.load_checkpoint(checkpoint_dir / "checkpoint_step00000001.pt")
+    assert mid_epoch_state["epoch"] == 0
+    assert mid_epoch_state["dataloader"]  # mid-epoch: a real, resumable stream position
+
+    first_run_path = checkpoint.find_latest_checkpoint(checkpoint_dir)
+    first_state = checkpoint.load_checkpoint(first_run_path)
+    assert first_state["global_step"] == 2
+    assert first_state["epoch"] == 1  # epoch 0 is DONE -- resume must start at 1, not re-run 0
+    assert first_state["dataloader"] is None  # the epoch's iterator is exhausted; nothing to restore
+    saved_projector_weight = first_state["projector"]["net.0.weight"].clone()
+
+    # Snapshot the live projector at the exact moment the resume path hands
+    # its (encoder + projector) optimizer state back: if the projector were
+    # not checkpointed/restored, this would be freshly random instead.
+    built_projectors: list[torch.nn.Module] = []
+    real_build_projector = contrastive_pretrain.train.build_projector
+    real_restore = contrastive_pretrain.train.restore_optimizer_and_scheduler
+    projector_at_restore: list[torch.Tensor] = []
+
+    def _spy_build_projector(*args, **kwargs):
+        projector = real_build_projector(*args, **kwargs)
+        built_projectors.append(projector)
+        return projector
+
+    def _spy_restore(optimizer, scheduler, state):
+        projector_at_restore.append(built_projectors[-1].net[0].weight.detach().clone())
+        return real_restore(optimizer, scheduler, state)
+
+    monkeypatch.setattr("contrastive_pretrain.train.build_projector", _spy_build_projector)
+    monkeypatch.setattr("contrastive_pretrain.train.restore_optimizer_and_scheduler", _spy_restore)
+
+    second_train_dataset = _EpochRecordingFakeDataset(n=8)
+    monkeypatch.setattr("contrastive_pretrain.train.build_train_dataset", lambda config: second_train_dataset)
+
+    run_training(TrainingDeps(config=_config(2), frozen_encoder_client=_FakeHfClient(), device=torch.device("cpu")))
+
+    # The resume branch really ran, and it did not re-enter the completed epoch 0.
+    assert len(projector_at_restore) == 1
+    assert second_train_dataset.epochs_seen == [1]
+
+    # The resumed epoch trained real steps -- a restored-exhausted dataloader
+    # would leave global_step pinned at the first run's 2.
+    second_state = checkpoint.load_checkpoint(checkpoint.find_latest_checkpoint(checkpoint_dir))
+    assert second_state["global_step"] == 4
+    assert second_state["epoch"] == 2
+
+    # Continuity: the projection head resumed from the checkpointed weights,
+    # not from a fresh random init.
+    assert torch.equal(projector_at_restore[0], saved_projector_weight)
 
 
 @pytest.mark.slow

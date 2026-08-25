@@ -98,11 +98,19 @@ def test_export_frozen_encoder_round_trips_weights() -> None:
 
     assert torch.allclose(expected, actual, atol=1e-3)
     config = json.loads(config_bytes)
+    # input_shape_nchw and input_scale are the unambiguous half of the
+    # downstream (sequence-model/PPO) interface contract: input_size is
+    # [W, H], the opposite order from the tensor's, and nothing in this
+    # pipeline normalizes pixels -- but the exported artifact has Conv+BN
+    # fused, so there is no BatchNorm left to absorb a caller who feeds
+    # [0, 1] input instead of [0, 255].
     assert config == {
         "embedding_dim": 2048,
         "stem": "no_maxpool",
         "input_channels": 1,
         "input_size": [160, 144],
+        "input_shape_nchw": [1, 144, 160],
+        "input_scale": "uint8_0_255",
         "pretrained_init": True,
     }
 

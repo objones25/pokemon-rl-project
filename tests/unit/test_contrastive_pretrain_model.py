@@ -32,6 +32,25 @@ def test_build_encoder_rejects_wrong_channel_count() -> None:
         encoder(x)
 
 
+def test_build_encoder_rejects_transposed_spatial_dims() -> None:
+    """The backbone is fully convolutional and ends in an adaptive average
+    pool, so a transposed (N, 1, W, H) input would run without error and
+    silently produce wrong features -- the exact failure mode a downstream
+    consumer trusting a (N, 1, 160, 144) docstring would have hit."""
+    encoder, _ = build_encoder(pretrained=False)
+    x = torch.zeros(2, 1, 160, 144)
+
+    with pytest.raises(ValueError, match="144x160"):
+        encoder(x)
+
+
+def test_build_encoder_rejects_non_4d_input() -> None:
+    encoder, _ = build_encoder(pretrained=False)
+
+    with pytest.raises(ValueError, match="4-D"):
+        encoder(torch.zeros(1, 144, 160))
+
+
 def test_build_projector_output_shape() -> None:
     projector = build_projector()
     x = torch.randn(4, 2048)

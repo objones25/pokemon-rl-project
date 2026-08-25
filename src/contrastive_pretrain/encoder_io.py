@@ -25,6 +25,17 @@ from hf_storage.client import HfClient, RealHfClient
 from hf_storage.retry import rate_limit_aware_backoff, retry_with_backoff
 
 _INPUT_SIZE = [160, 144]  # [W, H], matches the augmentation spec's convention
+# The unambiguous tensor-shape statement of the same thing, per-sample NCHW
+# (channels, height, width) -- _INPUT_SIZE's [W, H] ordering is the opposite
+# of the tensor's, and a caller who mixes the two gets a transposed input.
+_INPUT_SHAPE_NCHW = [1, 144, 160]
+# Nothing in this pipeline normalizes pixels: frames are uint8 [0, 255] cast
+# to float and fed straight to the backbone. During training BatchNorm makes
+# the network scale-invariant, but the exported artifact has Conv+BN FUSED --
+# there is no BatchNorm left to absorb a caller who feeds [0, 1] input, and
+# the wrong scale produces wrong features with no error. Hence: stated in the
+# published config, not just in a docstring.
+_INPUT_SCALE = "uint8_0_255"
 
 
 def fuse_conv_bn_modules(module: nn.Module) -> nn.Module:
@@ -67,6 +78,8 @@ def export_frozen_encoder(encoder: nn.Module) -> tuple[bytes, bytes]:
         "stem": "no_maxpool",
         "input_channels": 1,
         "input_size": _INPUT_SIZE,
+        "input_shape_nchw": _INPUT_SHAPE_NCHW,
+        "input_scale": _INPUT_SCALE,
         "pretrained_init": True,
     }
     config_bytes = json.dumps(config).encode("utf-8")
@@ -122,9 +135,21 @@ def _load_frozen_encoder_from_client(client: HfClient) -> nn.Module:
 def load_frozen_encoder(repo_id: str, revision: str | None = None) -> nn.Module:
     """The PPO-facing entrypoint: downloads config.json + model.safetensors
     from `repo_id` (an HF Hub model repo) and returns a frozen, eval-mode
-    module mapping (N, 1, 160, 144) grayscale input to (N, 2048) float
-    features. Raw, unnormalized output -- the affine normalization layer
-    is the caller's job, using that repo's latent_stats.json."""
+    module mapping (N, 1, 144, 160) grayscale input to (N, 2048) float
+    features.
+
+    Input contract (also published in the repo's config.json as
+    `input_shape_nchw` / `input_scale`):
+      - shape (N, 1, 144, 160) NCHW -- height 144, width 160. Passing a
+        transposed (N, 1, 160, 144) tensor is a ValueError, not silently
+        wrong features.
+      - pixel scale uint8 [0, 255], cast to float. Do NOT rescale to
+        [0, 1]: this artifact has Conv+BN fused, so no BatchNorm remains
+        to absorb a different input scale, and the features would be
+        wrong with no error raised.
+
+    Raw, unnormalized output -- the affine normalization layer is the
+    caller's job, using that repo's latent_stats.json."""
     if revision is not None:
         raise NotImplementedError(
             "revision pinning is not yet supported — hf_storage.client.HfClient has no revision parameter"

@@ -4,7 +4,9 @@ which are fully compatible since maxpool owns zero learnable params —
 see the design spec) to preserve spatial detail this domain's small
 UI elements (HP bars, text glyphs) depend on. Grayscale-to-3-channel
 replication lives inside the module so training and load_frozen_encoder
-share one external contract: 1-channel grayscale in, 2048-d feature out.
+share one external contract: a (N, 1, 144, 160) NCHW tensor in
+(height 144, width 160 -- native Game Boy resolution, pixel values on
+the raw uint8 [0, 255] scale, cast to float), 2048-d feature out.
 """
 
 from __future__ import annotations
@@ -14,6 +16,8 @@ import torch.nn as nn
 from torchvision.models import ResNet50_Weights, resnet50
 
 EMBEDDING_DIM = 2048
+INPUT_HEIGHT = 144
+INPUT_WIDTH = 160
 
 
 class GrayscaleResNetEncoder(nn.Module):
@@ -26,8 +30,22 @@ class GrayscaleResNetEncoder(nn.Module):
         self.backbone = backbone
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """`x` is (N, 1, 144, 160) NCHW -- height 144, width 160.
+
+        The spatial check is not redundant: the backbone is fully
+        convolutional and ends in an adaptive average pool, so a
+        transposed (N, 1, 160, 144) tensor would run without error and
+        silently produce wrong features."""
+        if x.ndim != 4:
+            raise ValueError(
+                f"expected a 4-D (N, 1, {INPUT_HEIGHT}, {INPUT_WIDTH}) tensor, got shape {tuple(x.shape)}"
+            )
         if x.shape[1] != 1:
             raise ValueError(f"expected 1-channel grayscale input, got shape {tuple(x.shape)}")
+        if x.shape[2] != INPUT_HEIGHT or x.shape[3] != INPUT_WIDTH:
+            raise ValueError(
+                f"expected {INPUT_HEIGHT}x{INPUT_WIDTH} (height x width) input, got shape {tuple(x.shape)}"
+            )
         x = x.repeat(1, 3, 1, 1)
         return self.backbone(x)
 

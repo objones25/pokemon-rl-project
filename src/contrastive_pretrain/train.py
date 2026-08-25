@@ -138,6 +138,10 @@ def run_training(deps: TrainingDeps) -> None:
     state = load_checkpoint(latest_checkpoint_path) if latest_checkpoint_path is not None else None
     if state is not None:
         encoder.load_state_dict(state["model"])  # BEFORE torch.compile -- see checkpoint.py's docstring
+        # The optimizer below is built over BOTH modules' parameters, so the
+        # projector must be restored too -- otherwise the old projector's Adam
+        # moments would be loaded onto a freshly-random projection head.
+        projector.load_state_dict(state["projector"])
         logger.info(
             "resumed_from_checkpoint",
             extra={"path": str(latest_checkpoint_path), "global_step": state["global_step"]},
@@ -146,12 +150,23 @@ def run_training(deps: TrainingDeps) -> None:
     compiled_encoder = torch.compile(encoder, mode="default")
 
     def _probe_step() -> None:
-        dummy = torch.zeros(config.batch_size, 1, 144, 160, device=device).to(
+        # TWO forward passes, mirroring the real training step: view_a and
+        # view_b each go through the encoder independently and BOTH autograd
+        # graphs stay alive until the single shared backward below. Encoder
+        # activations dominate memory here (the maxpool-dropped stem keeps
+        # 4x the spatial resolution of a stock ResNet-50), so a single-forward
+        # probe would under-measure real training memory by roughly 2x and
+        # could pass at a batch_size that OOMs on the first real step.
+        dummy_a = torch.zeros(config.batch_size, 1, 144, 160, device=device).to(
+            memory_format=torch.channels_last
+        )
+        dummy_b = torch.zeros(config.batch_size, 1, 144, 160, device=device).to(
             memory_format=torch.channels_last
         )
         with torch.autocast(device_type=device.type, dtype=torch.bfloat16):
-            z = projector(compiled_encoder(dummy))
-            loss = nt_xent_loss(z, z, config.temperature)
+            z_a = projector(compiled_encoder(dummy_a))
+            z_b = projector(compiled_encoder(dummy_b))
+            loss = nt_xent_loss(z_a, z_b, config.temperature)
         loss.backward()
         compiled_encoder.zero_grad(set_to_none=True)
         projector.zero_grad(set_to_none=True)
@@ -183,14 +198,20 @@ def run_training(deps: TrainingDeps) -> None:
     best_val_loss = float("inf")
     if state is not None:
         restore_optimizer_and_scheduler(optimizer, scheduler, state)
-        dataloader.load_state_dict(state["dataloader"])
+        # An epoch-boundary checkpoint deliberately stores no dataloader state
+        # (see the epoch-boundary _save_checkpoint call below): a freshly-built
+        # dataloader is exactly right for starting the next epoch. Mid-epoch
+        # checkpoints DO carry state, and restoring it correctly continues the
+        # partial epoch.
+        if state["dataloader"]:
+            dataloader.load_state_dict(state["dataloader"])
         global_step = state["global_step"]
         start_epoch = state["epoch"]
         best_val_loss = state["best_val_loss"]
 
-    def _save_checkpoint(epoch: int) -> None:
+    def _save_checkpoint(epoch: int, dataloader_state: dict | None) -> None:
         ckpt_state = build_checkpoint_state(
-            epoch, global_step, encoder, optimizer, scheduler, dataloader.state_dict(), best_val_loss
+            epoch, global_step, encoder, projector, optimizer, scheduler, dataloader_state, best_val_loss
         )
         save_checkpoint(checkpoint_dir / f"checkpoint_step{global_step:08d}.pt", ckpt_state)
         logger.info("checkpoint_saved", extra={"global_step": global_step})
@@ -264,7 +285,10 @@ def run_training(deps: TrainingDeps) -> None:
                 deps.trackio_run.log(metrics)
 
             if global_step % config.checkpoint_interval_steps == 0:
-                _save_checkpoint(epoch)
+                # Mid-epoch: the dataloader's state is a real mid-stream
+                # position, and restoring it correctly continues this partial
+                # epoch on resume.
+                _save_checkpoint(epoch, dataloader.state_dict())
 
             # Last thing in the loop body, right before the loop returns to
             # `for batch in dataloader` and blocks on the next batch.
@@ -291,6 +315,16 @@ def run_training(deps: TrainingDeps) -> None:
         # a later, actually-worse model pass the improvement check and
         # overwrite the genuinely better encoder already published to the
         # Hub.
-        _save_checkpoint(epoch)
+        #
+        # Stores `epoch + 1` (this epoch is DONE -- resume must start at the
+        # next one, since start_epoch = state["epoch"]) and no dataloader
+        # state. The iterator that just finished this epoch is exhausted;
+        # measured against a datasets.IterableDataset (which, unlike a plain
+        # torch IterableDataset, implements state_dict/load_state_dict, so
+        # StatefulDataLoader delegates to it), restoring an exhausted state
+        # yields zero batches -- not just for the resumed epoch but for every
+        # epoch after it, i.e. a permanently stalled run that still logs val
+        # losses and re-saves checkpoints as if it were training.
+        _save_checkpoint(epoch + 1, None)
 
     deps.trackio_run.finish()

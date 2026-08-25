@@ -19,19 +19,32 @@ def build_checkpoint_state(
     epoch: int,
     global_step: int,
     model: nn.Module,
+    projector: nn.Module,
     optimizer: Optimizer,
     scheduler: LRScheduler,
-    dataloader_state: dict,
+    dataloader_state: dict | None,
     best_val_loss: float,
 ) -> dict:
     """`model` must be the raw, uncompiled module -- callers must never
     pass a torch.compile-wrapped model here, since its state_dict keys
     may carry an `_orig_mod.` prefix that a freshly-constructed raw
-    module on resume won't have."""
+    module on resume won't have. The same rule applies to `projector`,
+    though in practice the projector is never compiled, so its
+    state_dict keys are already prefix-free.
+
+    `projector` MUST be checkpointed alongside `model`: the optimizer's
+    parameter groups span both modules, so restoring optimizer moments
+    onto a freshly-random projector would silently reset the projection
+    head on every resume while pretending its Adam state was still valid.
+
+    `dataloader_state` may be None, meaning "nothing to restore" -- used
+    at epoch boundaries, where the just-finished iterator's state would
+    otherwise resume as immediately-exhausted and train zero steps."""
     return {
         "epoch": epoch,
         "global_step": global_step,
         "model": model.state_dict(),
+        "projector": projector.state_dict(),
         "optimizer": optimizer.state_dict(),
         "scheduler": scheduler.state_dict(),
         "dataloader": dataloader_state,
