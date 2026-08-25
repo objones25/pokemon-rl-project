@@ -49,3 +49,16 @@ def test_load_config_with_empty_file_returns_defaults(tmp_path) -> None:
 def test_real_config_file_loads_without_error() -> None:
     config = load_config("configs/contrastive_pretrain.yaml")
     assert config.batch_size == 512
+
+
+def test_training_config_local_cache_dir_defaults_to_none() -> None:
+    assert TrainingConfig().local_cache_dir is None
+
+
+def test_load_config_applies_local_cache_dir_override(tmp_path) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text("local_cache_dir: /workspace/contrastive_pretrain/resized_cache\n")
+
+    config = load_config(path)
+
+    assert config.local_cache_dir == "/workspace/contrastive_pretrain/resized_cache"

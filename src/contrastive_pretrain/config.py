@@ -36,6 +36,15 @@ class TrainingConfig:
     # (what this config targets) mounts its network volume at /workspace by
     # default. Confirmed against current RunPod docs, not assumed.
     network_volume_checkpoint_dir: str = "/workspace/contrastive_pretrain/checkpoints"
+    # None (default): stream objones25/pokemon-frames directly from the
+    # Hub, resizing per-row on the fly, exactly as before this field
+    # existed. Set to a /workspace-backed directory to cache already-
+    # resized frames there instead -- build_train_dataset/build_val_dataset
+    # populate it automatically on first use (see
+    # contrastive_pretrain.resize_cache.ensure_local_cache), eliminating
+    # both the per-epoch network round-trips and per-epoch resize work on
+    # every call after that.
+    local_cache_dir: str | None = None
 
 
 def load_config(path: str | Path) -> TrainingConfig:
