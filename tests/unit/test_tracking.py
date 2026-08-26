@@ -112,5 +112,5 @@ def test_wandb_run_finish_failure_is_swallowed_not_raised(caplog) -> None:
 def test_null_experiment_run_is_a_no_op() -> None:
     run = NullExperimentRun()
 
-    run.log({"anything": 1})  # must not raise
-    run.finish()  # must not raise
+    assert run.log({"anything": 1}) is None
+    assert run.finish() is None

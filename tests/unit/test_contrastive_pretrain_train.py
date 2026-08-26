@@ -652,3 +652,6 @@ def test_run_training_completes_a_few_steps_without_nan(tmp_path) -> None:
     # it on the target GPU for full validation instead of relying on
     # this to prove end-to-end throughput.
     run_training(deps)
+
+    checkpoints = list((tmp_path / "checkpoints").glob("checkpoint_step*.pt"))
+    assert checkpoints
