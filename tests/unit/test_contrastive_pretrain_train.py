@@ -28,7 +28,7 @@ def test_run_memory_probe_does_not_swallow_other_errors() -> None:
     def _other_error() -> None:
         raise ValueError("something else")
 
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="something else"):
         run_memory_probe(_other_error, batch_size=32)
 
 

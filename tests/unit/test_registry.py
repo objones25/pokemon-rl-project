@@ -92,7 +92,7 @@ def test_load_registry_rejects_missing_field(tmp_path: Path) -> None:
         },
     )
 
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="missing fields"):
         load_registry(path)
 
 

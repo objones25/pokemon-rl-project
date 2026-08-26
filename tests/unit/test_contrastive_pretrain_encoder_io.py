@@ -292,5 +292,5 @@ def test_compute_latent_stats_shapes(encoder_and_dim: tuple[nn.Module, int]) -> 
 def test_load_frozen_encoder_raises_on_revision_parameter() -> None:
     from contrastive_pretrain.encoder_io import load_frozen_encoder
 
-    with pytest.raises(NotImplementedError):
+    with pytest.raises(NotImplementedError, match="revision"):
         load_frozen_encoder("objones25/test-repo", revision="v1")
