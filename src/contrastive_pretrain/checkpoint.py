@@ -24,6 +24,7 @@ def build_checkpoint_state(
     scheduler: LRScheduler,
     dataloader_state: dict | None,
     best_val_loss: float,
+    local_cache_dir: str | None = None,
 ) -> dict:
     """`model` must be the raw, uncompiled module -- callers must never
     pass a torch.compile-wrapped model here, since its state_dict keys
@@ -39,7 +40,15 @@ def build_checkpoint_state(
 
     `dataloader_state` may be None, meaning "nothing to restore" -- used
     at epoch boundaries, where the just-finished iterator's state would
-    otherwise resume as immediately-exhausted and train zero steps."""
+    otherwise resume as immediately-exhausted and train zero steps.
+
+    `local_cache_dir` is recorded so a resume can detect the data source
+    changed since this checkpoint was saved -- restoring dataloader state
+    built under a different pipeline structure (e.g. streaming vs.
+    local-cache, which drops a pre-shuffle resize-map stage) corrupts
+    `StatefulDataLoader.load_state_dict()` silently, then raises
+    `KeyError: 'examples_iterable'` on the first batch, not at load
+    time."""
     return {
         "epoch": epoch,
         "global_step": global_step,
@@ -49,6 +58,7 @@ def build_checkpoint_state(
         "scheduler": scheduler.state_dict(),
         "dataloader": dataloader_state,
         "best_val_loss": best_val_loss,
+        "local_cache_dir": local_cache_dir,
     }
 
 

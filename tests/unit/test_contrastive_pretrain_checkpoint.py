@@ -70,6 +70,56 @@ def test_build_checkpoint_state_accepts_none_dataloader_state() -> None:
     assert state["dataloader"] is None
 
 
+def test_build_checkpoint_state_records_local_cache_dir() -> None:
+    """The resume path compares this against the live config to decide
+    whether the checkpointed dataloader state was built over the same
+    pipeline structure -- see build_checkpoint_state's docstring."""
+    model = nn.Linear(2, 2)
+    projector = nn.Linear(2, 4)
+    optimizer = torch.optim.AdamW(
+        list(model.parameters()) + list(projector.parameters()), lr=1e-3
+    )
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=10)
+
+    state = build_checkpoint_state(
+        epoch=3,
+        global_step=150,
+        model=model,
+        projector=projector,
+        optimizer=optimizer,
+        scheduler=scheduler,
+        dataloader_state={"fake": "state"},
+        best_val_loss=1.23,
+        local_cache_dir="/workspace/foo",
+    )
+
+    assert state["local_cache_dir"] == "/workspace/foo"
+
+
+def test_build_checkpoint_state_local_cache_dir_defaults_to_none() -> None:
+    """Omitting it must mean "streaming", the pre-local-cache default --
+    otherwise every existing call site would record a bogus data source."""
+    model = nn.Linear(2, 2)
+    projector = nn.Linear(2, 4)
+    optimizer = torch.optim.AdamW(
+        list(model.parameters()) + list(projector.parameters()), lr=1e-3
+    )
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=10)
+
+    state = build_checkpoint_state(
+        epoch=3,
+        global_step=150,
+        model=model,
+        projector=projector,
+        optimizer=optimizer,
+        scheduler=scheduler,
+        dataloader_state={"fake": "state"},
+        best_val_loss=1.23,
+    )
+
+    assert state["local_cache_dir"] is None
+
+
 def test_save_and_load_checkpoint_round_trip(tmp_path) -> None:
     model = nn.Linear(2, 2)
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)

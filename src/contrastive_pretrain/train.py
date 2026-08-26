@@ -258,9 +258,27 @@ def run_training(deps: TrainingDeps) -> None:
         # (see the epoch-boundary _save_checkpoint call below): a freshly-built
         # dataloader is exactly right for starting the next epoch. Mid-epoch
         # checkpoints DO carry state, and restoring it correctly continues the
-        # partial epoch.
+        # partial epoch -- but ONLY if it was built over the same data source.
+        # Setting or clearing local_cache_dir adds/drops build_train_dataset's
+        # pre-shuffle resize-map stage, changing the nesting of the underlying
+        # datasets.IterableDataset's state dict. load_state_dict() accepts the
+        # mismatched shape without complaint (silently resetting position to
+        # zero) and then dies with KeyError: 'examples_iterable' on the first
+        # batch -- i.e. hours in, after a full cache build. `.get`, not
+        # `[...]`: checkpoints written before this field existed carry no key,
+        # and treating those as local_cache_dir=None matches the behavior they
+        # were actually saved under.
         if state["dataloader"]:
-            dataloader.load_state_dict(state["dataloader"])
+            if state.get("local_cache_dir") == config.local_cache_dir:
+                dataloader.load_state_dict(state["dataloader"])
+            else:
+                logger.info(
+                    "dataloader_state_skipped_data_source_changed",
+                    extra={
+                        "checkpoint_local_cache_dir": state.get("local_cache_dir"),
+                        "config_local_cache_dir": config.local_cache_dir,
+                    },
+                )
         global_step = state["global_step"]
         start_epoch = state["epoch"]
         best_val_loss = state["best_val_loss"]
@@ -275,6 +293,7 @@ def run_training(deps: TrainingDeps) -> None:
             scheduler,
             dataloader_state,
             best_val_loss,
+            local_cache_dir=config.local_cache_dir,
         )
         save_checkpoint(
             checkpoint_dir / f"checkpoint_step{global_step:08d}.pt", ckpt_state

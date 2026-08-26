@@ -343,6 +343,131 @@ def test_run_training_resumes_projector_and_makes_progress(
     assert torch.equal(projector_at_restore[0], saved_projector_weight)
 
 
+def _config_for_resume(
+    checkpoint_dir, local_cache_dir: str | None = None
+) -> TrainingConfig:
+    return TrainingConfig(
+        pretrained=False,
+        batch_size=4,
+        num_workers=0,
+        max_epochs=1,
+        checkpoint_interval_steps=1,
+        network_volume_checkpoint_dir=str(checkpoint_dir),
+        local_cache_dir=local_cache_dir,
+    )
+
+
+def _write_mid_epoch_checkpoint(
+    tmp_path, monkeypatch, checkpoint_local_cache_dir: str | None
+):
+    """Runs one short training run to produce a REAL mid-epoch checkpoint
+    (checkpoint_interval_steps=1 makes step 1 a genuine periodic save that
+    carries live dataloader state), drops the epoch-boundary checkpoint that
+    follows it (that one deliberately stores dataloader=None, so
+    find_latest_checkpoint would otherwise pick a checkpoint that never
+    reaches the load_state_dict call at all), and rewrites the surviving
+    checkpoint's recorded data source. Returns the checkpoint dir."""
+    checkpoint_dir = tmp_path / "checkpoints"
+    monkeypatch.setattr(
+        "contrastive_pretrain.train.build_train_dataset",
+        lambda config: _FakeStreamingDataset(n=8),
+    )
+    monkeypatch.setattr(
+        "contrastive_pretrain.train.build_val_dataset",
+        lambda config: _FakeStreamingDataset(n=8),
+    )
+    run_training(
+        TrainingDeps(
+            config=_config_for_resume(checkpoint_dir),
+            frozen_encoder_client=_FakeHfClient(),
+            device=torch.device("cpu"),
+        )
+    )
+
+    mid_epoch_path = checkpoint_dir / "checkpoint_step00000001.pt"
+    for path in checkpoint_dir.glob("checkpoint_step*.pt"):
+        if path != mid_epoch_path:
+            path.unlink()
+
+    state = checkpoint.load_checkpoint(mid_epoch_path)
+    assert state["dataloader"]  # precondition: there IS state to restore
+    state["local_cache_dir"] = checkpoint_local_cache_dir
+    checkpoint.save_checkpoint(mid_epoch_path, state)
+    return checkpoint_dir
+
+
+def _spy_on_dataloader_load_state_dict(monkeypatch) -> list[dict]:
+    """Wraps train's build_dataloader so the returned StatefulDataLoader
+    records every load_state_dict call -- same spy-around-the-real-callable
+    pattern the projector-resume test uses for build_projector."""
+    calls: list[dict] = []
+    real_build_dataloader = contrastive_pretrain.train.build_dataloader
+
+    def _spy(*args, **kwargs):
+        loader = real_build_dataloader(*args, **kwargs)
+        real_load_state_dict = loader.load_state_dict
+
+        def _recording_load_state_dict(state_dict):
+            calls.append(state_dict)
+            return real_load_state_dict(state_dict)
+
+        loader.load_state_dict = _recording_load_state_dict  # type: ignore[method-assign]
+        return loader
+
+    monkeypatch.setattr("contrastive_pretrain.train.build_dataloader", _spy)
+    return calls
+
+
+def test_run_training_skips_dataloader_state_when_local_cache_dir_changed(
+    tmp_path, monkeypatch
+) -> None:
+    """Flipping local_cache_dir on/off adds or drops build_train_dataset's
+    pre-shuffle resize-map stage, which changes the nesting of the underlying
+    datasets.IterableDataset state dict. StatefulDataLoader.load_state_dict
+    accepts the mismatched shape without complaint and then dies with
+    KeyError: 'examples_iterable' on the FIRST batch -- i.e. hours into the
+    run, after a full cache build. The resume must therefore refuse state
+    saved under a different data source rather than restoring it."""
+    checkpoint_dir = _write_mid_epoch_checkpoint(
+        tmp_path, monkeypatch, checkpoint_local_cache_dir="/workspace/old-cache"
+    )
+    load_state_dict_calls = _spy_on_dataloader_load_state_dict(monkeypatch)
+
+    run_training(
+        TrainingDeps(
+            config=_config_for_resume(checkpoint_dir, local_cache_dir=None),
+            frozen_encoder_client=_FakeHfClient(),
+            device=torch.device("cpu"),
+        )
+    )
+
+    assert load_state_dict_calls == []
+
+
+def test_run_training_restores_dataloader_state_when_local_cache_dir_matches(
+    tmp_path, monkeypatch
+) -> None:
+    """Mirror of the test above: the guard must not be so eager that it
+    throws away legitimately resumable state on a normal same-config
+    resume."""
+    checkpoint_dir = _write_mid_epoch_checkpoint(
+        tmp_path, monkeypatch, checkpoint_local_cache_dir="/workspace/cache"
+    )
+    load_state_dict_calls = _spy_on_dataloader_load_state_dict(monkeypatch)
+
+    run_training(
+        TrainingDeps(
+            config=_config_for_resume(
+                checkpoint_dir, local_cache_dir="/workspace/cache"
+            ),
+            frozen_encoder_client=_FakeHfClient(),
+            device=torch.device("cpu"),
+        )
+    )
+
+    assert len(load_state_dict_calls) == 1
+
+
 def test_run_training_skips_publish_when_val_loss_does_not_improve(
     tmp_path, monkeypatch
 ) -> None:
