@@ -9,8 +9,10 @@ from PIL import Image
 import contrastive_pretrain.resize_cache
 from contrastive_pretrain.config import TrainingConfig
 from contrastive_pretrain.dataset import _resize_to_canonical
-from contrastive_pretrain.resize_cache import build_local_resize_cache, ensure_local_cache
-
+from contrastive_pretrain.resize_cache import (
+    build_local_resize_cache,
+    ensure_local_cache,
+)
 
 _SOURCE_PIXELS = np.random.default_rng(0).integers(0, 256, (2160, 2400), dtype=np.uint8)
 
@@ -360,9 +362,19 @@ def test_build_local_resize_cache_against_real_hub_shard(tmp_path) -> None:
     ][:1]
     assert shard_paths, "expected at least one shard under shards/ in objones25/pokemon-frames"
 
+    def _download_shard(path: str) -> bytes:
+        # download_bytes returns bytes | None, but build_local_resize_cache's
+        # contract is (str) -> bytes. Mirror ensure_local_cache._download_shard's
+        # production handling (resize_cache.py) rather than widening the
+        # contract: a listed-but-missing shard is a hard error, not None.
+        data = client.download_bytes(path)
+        if data is None:
+            raise FileNotFoundError(f"shard listed but missing on Hub: {path}")
+        return data
+
     build_local_resize_cache(
         list_shard_paths=lambda: shard_paths,
-        download_shard=lambda path: client.download_bytes(path),
+        download_shard=_download_shard,
         local_cache_dir=tmp_path,
     )
 

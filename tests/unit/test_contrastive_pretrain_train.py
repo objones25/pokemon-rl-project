@@ -2,6 +2,7 @@ import pytest
 import torch
 from torch import nn
 
+import contrastive_pretrain.train
 from contrastive_pretrain import checkpoint
 from contrastive_pretrain.config import TrainingConfig
 from contrastive_pretrain.model import (
@@ -10,7 +11,6 @@ from contrastive_pretrain.model import (
     build_encoder,
     build_projector,
 )
-import contrastive_pretrain.train
 from contrastive_pretrain.train import (
     TrainingDeps,
     check_finite_loss,
