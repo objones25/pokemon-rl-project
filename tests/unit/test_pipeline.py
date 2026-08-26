@@ -1,6 +1,7 @@
 import logging
 
 import numpy as np
+import pytest
 
 from data_collection.hf_uploader import HfUploader, Manifest
 from data_collection.pipeline import (
@@ -75,7 +76,7 @@ def test_process_video_logs_periodic_progress_for_long_videos(caplog) -> None:
     # Every yielded frame is pixel-identical, so the deduper correctly
     # collapses frames 2+ as duplicates of frame 1 -- only 1 is ever kept.
     assert progress_records[0].kept == 1
-    assert progress_records[0].video_time_s == 100.0  # 200 samples / 2.0 default sample_fps
+    assert progress_records[0].video_time_s == pytest.approx(100.0)  # 200 samples / 2.0 default sample_fps
 
 
 def test_run_pipeline_uploads_a_contact_sheet_preview_per_batch() -> None:

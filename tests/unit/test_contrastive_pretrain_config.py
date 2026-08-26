@@ -1,3 +1,5 @@
+import pytest
+
 from contrastive_pretrain.config import TrainingConfig, load_config
 
 
@@ -8,10 +10,10 @@ def test_training_config_defaults_match_spec() -> None:
     assert config.frozen_encoder_repo_id == "objones25/pokemon-contrastive-encoder"
     assert config.val_video_ids == ("D1SrSFZrV7A", "YW29l3jJXr4")
     assert config.batch_size == 512
-    assert config.learning_rate == 3e-4
+    assert config.learning_rate == pytest.approx(3e-4)
     assert config.warmup_steps == 1000
-    assert config.weight_decay == 1e-6
-    assert config.temperature == 0.1
+    assert config.weight_decay == pytest.approx(1e-6)
+    assert config.temperature == pytest.approx(0.1)
     assert config.max_epochs == 100
     assert config.checkpoint_interval_steps == 1000
     assert config.shuffle_buffer_size == 10_000
@@ -24,7 +26,7 @@ def test_load_config_applies_yaml_overrides(tmp_path) -> None:
     config = load_config(path)
 
     assert config.batch_size == 8
-    assert config.learning_rate == 0.001
+    assert config.learning_rate == pytest.approx(0.001)
     assert config.max_epochs == 100  # untouched fields keep their default
 
 

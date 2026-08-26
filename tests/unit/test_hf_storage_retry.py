@@ -71,14 +71,14 @@ def test_rate_limit_aware_backoff_uses_long_delay_for_rate_limit_errors() -> Non
 
     delay = backoff(1, RuntimeError("429 Too Many Requests"))
 
-    assert delay == 120.0
+    assert delay == pytest.approx(120.0)
 
 
 def test_rate_limit_aware_backoff_falls_back_to_exponential_for_other_errors() -> None:
     backoff = rate_limit_aware_backoff(base_delay=1.0, rate_limit_delay=120.0)
 
-    assert backoff(1, RuntimeError("connection reset")) == 1.0
-    assert backoff(2, RuntimeError("connection reset")) == 2.0
+    assert backoff(1, RuntimeError("connection reset")) == pytest.approx(1.0)
+    assert backoff(2, RuntimeError("connection reset")) == pytest.approx(2.0)
 
 
 def test_retry_with_backoff_returns_the_wrapped_callables_result() -> None:

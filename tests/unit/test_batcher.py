@@ -2,6 +2,7 @@ from pathlib import Path
 
 import datasets
 import numpy as np
+import pytest
 
 from data_collection.batcher import FrameBatcher, FrameRecord, batch_to_parquet
 
@@ -61,5 +62,5 @@ def test_batch_to_parquet_round_trips(tmp_path: Path) -> None:
     assert len(reloaded) == 5
     assert reloaded.column_names == ["image", "video_id", "timestamp_s", "game"]
     assert reloaded[0]["video_id"] == "abc123"
-    assert reloaded[2]["timestamp_s"] == 2.0
+    assert reloaded[2]["timestamp_s"] == pytest.approx(2.0)
     assert reloaded[0]["image"].size == (160, 144)  # PIL Image (width, height)
