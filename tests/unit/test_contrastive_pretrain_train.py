@@ -163,6 +163,22 @@ class _FakeEncoder(nn.Module):
         return self._linear(x.flatten(1).float())
 
 
+class _FakeCompiled(nn.Module):
+    """Mimics torch.compile's OptimizedModule wrapper: delegates forward to
+    the real module but nests it under `_orig_mod`, so state_dict() keys
+    carry the `_orig_mod.` prefix exactly as a real compiled module's do.
+    Without this, the fixture's stub would be an identity passthrough and
+    these tests would stop detecting a compiled-vs-raw module mix-up (the
+    hazard checkpoint.py's docstring warns about)."""
+
+    def __init__(self, mod: nn.Module) -> None:
+        super().__init__()
+        self._orig_mod = mod
+
+    def forward(self, *args, **kwargs):
+        return self._orig_mod(*args, **kwargs)
+
+
 @pytest.fixture
 def fast_run_training(monkeypatch):
     """Bypasses torch.compile's uncached JIT compilation (see
@@ -172,8 +188,17 @@ def fast_run_training(monkeypatch):
     correctness. Do NOT use this fixture on a test that specifically needs
     to exercise the real encoder or real compilation end-to-end (there is
     exactly one such test in this file, and it deliberately does not use
-    this fixture -- see its own docstring)."""
-    monkeypatch.setattr("contrastive_pretrain.train.torch.compile", lambda model, **kwargs: model)
+    this fixture -- see its own docstring).
+
+    The torch.compile stub wraps the model in _FakeCompiled rather than
+    returning it unchanged, so compiled_encoder is never `is` the same
+    object as encoder and its state_dict() keys carry the `_orig_mod.`
+    prefix a real compiled module's do -- preserving this fixture's ability
+    to catch build_checkpoint_state/push_frozen_encoder being passed
+    compiled_encoder instead of the raw encoder."""
+    monkeypatch.setattr(
+        "contrastive_pretrain.train.torch.compile", lambda model, **kwargs: _FakeCompiled(model)
+    )
     monkeypatch.setattr(
         "contrastive_pretrain.train.build_encoder", lambda pretrained: (_FakeEncoder(), EMBEDDING_DIM)
     )
@@ -185,11 +210,21 @@ def test_run_training_completes_and_checkpoints_at_epoch_boundary(
     """Fast, network/credential-free regression coverage for run_training --
     the plan's highest-fan-in function otherwise had zero automated
     coverage protecting its checkpoint-restore ordering (model state loaded
-    before torch.compile wraps it), its raw-vs-compiled module passing
-    (build_checkpoint_state/push_frozen_encoder must get the raw `encoder`,
-    never `compiled_encoder`), and its two logging cadences. Monkeypatches
-    the streaming-dataset builders with a tiny in-memory fake and uses
-    pretrained=False so the whole run needs no network or HF credentials.
+    before torch.compile wraps it) and its two logging cadences.
+    Monkeypatches the streaming-dataset builders with a tiny in-memory fake
+    and uses pretrained=False so the whole run needs no network or HF
+    credentials.
+
+    Together with fast_run_training's _FakeCompiled stub (state_dict() keys
+    carry the `_orig_mod.` prefix a real compiled module's do), the resume
+    path exercised by test_run_training_resumes_projector_and_makes_progress
+    below also guards build_checkpoint_state's raw-vs-compiled module
+    passing: if it were ever given `compiled_encoder` instead of the raw
+    `encoder`, resume's strict `encoder.load_state_dict(state["model"])`
+    would raise on the `_orig_mod.`-prefixed keys. push_frozen_encoder's own
+    raw-vs-compiled passing is NOT covered by any test in this file -- no
+    test decodes the bytes it hands to the fake HF client, so a
+    `compiled_encoder` mix-up there would currently go undetected.
 
     checkpoint_interval_steps is set far above the total step count so the
     only checkpoint written is the epoch-boundary one -- this also
