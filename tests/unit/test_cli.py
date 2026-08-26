@@ -95,3 +95,80 @@ def test_run_command_exits_nonzero_when_pipeline_reports_failures(tmp_path, monk
     )
 
     assert result.exit_code != 0
+
+
+def test_run_command_exits_zero_when_pipeline_reports_no_failures(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr("data_collection.cli.get_token", lambda: "fake-token")
+    monkeypatch.setenv("WANDB_API_KEY", "fake-key")
+    monkeypatch.setattr("data_collection.cli.wandb", _FakeWandbModule())
+    monkeypatch.setattr(
+        "data_collection.cli.pipeline.run_pipeline",
+        lambda sources, deps: pipeline.PipelineResult(completed=0, failed=0),
+    )
+    registry_path = tmp_path / "video_sources.yaml"
+    registry_path.write_text("videos: []\n")
+
+    runner = CliRunner()
+    result = runner.invoke(
+        main, ["run", "--repo-id", "me/pokemon-frames", "--registry", str(registry_path)]
+    )
+
+    assert result.exit_code == 0, result.output
+
+
+def test_run_command_wires_batch_and_checkpoint_options_onto_deps(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr("data_collection.cli.get_token", lambda: "fake-token")
+    monkeypatch.setenv("WANDB_API_KEY", "fake-key")
+    monkeypatch.setattr("data_collection.cli.wandb", _FakeWandbModule())
+    captured = {}
+    monkeypatch.setattr(
+        "data_collection.cli.pipeline.run_pipeline",
+        lambda sources, deps: captured.update(deps=deps) or pipeline.PipelineResult(completed=0, failed=0),
+    )
+    registry_path = tmp_path / "video_sources.yaml"
+    registry_path.write_text("videos: []\n")
+
+    runner = CliRunner()
+    result = runner.invoke(
+        main,
+        [
+            "run",
+            "--repo-id", "me/pokemon-frames",
+            "--registry", str(registry_path),
+            "--batch-size", "50",
+            "--checkpoint-interval", "999",
+            "--max-concurrent-videos", "3",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["deps"].batch_size == 50
+    assert captured["deps"].checkpoint_interval_samples == 999
+    assert captured["deps"].max_concurrent_videos == 3
+
+
+def test_curate_command_delegates_to_run_curation(tmp_path, monkeypatch) -> None:
+    captured = {}
+    monkeypatch.setattr(
+        "data_collection.cli.curation.run_curation",
+        lambda **kwargs: captured.update(kwargs),
+    )
+    registry_path = tmp_path / "video_sources.yaml"
+    approved_dir = tmp_path / "approved"
+
+    runner = CliRunner()
+    result = runner.invoke(
+        main,
+        [
+            "curate", "https://youtube.com/watch?v=abc123",
+            "--game", "red",
+            "--registry", str(registry_path),
+            "--approved-dir", str(approved_dir),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["video_url"] == "https://youtube.com/watch?v=abc123"
+    assert captured["game"] == "red"
+    assert captured["registry_path"] == registry_path
+    assert captured["approved_dir"] == approved_dir
