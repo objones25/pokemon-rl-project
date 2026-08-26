@@ -11,13 +11,20 @@ from contrastive_pretrain.checkpoint import (
 )
 
 
-def test_build_checkpoint_state_captures_all_expected_keys() -> None:
-    model = nn.Linear(2, 2)
-    projector = nn.Linear(2, 4)
-    optimizer = torch.optim.AdamW(
-        list(model.parameters()) + list(projector.parameters()), lr=1e-3
-    )
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=10)
+@pytest.fixture
+def make_training_components():
+    def _make():
+        model = nn.Linear(2, 2)
+        projector = nn.Linear(2, 4)
+        optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=100)
+        return model, projector, optimizer, scheduler
+
+    return _make
+
+
+def test_build_checkpoint_state_captures_all_expected_keys(make_training_components) -> None:
+    model, projector, optimizer, scheduler = make_training_components()
 
     state = build_checkpoint_state(
         epoch=3,
@@ -45,16 +52,11 @@ def test_build_checkpoint_state_captures_all_expected_keys() -> None:
     assert "augmentation_rng" not in state  # per-row seeding needs no RNG state
 
 
-def test_build_checkpoint_state_accepts_none_dataloader_state() -> None:
+def test_build_checkpoint_state_accepts_none_dataloader_state(make_training_components) -> None:
     """Epoch-boundary checkpoints deliberately store no dataloader state --
     the iterator that just finished the epoch is exhausted, and restoring it
     would make the resumed epoch yield nothing."""
-    model = nn.Linear(2, 2)
-    projector = nn.Linear(2, 4)
-    optimizer = torch.optim.AdamW(
-        list(model.parameters()) + list(projector.parameters()), lr=1e-3
-    )
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=10)
+    model, projector, optimizer, scheduler = make_training_components()
 
     state = build_checkpoint_state(
         epoch=3,
@@ -70,16 +72,11 @@ def test_build_checkpoint_state_accepts_none_dataloader_state() -> None:
     assert state["dataloader"] is None
 
 
-def test_build_checkpoint_state_records_local_cache_dir() -> None:
+def test_build_checkpoint_state_records_local_cache_dir(make_training_components) -> None:
     """The resume path compares this against the live config to decide
     whether the checkpointed dataloader state was built over the same
     pipeline structure -- see build_checkpoint_state's docstring."""
-    model = nn.Linear(2, 2)
-    projector = nn.Linear(2, 4)
-    optimizer = torch.optim.AdamW(
-        list(model.parameters()) + list(projector.parameters()), lr=1e-3
-    )
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=10)
+    model, projector, optimizer, scheduler = make_training_components()
 
     state = build_checkpoint_state(
         epoch=3,
@@ -96,15 +93,10 @@ def test_build_checkpoint_state_records_local_cache_dir() -> None:
     assert state["local_cache_dir"] == "/workspace/foo"
 
 
-def test_build_checkpoint_state_local_cache_dir_defaults_to_none() -> None:
+def test_build_checkpoint_state_local_cache_dir_defaults_to_none(make_training_components) -> None:
     """Omitting it must mean "streaming", the pre-local-cache default --
     otherwise every existing call site would record a bogus data source."""
-    model = nn.Linear(2, 2)
-    projector = nn.Linear(2, 4)
-    optimizer = torch.optim.AdamW(
-        list(model.parameters()) + list(projector.parameters()), lr=1e-3
-    )
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=10)
+    model, projector, optimizer, scheduler = make_training_components()
 
     state = build_checkpoint_state(
         epoch=3,
@@ -120,11 +112,8 @@ def test_build_checkpoint_state_local_cache_dir_defaults_to_none() -> None:
     assert state["local_cache_dir"] is None
 
 
-def test_save_and_load_checkpoint_round_trip(tmp_path) -> None:
-    model = nn.Linear(2, 2)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=10)
-    projector = nn.Linear(2, 4)
+def test_save_and_load_checkpoint_round_trip(tmp_path, make_training_components) -> None:
+    model, projector, optimizer, scheduler = make_training_components()
     state = build_checkpoint_state(
         epoch=3,
         global_step=150,
@@ -166,14 +155,21 @@ def test_find_latest_checkpoint_returns_none_when_empty(tmp_path) -> None:
     assert find_latest_checkpoint(tmp_path) is None
 
 
-def test_restore_optimizer_and_scheduler_restores_correct_lr() -> None:
+def test_find_latest_checkpoint_returns_none_when_directory_does_not_exist(tmp_path) -> None:
+    assert find_latest_checkpoint(tmp_path / "nonexistent") is None
+
+
+def test_load_checkpoint_raises_on_missing_file(tmp_path) -> None:
+    with pytest.raises(FileNotFoundError):
+        load_checkpoint(tmp_path / "does_not_exist.pt")
+
+
+def test_restore_optimizer_and_scheduler_restores_correct_lr(make_training_components) -> None:
     """Test that restore_optimizer_and_scheduler correctly restores the optimizer's
     learning rate when called in the documented order (scheduler constructed
     before restore). Implicitly verifies that optimizer.load_state_dict() is
     actually called — fully omitting it would cause this test to fail."""
-    model = nn.Linear(2, 2)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=100)
+    model, projector, optimizer, scheduler = make_training_components()
     for _ in range(10):
         optimizer.step()
         scheduler.step()
@@ -181,7 +177,7 @@ def test_restore_optimizer_and_scheduler_restores_correct_lr() -> None:
         epoch=0,
         global_step=10,
         model=model,
-        projector=nn.Linear(2, 4),
+        projector=projector,
         optimizer=optimizer,
         scheduler=scheduler,
         dataloader_state={},
@@ -189,9 +185,7 @@ def test_restore_optimizer_and_scheduler_restores_correct_lr() -> None:
     )
     restored_lr_from_original = optimizer.param_groups[0]["lr"]
 
-    model2 = nn.Linear(2, 2)
-    optimizer2 = torch.optim.AdamW(model2.parameters(), lr=1e-3)
-    scheduler2 = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer2, T_max=100)
+    _, _, optimizer2, scheduler2 = make_training_components()
     restore_optimizer_and_scheduler(optimizer2, scheduler2, state)
 
     assert optimizer2.param_groups[0]["lr"] == pytest.approx(restored_lr_from_original)
