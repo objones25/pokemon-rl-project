@@ -1,9 +1,11 @@
 # Slow test suite is unrunnable on the dev machine
 
 Date: 2026-08-26
-Status: **not fixed** — recorded for a follow-up pass, per instruction. None
-of this was introduced by the resize-cache / checkpoint-retention / build-cache
-work landed the same day; all five failures are environmental.
+Status: **resolved** — see "Resolution" at the bottom. The diagnosis below was
+right about the mechanism (no credentials in the pytest process, dead local
+trust store) but wrong about the conclusion: only one of the five failures was
+purely environmental. Three of the tests were redundant with existing offline
+coverage, and two asserted guarantees the implementation does not provide.
 
 ## Symptom
 
@@ -91,3 +93,61 @@ instead, with `.env` loaded:
 - `_discard_hub_blob` against a real `hf_hub_download` cache: 113.1 MB
   reclaimed, caller still receives its bytes.
 - Dataset totals read from the Hub API: 367 shards, 64.27 GB.
+
+## Resolution (2026-08-26, follow-up pass)
+
+`.env` is deliberately **not** loaded in the test process. A test run that
+silently picked up the developer's `.env` would authenticate as them against
+real private repos and a real W&B account with nothing in the test asking for
+it — the hazard `test_train_command_fails_fast_with_no_wandb_credentials`
+already neutralizes `load_dotenv` for. The live tier reads the *ambient*
+credential instead (`HF_TOKEN`, or the `huggingface_hub` token file), via a
+`requires_hf_credentials` skipif in `tests/conftest.py` that carries the real
+reason. A pod exports `HF_TOKEN` per the runbook, so the live tier runs there
+and skips legibly on a dev machine.
+
+Per-test outcome:
+
+- `test_build_train_dataset_excludes_val_videos` and
+  `test_build_val_dataset_only_yields_held_out_videos` — deleted. Both were
+  exact duplicates of their `_fast` twins, which cover the same filter offline.
+  The val one also looped `zip(range(5), ds)`, so it passed vacuously when the
+  val stream was *empty* — the one outcome that actually matters.
+- `test_build_local_resize_cache_against_real_hub_shard` — deleted. It
+  downloaded ~113MB to assert `num_rows > 0` and `image.size == (160, 144)`,
+  both strictly weaker than the synthetic-fixture test above it, which compares
+  actual pixels.
+- `test_build_dataloader_resumes_against_real_streaming_data` — **could never
+  have passed**, credentials or not. It asserted exact batch-for-batch resume
+  through `build_train_dataset`, which ends in `.shuffle()`; the shuffle
+  buffer's contents are not part of the checkpointed state, so a resumed train
+  loader re-fills the buffer from the source and serves a *different* next
+  batch. Measured directly (see below). Replaced by
+  `test_build_val_dataloader_resumes_from_exact_position_over_streamed_parquet_shards`,
+  which runs the same mechanic over real on-disk Parquet shards through the
+  *val* pipeline (no shuffle), where exact resume is a true property. Offline,
+  so it now runs in the default suite instead of never running.
+- `test_run_training_completes_a_few_steps_without_nan` — **also could never
+  have passed**: `max_epochs=1` over all 367 shards / 64GB with no step bound.
+  Replaced by `test_run_training_with_real_pretrained_encoder_completes_without_nan`,
+  which keeps the real ResNet-50, real ImageNet weights and real
+  `torch.compile` but feeds the in-memory fake stream, finishing in ~60s. It
+  needs no Hub credentials, so the SSL trust store is now its only environmental
+  dependency.
+
+Known behaviour, worth writing down: **mid-epoch train resume is approximate,
+not exact.** `.shuffle(buffer_size=N)`'s buffer is not checkpointed, so a
+resumed run re-serves up to N rows per worker in a different order. Benign for
+SimCLR (nothing depends on epoch-exact sample coverage), but it is not the
+guarantee the old test claimed, and it is what
+`train.py`'s dataloader-state restore actually delivers.
+
+Also added: `test_build_encoder_with_pretrained_true_loads_the_real_imagenet_weights`
+(`@slow`), comparing `conv1` against the reference torchvision model. A
+randomly-initialised ResNet-50 trains to a perfectly finite loss, so before
+this an inverted `pretrained` flag would have shipped a from-scratch backbone
+with the whole suite green.
+
+Cause #2 (SSL) is unchanged and is genuinely environment-only:
+`/Applications/Python 3.12/Install Certificates.command`, or
+`SSL_CERT_FILE=$(python -c 'import certifi;print(certifi.where())')`.

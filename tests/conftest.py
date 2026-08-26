@@ -20,7 +20,27 @@ import os
 
 os.environ.setdefault("TORCHINDUCTOR_FX_GRAPH_CACHE", "0")
 
+import huggingface_hub
 import pytest
+
+requires_hf_credentials = pytest.mark.skipif(
+    huggingface_hub.get_token() is None,
+    reason=(
+        "no Hugging Face token available (huggingface_hub.get_token() is None); "
+        "objones25/pokemon-frames is private, and the Hub reports an unauthenticated "
+        "request as 401 -> 'dataset doesn't exist', which reads like a data problem "
+        "rather than a credentials one. Export HF_TOKEN or run `hf auth login`."
+    ),
+)
+"""Guard for the handful of tests that deliberately talk to the real private
+dataset repo. Deliberately reads the *ambient* credential (env var or the
+huggingface_hub token file) and never loads the repo's .env: a test process
+that silently picked up the developer's .env would authenticate as them
+against real private repos and a real W&B account without anything in the
+test asking for it -- the same hazard
+test_train_command_fails_fast_with_no_wandb_credentials neutralizes
+load_dotenv for. On a training pod HF_TOKEN is exported per the runbook, so
+these run there; on a dev machine they skip with the reason above."""
 
 
 class FakeHfClient:

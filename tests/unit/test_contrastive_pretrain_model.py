@@ -1,10 +1,12 @@
 import pytest
 import torch
 from torch import nn
+from torchvision.models import ResNet50_Weights, resnet50
 
 from contrastive_pretrain.model import (
     EMBEDDING_DIM,
     GrayscaleResNetEncoder,
+    build_encoder,
     build_projector,
 )
 
@@ -58,3 +60,19 @@ def test_build_projector_output_shape() -> None:
     out = projector(x)
 
     assert out.shape == (4, 128)
+
+
+@pytest.mark.slow
+def test_build_encoder_with_pretrained_true_loads_the_real_imagenet_weights() -> None:
+    """Closes the gap the run_training smoke test cannot: a randomly-
+    initialised ResNet-50 trains to a perfectly finite loss, so an inverted
+    `pretrained` flag would silently ship a from-scratch backbone and every
+    other test would stay green. Compares conv1 against the reference
+    torchvision model rather than checking a statistic, so it is an exact
+    equality, not a plausibility check.
+
+    Marked slow: downloads ~100MB of torchvision weights over the network."""
+    encoder, _ = build_encoder(pretrained=True)
+    reference = resnet50(weights=ResNet50_Weights.IMAGENET1K_V2)
+
+    assert torch.equal(encoder.backbone.conv1.weight, reference.conv1.weight)

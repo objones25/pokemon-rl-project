@@ -539,46 +539,16 @@ def test_ensure_local_cache_forwards_resize_cache_num_proc_from_config(
     assert captured["num_proc"] == 6
 
 
-@pytest.mark.slow
-def test_build_local_resize_cache_against_real_hub_shard(tmp_path) -> None:
-    """Confirms the real Hub schema round-trips through the real resize +
-    local Parquet write correctly -- every other test in this file uses
-    synthetic fixtures; this is the one check against the real
-    objones25/pokemon-frames dataset."""
-    from huggingface_hub import HfApi
-
-    from hf_storage.client import RealHfClient
-
-    api = HfApi()
-    client = RealHfClient(api, "objones25/pokemon-frames", repo_type="dataset")
-    shard_paths = [
-        p
-        for p in api.list_repo_files("objones25/pokemon-frames", repo_type="dataset")
-        if p.startswith("shards/")
-    ][:1]
-    assert shard_paths, "expected at least one shard under shards/ in objones25/pokemon-frames"
-
-    def _download_shard(path: str) -> bytes:
-        # download_bytes returns bytes | None, but build_local_resize_cache's
-        # contract is (str) -> bytes. Mirror ensure_local_cache._download_shard's
-        # production handling (resize_cache.py) rather than widening the
-        # contract: a listed-but-missing shard is a hard error, not None.
-        data = client.download_bytes(path)
-        if data is None:
-            raise FileNotFoundError(f"shard listed but missing on Hub: {path}")
-        return data
-
-    build_local_resize_cache(
-        list_shard_paths=lambda: shard_paths,
-        download_shard=_download_shard,
-        local_cache_dir=tmp_path,
-    )
-
-    output_path = tmp_path / shard_paths[0]
-    assert output_path.exists()
-    reloaded = datasets.Dataset.from_parquet(str(output_path))
-    assert reloaded.num_rows > 0
-    assert reloaded[0]["image"].size == (160, 144)
+# Removed: test_build_local_resize_cache_against_real_hub_shard, which
+# downloaded a real ~113MB shard from objones25/pokemon-frames to assert
+# num_rows > 0 and image.size == (160, 144). Both are strictly weaker than
+# test_build_local_resize_cache_writes_resized_shard_for_each_listed_path
+# above, which compares actual pixels (a size/mode-only assertion cannot catch
+# the round-trip corruption _resize_row_for_cache exists to prevent -- see its
+# comment). The one thing the live version really covered, that the real repo's
+# shards still carry the schema this code assumes, now lives in
+# test_contrastive_pretrain_dataset.py's live tier, which reads one streamed
+# row instead of a whole shard.
 
 
 def test_build_local_resize_cache_removes_orphaned_temp_files_when_os_replace_crashes(

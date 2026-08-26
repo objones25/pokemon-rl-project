@@ -2,6 +2,7 @@ import datasets
 import numpy as np
 import pytest
 import torch
+from huggingface_hub import HfApi
 from PIL import Image
 
 from contrastive_pretrain.augmentation import AugmentationConfig
@@ -16,6 +17,7 @@ from contrastive_pretrain.dataset import (
     row_seed,
     to_pair_transform,
 )
+from tests.conftest import requires_hf_credentials
 
 _ROW_FEATURES = datasets.Features(
     {
@@ -301,24 +303,53 @@ def test_build_train_dataset_resizes_native_resolution_frames_before_shuffling(
     assert row["view_b"].shape == (1, 144, 160)
 
 
-@pytest.mark.slow
-def test_build_train_dataset_excludes_val_videos() -> None:
-    config = TrainingConfig()
-    ds = build_train_dataset(config)
-
-    row = next(iter(ds))
-
-    assert row["video_id"] not in config.val_video_ids
-    assert row["view_a"].shape == (1, 144, 160)
+@pytest.fixture(scope="module")
+def real_hub_first_row():
+    """One streamed row from the real private objones25/pokemon-frames, shared
+    by the live schema-contract tests below so the whole live tier costs a
+    single Hub interaction. Module-scoped rather than per-test purely to avoid
+    repeating that fetch; nothing here mutates the row."""
+    return next(iter(_load_base_stream(TrainingConfig())))
 
 
 @pytest.mark.slow
-def test_build_val_dataset_only_yields_held_out_videos() -> None:
-    config = TrainingConfig()
-    ds = build_val_dataset(config)
+@requires_hf_credentials
+def test_real_hub_rows_carry_exactly_the_columns_the_streaming_pipeline_reads(
+    real_hub_first_row,
+) -> None:
+    """Live contract check, and the only thing in this file a fake cannot
+    cover: every other dataset test builds its own synthetic stream, so all of
+    them keep passing if the *real* repo's schema drifts. to_pair_transform
+    reads image/video_id/timestamp_s by name, so a rename there surfaces as a
+    KeyError hours into a paid pod run rather than here."""
+    assert sorted(real_hub_first_row) == ["game", "image", "timestamp_s", "video_id"]
 
-    for _, row in zip(range(5), ds):
-        assert row["video_id"] in config.val_video_ids
+
+@pytest.mark.slow
+@requires_hf_credentials
+def test_real_hub_frames_are_single_channel_grayscale(real_hub_first_row) -> None:
+    """The `L` mode is load-bearing, not incidental: TF.to_image on an RGB
+    frame yields (3, H, W), which GrayscaleResNetEncoder.forward rejects with
+    "expected 1-channel grayscale input" -- again only at training time."""
+    assert real_hub_first_row["image"].mode == "L"
+
+
+@pytest.mark.slow
+@requires_hf_credentials
+def test_configured_val_video_ids_all_exist_as_shards_in_the_real_dataset_repo() -> None:
+    """A val_video_id with no shards behind it makes build_val_dataset yield
+    zero rows, which compute_val_loss turns into a hard "no batches" failure at
+    the first epoch boundary. Cheap metadata call -- no shard bytes are read."""
+    config = TrainingConfig()
+    shard_video_ids = {
+        path.split("/")[1]
+        for path in HfApi().list_repo_files(config.dataset_repo_id, repo_type="dataset")
+        if path.startswith("shards/")
+    }
+
+    missing = sorted(set(config.val_video_ids) - shard_video_ids)
+
+    assert missing == []
 
 
 def test_load_base_stream_reads_from_local_cache_when_configured(tmp_path) -> None:
@@ -435,19 +466,71 @@ def test_build_val_dataset_still_uses_resize_map_when_local_cache_dir_is_unset(
     assert _CountingResize.instantiation_count == 1
 
 
-@pytest.mark.slow
-def test_build_dataloader_resumes_against_real_streaming_data() -> None:
-    """Same resume guarantee as Task 9's synthetic test, but against the
-    real Hub-backed streaming dataset -- confirms StatefulDataLoader's
-    shard-skipping behavior holds for real parquet shards, not just an
-    in-memory Dataset."""
-    config = TrainingConfig()
+def _write_parquet_shards(root, video_ids: list[str], rows_per_shard: int) -> None:
+    """Writes one shards/<video_id>/00000.parquet per id, in the same layout
+    and with the same Features as the real dataset repo."""
+    for video_id in video_ids:
+        rows = [
+            _grayscale_example(video_id=video_id, timestamp_s=float(i))
+            for i in range(rows_per_shard)
+        ]
+        shard_path = root / "shards" / video_id / "00000.parquet"
+        shard_path.parent.mkdir(parents=True)
+        datasets.Dataset.from_list(rows, features=_ROW_FEATURES).to_parquet(str(shard_path))
+
+
+@pytest.fixture
+def patch_load_base_stream_with_parquet_shards(monkeypatch, tmp_path):
+    """Points the dataset builders at real on-disk Parquet shards streamed by
+    datasets.load_dataset(..., streaming=True) -- the same reader, shard layout
+    and Features the Hub path uses, minus the Hub. A fresh stream per call, so
+    two pipelines built from it share no iteration state."""
+
+    def _apply(video_ids: list[str], rows_per_shard: int):
+        _write_parquet_shards(tmp_path, video_ids, rows_per_shard)
+
+        def _load(config):
+            return datasets.load_dataset(
+                "parquet",
+                data_files=f"{tmp_path}/shards/**/*.parquet",
+                split="train",
+                streaming=True,
+            )
+
+        monkeypatch.setattr("contrastive_pretrain.dataset._load_base_stream", _load)
+
+    return _apply
+
+
+def test_build_val_dataloader_resumes_from_exact_position_over_streamed_parquet_shards(
+    patch_load_base_stream_with_parquet_shards,
+) -> None:
+    """StatefulDataLoader's shard-skipping over the real Parquet streaming
+    reader and a real build_* pipeline, rather than an in-memory Dataset.
+    Replaces a @slow test that ran the same assertion against
+    objones25/pokemon-frames: the Hub only changed where the bytes came from,
+    and the shards written here have the same layout and Features.
+
+    Deliberately the VAL pipeline. build_train_dataset ends with .shuffle(),
+    whose buffer contents are not part of the checkpointed state, so the train
+    loader does NOT resume to the exact next batch -- measured, and the reason
+    the old @slow version asserted a guarantee that does not exist. The val
+    pipeline has no shuffle, so exact resume is a real, assertable property
+    there."""
+    # One row per shard, every row's video_id distinct: with only a couple of
+    # ids the post-resume batch could match the expected one by coincidence, so
+    # a loader that silently restarted at position zero would still pass.
+    video_ids = [f"t{i:02d}" for i in range(16)]
+    patch_load_base_stream_with_parquet_shards(video_ids, 1)
+    config = TrainingConfig(val_video_ids=tuple(video_ids))
 
     loader = build_dataloader(
-        build_train_dataset(config),
+        build_val_dataset(config),
         batch_size=2,
         num_workers=0,
         snapshot_every_n_steps=1,
+        pin_memory=False,
+        drop_last=False,
     )
     it = iter(loader)
     for _ in range(3):
@@ -456,10 +539,12 @@ def test_build_dataloader_resumes_against_real_streaming_data() -> None:
     expected_video_ids = next(it)["video_id"]
 
     resumed_loader = build_dataloader(
-        build_train_dataset(config),
+        build_val_dataset(config),
         batch_size=2,
         num_workers=0,
         snapshot_every_n_steps=1,
+        pin_memory=False,
+        drop_last=False,
     )
     resumed_loader.load_state_dict(state)
     actual_video_ids = next(iter(resumed_loader))["video_id"]

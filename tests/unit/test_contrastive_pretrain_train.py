@@ -808,30 +808,48 @@ def test_data_wait_metric_excludes_epoch_boundary_overhead(
 
 
 @pytest.mark.slow
-def test_run_training_completes_a_few_steps_without_nan(tmp_path) -> None:
-    """A real, short smoke run (real streaming data, real model, a
-    handful of steps) -- verifies the whole pipeline wires together and
-    produces a finite, non-exploding loss before trusting it with a real
-    paid A100 run. CPU-capable but slow; run on the target GPU when
-    validating a full-scale config."""
+def test_run_training_with_real_pretrained_encoder_completes_without_nan(
+    tmp_path, monkeypatch
+) -> None:
+    """The one test that runs the REAL ResNet-50 with REAL ImageNet weights and
+    REAL torch.compile end to end -- every other run_training test above stubs
+    both (see the fast_run_training fixture). What that buys, and nothing else
+    here covers: GrayscaleResNetEncoder drops the stem maxpool and the fc head
+    from a pretrained backbone, so a weight/architecture incompatibility would
+    surface only when real weights are actually loaded. run_training raises via
+    check_finite_loss on a NaN or inf loss, so completing the run IS the
+    no-NaN assertion; the checkpoint count below is what pins that it really
+    ran the steps.
+
+    Marked slow because it downloads ~100MB of torchvision weights and pays a
+    real CPU compile, not because it needs Hub credentials. It deliberately
+    does NOT stream the real dataset: the previous version of this test did,
+    with max_epochs=1 over all 367 shards / 64GB of objones25/pokemon-frames
+    and no step bound, so it could never have finished regardless of
+    credentials. The dataset's own contract is covered offline in
+    test_contrastive_pretrain_dataset.py; what is unique here is the weights."""
+    monkeypatch.setattr(
+        "contrastive_pretrain.train.build_train_dataset",
+        lambda config: _FakeStreamingDataset(n=8),
+    )
+    monkeypatch.setattr(
+        "contrastive_pretrain.train.build_val_dataset",
+        lambda config: _FakeStreamingDataset(n=8),
+    )
+
     config = TrainingConfig(
+        pretrained=True,
         batch_size=4,
         num_workers=0,
         max_epochs=1,
-        checkpoint_interval_steps=2,
+        checkpoint_interval_steps=1000,
         network_volume_checkpoint_dir=str(tmp_path / "checkpoints"),
     )
     deps = TrainingDeps(
         config=config, frozen_encoder_client=_FakeHfClient(), device=torch.device("cpu")
     )
 
-    # A 1-epoch run over the full streaming dataset is too slow for a
-    # smoke test; monkeypatch max_epochs's effective loop bound isn't
-    # exposed, so this test is intended to be run with a config small
-    # enough to complete in seconds -- see the note above about running
-    # it on the target GPU for full validation instead of relying on
-    # this to prove end-to-end throughput.
     run_training(deps)
 
     checkpoints = list((tmp_path / "checkpoints").glob("checkpoint_step*.pt"))
-    assert checkpoints
+    assert len(checkpoints) == 1

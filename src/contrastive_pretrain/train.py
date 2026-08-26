@@ -269,6 +269,26 @@ def run_training(deps: TrainingDeps) -> None:
         # `[...]`: checkpoints written before this field existed carry no key,
         # and treating those as local_cache_dir=None matches the behavior they
         # were actually saved under.
+        #
+        # Mid-epoch train resume is APPROXIMATE, not exact, and that is a
+        # property of the pipeline rather than a bug here. build_train_dataset
+        # ends in .shuffle(buffer_size=...), and a shuffle buffer's *contents*
+        # are not part of the checkpointed state -- datasets says so itself on
+        # load ("Loading a state dict of a shuffle buffer of a dataset without
+        # the buffer content. The shuffle buffer will be refilled..."). So a
+        # resumed run refills the buffer from the checkpointed source position
+        # and serves a different order than the un-interrupted run would have:
+        # up to shuffle_buffer_size x num_workers rows get re-seen or skipped
+        # within that epoch. Measured directly, not inferred.
+        #
+        # Benign for SimCLR -- the objective is over augmented pairs and
+        # nothing depends on epoch-exact sample coverage -- but do NOT build
+        # anything on top of this that assumes exact resume (per-sample
+        # curricula, epoch-level dedup, "each row seen once per epoch"
+        # accounting). build_val_dataset has no .shuffle() and DOES resume
+        # exactly; that difference is deliberate, and is what
+        # test_build_val_dataloader_resumes_from_exact_position_over_streamed_parquet_shards
+        # pins.
         if state["dataloader"]:
             if state.get("local_cache_dir") == config.local_cache_dir:
                 dataloader.load_state_dict(state["dataloader"])
