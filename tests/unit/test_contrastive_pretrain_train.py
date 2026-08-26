@@ -2,12 +2,23 @@ import pytest
 import torch
 from torch import nn
 
-from contrastive_pretrain.model import SimCLRProjector, build_encoder, build_projector
+from contrastive_pretrain import checkpoint
+from contrastive_pretrain.config import TrainingConfig
+from contrastive_pretrain.model import (
+    EMBEDDING_DIM,
+    SimCLRProjector,
+    build_encoder,
+    build_projector,
+)
+import contrastive_pretrain.train
 from contrastive_pretrain.train import (
+    TrainingDeps,
     check_finite_loss,
     compute_val_loss,
     run_memory_probe,
+    run_training,
 )
+from tests.conftest import FakeHfClient as _FakeHfClient
 
 
 def test_run_memory_probe_raises_actionable_error_on_oom() -> None:
@@ -110,13 +121,6 @@ def test_compute_val_loss_raises_when_no_batches_produced() -> None:
         )
 
 
-import contrastive_pretrain.train
-from contrastive_pretrain import checkpoint
-from contrastive_pretrain.config import TrainingConfig
-from contrastive_pretrain.train import TrainingDeps, run_training
-from tests.conftest import FakeHfClient as _FakeHfClient
-
-
 class _FakeStreamingDataset(torch.utils.data.IterableDataset):
     """Stands in for contrastive_pretrain.dataset's HF streaming datasets --
     same per-row shape (a dict with "original"/"view_a"/"view_b" (1, H, W)
@@ -139,9 +143,44 @@ class _FakeStreamingDataset(torch.utils.data.IterableDataset):
             }
 
 
-@pytest.mark.slow
+class _FakeEncoder(nn.Module):
+    """Tiny stand-in for GrayscaleResNetEncoder -- same (N,1,144,160) ->
+    (N, EMBEDDING_DIM) interface, but cheap enough that these orchestration
+    tests (checkpointing/resuming/logging around run_training, not the
+    encoder's own architecture) don't pay a real ResNet-50's eager-mode CPU
+    cost on every call. Combined with the torch.compile bypass below, this
+    took test_run_training_completes_and_checkpoints_at_epoch_boundary from
+    ~73s to ~2.5s (measured directly, 29x) -- neither the real encoder nor
+    real compilation is what any of these tests check; PyTorch owns
+    verifying torch.compile's own correctness, and none of these tests
+    inspect GrayscaleResNetEncoder-specific internals."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._linear = nn.Linear(144 * 160, EMBEDDING_DIM)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self._linear(x.flatten(1).float())
+
+
+@pytest.fixture
+def fast_run_training(monkeypatch):
+    """Bypasses torch.compile's uncached JIT compilation (see
+    tests/conftest.py's TORCHINDUCTOR_FX_GRAPH_CACHE=0) and the real
+    ResNet-50 backbone, for run_training-driving tests that check
+    orchestration, not the encoder's architecture or torch.compile's own
+    correctness. Do NOT use this fixture on a test that specifically needs
+    to exercise the real encoder or real compilation end-to-end (there is
+    exactly one such test in this file, and it deliberately does not use
+    this fixture -- see its own docstring)."""
+    monkeypatch.setattr("contrastive_pretrain.train.torch.compile", lambda model, **kwargs: model)
+    monkeypatch.setattr(
+        "contrastive_pretrain.train.build_encoder", lambda pretrained: (_FakeEncoder(), EMBEDDING_DIM)
+    )
+
+
 def test_run_training_completes_and_checkpoints_at_epoch_boundary(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, fast_run_training
 ) -> None:
     """Fast, network/credential-free regression coverage for run_training --
     the plan's highest-fan-in function otherwise had zero automated
@@ -198,9 +237,8 @@ class _EpochRecordingFakeDataset(_FakeStreamingDataset):
         self.epochs_seen.append(epoch)
 
 
-@pytest.mark.slow
 def test_run_training_resumes_projector_and_makes_progress(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, fast_run_training
 ) -> None:
     """Regression guard for the two resume bugs the `state is not None`
     branch shipped with, neither of which any earlier test entered:
@@ -420,9 +458,8 @@ def _spy_on_dataloader_load_state_dict(monkeypatch) -> list[dict]:
     return calls
 
 
-@pytest.mark.slow
 def test_run_training_skips_dataloader_state_when_local_cache_dir_changed(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, fast_run_training
 ) -> None:
     """Flipping local_cache_dir on/off adds or drops build_train_dataset's
     pre-shuffle resize-map stage, which changes the nesting of the underlying
@@ -447,9 +484,8 @@ def test_run_training_skips_dataloader_state_when_local_cache_dir_changed(
     assert load_state_dict_calls == []
 
 
-@pytest.mark.slow
 def test_run_training_restores_dataloader_state_when_local_cache_dir_matches(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, fast_run_training
 ) -> None:
     """Mirror of the test above: the guard must not be so eager that it
     throws away legitimately resumable state on a normal same-config
@@ -472,9 +508,8 @@ def test_run_training_restores_dataloader_state_when_local_cache_dir_matches(
     assert len(load_state_dict_calls) == 1
 
 
-@pytest.mark.slow
 def test_run_training_skips_publish_when_val_loss_does_not_improve(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, fast_run_training
 ) -> None:
     """Regression test for the `val_loss < best_val_loss` gate: prior
     coverage always started from best_val_loss=inf and ran <=2 epochs, so
@@ -528,9 +563,8 @@ class _SpyWandbRun:
         pass
 
 
-@pytest.mark.slow
 def test_run_training_logs_contact_sheet_exactly_once_per_epoch(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, fast_run_training
 ) -> None:
     monkeypatch.setattr(
         "contrastive_pretrain.train.build_train_dataset",
@@ -564,8 +598,9 @@ def test_run_training_logs_contact_sheet_exactly_once_per_epoch(
     assert len(contact_sheet_logs) == config.max_epochs  # once per epoch, not once per step
 
 
-@pytest.mark.slow
-def test_data_wait_metric_excludes_epoch_boundary_overhead(tmp_path, monkeypatch) -> None:
+def test_data_wait_metric_excludes_epoch_boundary_overhead(
+    tmp_path, monkeypatch, fast_run_training
+) -> None:
     """Regression test for the prev_step_end reset at the epoch boundary:
     without it, the next epoch's first data_wait_s would include
     validation + Hub-push + checkpoint-save time, misreporting it as a

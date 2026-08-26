@@ -47,11 +47,10 @@ addopts = [
     "--cov-branch",
     "--cov-report=term-missing:skip-covered",
     "--cov-fail-under=80",
-    "-m", "not slow and not expensive",
+    "-m", "not slow",
 ]
 markers = [
     "slow: requires real network/ffmpeg/HF credentials -- e.g. downloading real Hub shards or the real pretrained ImageNet ResNet-50 weights (deselect with -m 'not slow')",
-    "expensive: CPU-bound and slow but needs no network/credentials -- e.g. anything driving run_training, which trains a real (uncached) torch.compile of a ResNet-50 on CPU at ~60s per call (deselect with -m 'not expensive')",
 ]
 filterwarnings = [
     "error",
