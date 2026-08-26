@@ -276,6 +276,13 @@ def test_load_frozen_encoder_from_client_rejects_mismatched_config(
         _load_frozen_encoder_from_client(fake_hf_client)
 
 
+def test_load_frozen_encoder_from_client_raises_when_files_missing(fake_hf_client) -> None:
+    from contrastive_pretrain.encoder_io import _load_frozen_encoder_from_client
+
+    with pytest.raises(FileNotFoundError, match="model.safetensors or config.json"):
+        _load_frozen_encoder_from_client(fake_hf_client)
+
+
 def test_compute_latent_stats_shapes(encoder_and_dim: tuple[nn.Module, int]) -> None:
     encoder, dim = encoder_and_dim
     rows = [
@@ -287,6 +294,28 @@ def test_compute_latent_stats_shapes(encoder_and_dim: tuple[nn.Module, int]) -> 
 
     assert mean.shape == (dim,)
     assert std.shape == (dim,)
+
+
+def test_compute_latent_stats_truncates_at_max_examples(encoder_and_dim: tuple[nn.Module, int]) -> None:
+    encoder, dim = encoder_and_dim
+    rows = [
+        {"original": torch.randint(0, 256, (1, 144, 160), dtype=torch.uint8)}
+        for _ in range(10)
+    ]
+
+    mean, std = compute_latent_stats(encoder, rows, device=torch.device("cpu"), max_examples=3)
+
+    assert mean.shape == (dim,)
+    assert std.shape == (dim,)
+
+
+def test_compute_latent_stats_restores_original_training_mode(encoder: nn.Module) -> None:
+    encoder.train()
+    rows = [{"original": torch.randint(0, 256, (1, 144, 160), dtype=torch.uint8)} for _ in range(2)]
+
+    compute_latent_stats(encoder, rows, device=torch.device("cpu"), max_examples=2)
+
+    assert encoder.training is True
 
 
 def test_load_frozen_encoder_raises_on_revision_parameter() -> None:
