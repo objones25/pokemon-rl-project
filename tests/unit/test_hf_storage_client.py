@@ -1,5 +1,6 @@
 from pathlib import Path
 
+import pytest
 from huggingface_hub.errors import EntryNotFoundError
 
 from hf_storage.client import RealHfClient
@@ -15,6 +16,7 @@ class _FakeHfApi:
         self._tmp_path = tmp_path
         self.uploaded_calls: list[tuple[str, str, str]] = []
         self.commits: list[dict] = []
+        self.download_calls: list[tuple[str, str, str]] = []
 
     def upload_file(self, path_or_fileobj: bytes, path_in_repo: str, repo_id: str, repo_type: str) -> None:
         self.uploaded_calls.append((path_in_repo, repo_id, repo_type))
@@ -37,6 +39,7 @@ class _FakeHfApi:
             dest.write_bytes(data)
 
     def hf_hub_download(self, repo_id: str, filename: str, repo_type: str) -> str:
+        self.download_calls.append((repo_id, filename, repo_type))
         dest = self._tmp_path / filename.replace("/", "_")
         if not dest.exists():
             raise EntryNotFoundError("not found")
@@ -94,3 +97,24 @@ def test_real_hf_client_upload_many_bytes_makes_one_commit_for_all_files(tmp_pat
     assert set(commit["paths"]) == {"model.safetensors", "config.json"}
     assert client.download_bytes("model.safetensors") == b"weights"
     assert client.download_bytes("config.json") == b"{}"
+
+
+def test_download_bytes_forwards_repo_id_and_repo_type(tmp_path) -> None:
+    api = _FakeHfApi(tmp_path)
+    client = RealHfClient(api, "me/repo", repo_type="model")  # type: ignore[arg-type]
+    client.upload_bytes(b"hi", "file.txt")
+
+    client.download_bytes("file.txt")
+
+    assert api.download_calls == [("me/repo", "file.txt", "model")]
+
+
+def test_download_bytes_does_not_swallow_unrelated_errors() -> None:
+    class _BrokenApi:
+        def hf_hub_download(self, repo_id: str, filename: str, repo_type: str) -> str:
+            raise RuntimeError("connection reset")
+
+    client = RealHfClient(_BrokenApi(), "me/repo")  # type: ignore[arg-type]
+
+    with pytest.raises(RuntimeError, match="connection reset"):
+        client.download_bytes("file.txt")
