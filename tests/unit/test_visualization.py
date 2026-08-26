@@ -16,6 +16,23 @@ def test_build_contact_sheet_grid_dimensions() -> None:
     assert sheet.shape == (144 * 3, 160 * 4)
 
 
+def test_build_contact_sheet_places_each_frame_in_its_own_cell_and_zero_pads_the_rest() -> None:
+    frames = [np.full((144, 160), i, dtype=np.uint8) for i in range(10)]
+
+    sheet = build_contact_sheet(frames, cols=4)
+
+    # 10 frames at 4 cols -> 3 rows (ceil(10/4)), each cell 144x160.
+    assert sheet.shape == (144 * 3, 160 * 4)
+    # Spot-check placement: frame 0 in the top-left cell, frame 9 (last) in
+    # row 2, col 1 -- divmod(9, 4) == (2, 1).
+    assert np.all(sheet[:144, :160] == 0)
+    assert np.all(sheet[288:, 160:320] == 9)
+    # The last row's remaining two cells (cols 2 and 3) were never written --
+    # must stay at the zero-fill default, not leak stale/garbage data.
+    assert np.all(sheet[288:, 320:480] == 0)
+    assert np.all(sheet[288:, 480:] == 0)
+
+
 def test_build_contact_sheet_empty_input_returns_empty_array() -> None:
     sheet = build_contact_sheet([], cols=4)
     assert sheet.size == 0
