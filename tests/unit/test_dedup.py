@@ -34,6 +34,14 @@ def test_very_different_frame_is_not_a_duplicate() -> None:
     assert deduper.is_duplicate(_checkerboard()) is False
 
 
+def test_is_duplicate_treats_distance_equal_to_threshold_as_duplicate() -> None:
+    deduper = PerceptualHashDeduper(hamming_threshold=0)
+    frame = _solid(100)
+
+    assert deduper.is_duplicate(frame) is False  # first frame: nothing to compare against yet
+    assert deduper.is_duplicate(frame.copy()) is True  # identical frame -> distance 0 == threshold 0
+
+
 def test_duplicate_frames_do_not_reset_the_reference() -> None:
     deduper = PerceptualHashDeduper()
     kept = _solid(100)
