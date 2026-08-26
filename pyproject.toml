@@ -36,7 +36,7 @@ packages = ["src/data_collection", "src/observability", "src/contrastive_pretrai
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 markers = [
-    "slow: requires real network/ffmpeg/HF credentials (deselect with -m 'not slow')",
+    "slow: requires real network/ffmpeg/HF credentials, OR is too slow for the default suite -- e.g. anything driving run_training, which trains a real ResNet-50 on CPU at ~60s per call (deselect with -m 'not slow')",
 ]
 addopts = "-m \"not slow\""
 

@@ -139,6 +139,7 @@ class _FakeStreamingDataset(torch.utils.data.IterableDataset):
             }
 
 
+@pytest.mark.slow
 def test_run_training_completes_and_checkpoints_at_epoch_boundary(
     tmp_path, monkeypatch
 ) -> None:
@@ -197,6 +198,7 @@ class _EpochRecordingFakeDataset(_FakeStreamingDataset):
         self.epochs_seen.append(epoch)
 
 
+@pytest.mark.slow
 def test_run_training_resumes_projector_and_makes_progress(
     tmp_path, monkeypatch
 ) -> None:
@@ -418,6 +420,7 @@ def _spy_on_dataloader_load_state_dict(monkeypatch) -> list[dict]:
     return calls
 
 
+@pytest.mark.slow
 def test_run_training_skips_dataloader_state_when_local_cache_dir_changed(
     tmp_path, monkeypatch
 ) -> None:
@@ -444,6 +447,7 @@ def test_run_training_skips_dataloader_state_when_local_cache_dir_changed(
     assert load_state_dict_calls == []
 
 
+@pytest.mark.slow
 def test_run_training_restores_dataloader_state_when_local_cache_dir_matches(
     tmp_path, monkeypatch
 ) -> None:
@@ -468,6 +472,7 @@ def test_run_training_restores_dataloader_state_when_local_cache_dir_matches(
     assert len(load_state_dict_calls) == 1
 
 
+@pytest.mark.slow
 def test_run_training_skips_publish_when_val_loss_does_not_improve(
     tmp_path, monkeypatch
 ) -> None:
@@ -523,6 +528,7 @@ class _SpyWandbRun:
         pass
 
 
+@pytest.mark.slow
 def test_run_training_logs_contact_sheet_exactly_once_per_epoch(
     tmp_path, monkeypatch
 ) -> None:
@@ -558,6 +564,7 @@ def test_run_training_logs_contact_sheet_exactly_once_per_epoch(
     assert len(contact_sheet_logs) == config.max_epochs  # once per epoch, not once per step
 
 
+@pytest.mark.slow
 def test_data_wait_metric_excludes_epoch_boundary_overhead(tmp_path, monkeypatch) -> None:
     """Regression test for the prev_step_end reset at the epoch boundary:
     without it, the next epoch's first data_wait_s would include
