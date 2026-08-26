@@ -123,7 +123,9 @@ def test_resize_to_canonical_with_progress_logs_every_n_rows(caplog) -> None:
         for i in range(7):
             transform(_grayscale_example(timestamp_s=float(i)))
 
-    progress_logs = [r for r in caplog.records if r.message == "resize_to_canonical_progress"]
+    progress_logs = [
+        r for r in caplog.records if r.message == "resize_to_canonical_progress"
+    ]
     # Rows 3 and 6 (1-indexed count % 3 == 0), not every row and not row 7.
     assert [r.rows_processed for r in progress_logs] == [3, 6]
 
