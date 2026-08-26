@@ -258,6 +258,51 @@ def test_run_training_completes_and_checkpoints_at_epoch_boundary(
     assert len(checkpoints) == 1
 
 
+def test_run_training_publishes_raw_encoder_weights_not_compiled_wrapper(
+    tmp_path, monkeypatch, fast_run_training
+) -> None:
+    """Regression test for push_frozen_encoder's raw-vs-compiled passing --
+    per test_run_training_completes_and_checkpoints_at_epoch_boundary's
+    docstring, no test in this file previously decoded the bytes
+    push_frozen_encoder hands the HF client, so a call-site mix-up passing
+    `compiled_encoder` instead of the raw `encoder` would go undetected: the
+    fixture's _FakeCompiled stub (see its docstring) makes state_dict() keys
+    carry the `_orig_mod.` prefix a real torch.compile wrapper's do, so
+    publishing the wrong module would leak that prefix into the published
+    model.safetensors -- exactly the artifact load_frozen_encoder must be
+    able to load for the downstream PPO consumer.
+
+    A fresh run starts from best_val_loss=inf, so a single epoch's val loss
+    always "improves" and the publish path fires."""
+    from safetensors.torch import load as safetensors_load
+
+    monkeypatch.setattr(
+        "contrastive_pretrain.train.build_train_dataset",
+        lambda config: _FakeStreamingDataset(n=8),
+    )
+    monkeypatch.setattr(
+        "contrastive_pretrain.train.build_val_dataset",
+        lambda config: _FakeStreamingDataset(n=8),
+    )
+
+    client = _FakeHfClient()
+    config = TrainingConfig(
+        pretrained=False,
+        batch_size=4,
+        num_workers=0,
+        max_epochs=1,
+        checkpoint_interval_steps=1000,
+        network_volume_checkpoint_dir=str(tmp_path / "checkpoints"),
+    )
+    deps = TrainingDeps(config=config, frozen_encoder_client=client, device=torch.device("cpu"))
+
+    run_training(deps)
+
+    assert client.upload_calls.count("model.safetensors") == 1
+    published_keys = safetensors_load(client.files["model.safetensors"]).keys()
+    assert not any(key.startswith("_orig_mod.") for key in published_keys)
+
+
 class _EpochRecordingFakeDataset(_FakeStreamingDataset):
     """Same fake stream, but records every epoch run_training announces --
     the only externally observable signal for "which epochs did this run
