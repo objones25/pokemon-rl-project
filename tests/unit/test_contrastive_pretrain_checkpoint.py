@@ -175,6 +175,7 @@ def test_restore_optimizer_and_scheduler_restores_correct_lr() -> None:
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=100)
     for _ in range(10):
+        optimizer.step()
         scheduler.step()
     state = build_checkpoint_state(
         epoch=0,

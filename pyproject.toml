@@ -34,13 +34,67 @@ build-backend = "hatchling.build"
 packages = ["src/data_collection", "src/observability", "src/contrastive_pretrain", "src/hf_storage"]
 
 [tool.pytest.ini_options]
+minversion = "9.0"
 testpaths = ["tests"]
-markers = [
-    "slow: requires real network/ffmpeg/HF credentials, OR is too slow for the default suite -- e.g. anything driving run_training, which trains a real ResNet-50 on CPU at ~60s per call (deselect with -m 'not slow')",
+strict_config = true
+strict_markers = true
+strict_xfail = true
+strict_parametrization_ids = true
+addopts = [
+    "-ra",
+    "--tb=short",
+    "--cov=src",
+    "--cov-branch",
+    "--cov-report=term-missing:skip-covered",
+    "--cov-fail-under=80",
+    "-m", "not slow and not expensive",
 ]
-addopts = "-m \"not slow\""
+markers = [
+    "slow: requires real network/ffmpeg/HF credentials -- e.g. downloading real Hub shards or the real pretrained ImageNet ResNet-50 weights (deselect with -m 'not slow')",
+    "expensive: CPU-bound and slow but needs no network/credentials -- e.g. anything driving run_training, which trains a real (uncached) torch.compile of a ResNet-50 on CPU at ~60s per call (deselect with -m 'not expensive')",
+]
+filterwarnings = [
+    "error",
+    # torchdata's StatefulDataLoader calls the deprecated torch.set_vital()
+    # internally; nothing in this project's code path can avoid it. Third-party,
+    # not ours to fix -- revisit if a torchdata upgrade removes the call.
+    "ignore:'set_vital' is deprecated, please do not call:UserWarning:torchdata.stateful_dataloader.stateful_dataloader",
+    # torch's own mkldnn optimization pass (imported lazily the first time
+    # torch.compile() runs in a process) applies the deprecated
+    # @torch.jit.script_method decorator to an internal class at that
+    # module's import time. Third-party/torch-internal, not ours to fix --
+    # revisit if a torch upgrade removes torch.utils.mkldnn's use of
+    # ScriptModule.
+    "ignore:`torch.jit.script_method` is deprecated:DeprecationWarning:torch.jit._script",
+    # torch's DataLoader.__init__ warns whenever pin_memory=True is requested
+    # on a machine whose default device is MPS (Apple Silicon), since MPS
+    # doesn't support pinned memory; it's raised with stacklevel=2, so pytest
+    # attributes it to StatefulDataLoader's __init__ (its caller here), not
+    # to torch.utils.data.dataloader itself. Machine-dependent, torch/
+    # torchdata-internal, not ours to fix -- revisit if a torch upgrade adds
+    # MPS pinned-memory support.
+    "ignore:'pin_memory' argument is set as true but not supported on MPS now:UserWarning:torchdata.stateful_dataloader.stateful_dataloader",
+]
+
+[tool.coverage.run]
+branch = true
+source = ["src"]
+omit = ["*/__main__.py"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
+fail_under = 80
+exclude_also = [
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+    "@(abc\\.)?abstractmethod",
+    "if __name__ == .__main__.:",
+    "class .*\\bProtocol\\):",
+]
 
 [dependency-groups]
 dev = [
     "pytest>=9.1.1",
+    "pytest-cov>=7.1.0",
 ]
