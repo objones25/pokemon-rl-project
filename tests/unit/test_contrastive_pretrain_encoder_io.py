@@ -43,8 +43,7 @@ def test_fuse_conv_bn_modules_preserves_output() -> None:
     assert torch.allclose(before, after, atol=1e-5)
 
 
-def test_fuse_conv_bn_modules_on_real_encoder() -> None:
-    encoder, _ = build_encoder(pretrained=False)
+def test_fuse_conv_bn_modules_on_real_encoder(encoder: nn.Module) -> None:
     encoder.eval()
     x = torch.rand(1, 1, 144, 160)
 
@@ -84,8 +83,7 @@ class _FlakyThenWorksHfClient:
         return self.files.get(path_in_repo)
 
 
-def test_export_frozen_encoder_round_trips_weights() -> None:
-    encoder, _ = build_encoder(pretrained=False)
+def test_export_frozen_encoder_round_trips_weights(encoder: nn.Module) -> None:
     encoder.eval()
     x = torch.rand(1, 1, 144, 160)
     with torch.no_grad():
@@ -121,13 +119,12 @@ def test_export_frozen_encoder_round_trips_weights() -> None:
     }
 
 
-def test_export_frozen_encoder_handles_channels_last_encoder() -> None:
+def test_export_frozen_encoder_handles_channels_last_encoder(encoder: nn.Module) -> None:
     """Regression test: contrastive_pretrain.train.run_training calls
     encoder.to(device, memory_format=torch.channels_last) on the training
     encoder for conv performance -- that leaves parameter tensors
     non-contiguous in the standard sense, which used to make
     safetensors_save raise ValueError('non contiguous tensor')."""
-    encoder, _ = build_encoder(pretrained=False)
     # nn.Module.to()'s @overload stubs omit memory_format -- see train.py's
     # matching comment; same stub gap, not a real type error.
     encoder.to(torch.device("cpu"), memory_format=torch.channels_last)  # type: ignore[call-overload]
@@ -140,8 +137,7 @@ def test_export_frozen_encoder_handles_channels_last_encoder() -> None:
     assert all(tensor.is_contiguous() for tensor in reloaded.values())
 
 
-def test_export_frozen_encoder_does_not_mutate_input_module() -> None:
-    encoder, _ = build_encoder(pretrained=False)
+def test_export_frozen_encoder_does_not_mutate_input_module(encoder: nn.Module) -> None:
     assert isinstance(encoder, GrayscaleResNetEncoder)  # narrows for .backbone below
 
     export_frozen_encoder(encoder)
@@ -151,9 +147,7 @@ def test_export_frozen_encoder_does_not_mutate_input_module() -> None:
     assert isinstance(encoder.backbone.bn1, torch.nn.BatchNorm2d)
 
 
-def test_push_frozen_encoder_uploads_three_files(fake_hf_client) -> None:
-    encoder, _ = build_encoder(pretrained=False)
-
+def test_push_frozen_encoder_uploads_three_files(fake_hf_client, encoder: nn.Module) -> None:
     push_frozen_encoder(
         fake_hf_client, encoder, latent_mean=torch.zeros(2048), latent_std=torch.ones(2048),
         sleep_func=lambda _: None,
@@ -165,14 +159,14 @@ def test_push_frozen_encoder_uploads_three_files(fake_hf_client) -> None:
     assert len(stats["std"]) == 2048
 
 
-def test_push_frozen_encoder_publishes_all_three_files_as_one_atomic_commit(fake_hf_client) -> None:
+def test_push_frozen_encoder_publishes_all_three_files_as_one_atomic_commit(
+    fake_hf_client, encoder: nn.Module
+) -> None:
     """Regression test for the non-atomic-publish fix: weights, config,
     and latent stats must land as a single Hub commit, not three
     independent ones -- otherwise a mid-publish failure could leave the
     repo with weights but no config.json, which
     _load_frozen_encoder_from_client then hard-fails on."""
-    encoder, _ = build_encoder(pretrained=False)
-
     push_frozen_encoder(
         fake_hf_client, encoder, latent_mean=torch.zeros(2048), latent_std=torch.ones(2048),
         sleep_func=lambda _: None,
@@ -182,8 +176,7 @@ def test_push_frozen_encoder_publishes_all_three_files_as_one_atomic_commit(fake
     assert fake_hf_client.commits[0]["paths"] == ["config.json", "latent_stats.json", "model.safetensors"]
 
 
-def test_push_frozen_encoder_retries_transient_upload_failures() -> None:
-    encoder, _ = build_encoder(pretrained=False)
+def test_push_frozen_encoder_retries_transient_upload_failures(encoder: nn.Module) -> None:
     client = _FlakyThenWorksHfClient()
 
     push_frozen_encoder(
@@ -215,7 +208,9 @@ class _AlwaysRateLimitedClient:
         return None
 
 
-def test_push_frozen_encoder_waits_the_dedicated_rate_limit_delay_not_the_short_schedule() -> None:
+def test_push_frozen_encoder_waits_the_dedicated_rate_limit_delay_not_the_short_schedule(
+    encoder: nn.Module,
+) -> None:
     """Regression test for the exact mechanism behind the documented HF
     rate-limit incident (objones25/pokemon-frames hit the 256
     commits/hour quota): a rate-limit error must select rate_limit_delay
@@ -223,7 +218,6 @@ def test_push_frozen_encoder_waits_the_dedicated_rate_limit_delay_not_the_short_
     retrying sooner just re-hits the same quota wall. Prior coverage only
     exercised a generic transient RuntimeError, which can't tell these two
     backoff schedules apart."""
-    encoder, _ = build_encoder(pretrained=False)
     client = _AlwaysRateLimitedClient()
     sleeps: list[float] = []
 
@@ -243,10 +237,11 @@ def test_push_frozen_encoder_waits_the_dedicated_rate_limit_delay_not_the_short_
     assert all(s == 120.0 for s in sleeps)
 
 
-def test_load_frozen_encoder_from_client_matches_exported_weights(fake_hf_client) -> None:
+def test_load_frozen_encoder_from_client_matches_exported_weights(
+    fake_hf_client, encoder: nn.Module
+) -> None:
     from contrastive_pretrain.encoder_io import _load_frozen_encoder_from_client
 
-    encoder, _ = build_encoder(pretrained=False)
     encoder.eval()
     x = torch.rand(1, 1, 144, 160)
     with torch.no_grad():
@@ -262,7 +257,9 @@ def test_load_frozen_encoder_from_client_matches_exported_weights(fake_hf_client
     assert loaded.training is False
 
 
-def test_load_frozen_encoder_from_client_rejects_mismatched_config(fake_hf_client) -> None:
+def test_load_frozen_encoder_from_client_rejects_mismatched_config(
+    fake_hf_client, encoder: nn.Module
+) -> None:
     """The architecture build_encoder(pretrained=False) always produces is
     fixed regardless of what config.json says, so a repo whose published
     contract doesn't match must fail loudly here rather than be silently
@@ -270,7 +267,6 @@ def test_load_frozen_encoder_from_client_rejects_mismatched_config(fake_hf_clien
     under different shape/scale assumptions with no error."""
     from contrastive_pretrain.encoder_io import _load_frozen_encoder_from_client
 
-    encoder, _ = build_encoder(pretrained=False)
     push_frozen_encoder(fake_hf_client, encoder, latent_mean=torch.zeros(2048), latent_std=torch.ones(2048))
     stored_config = json.loads(fake_hf_client.files["config.json"])
     stored_config["input_shape_nchw"] = [1, 160, 144]  # transposed -- a real mismatch
@@ -280,8 +276,8 @@ def test_load_frozen_encoder_from_client_rejects_mismatched_config(fake_hf_clien
         _load_frozen_encoder_from_client(fake_hf_client)
 
 
-def test_compute_latent_stats_shapes() -> None:
-    encoder, dim = build_encoder(pretrained=False)
+def test_compute_latent_stats_shapes(encoder_and_dim: tuple[nn.Module, int]) -> None:
+    encoder, dim = encoder_and_dim
     rows = [
         {"original": torch.randint(0, 256, (1, 144, 160), dtype=torch.uint8)}
         for _ in range(5)
