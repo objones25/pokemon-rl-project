@@ -159,11 +159,21 @@ def isolated_hf_hub_cache(monkeypatch):
     HF_HUB_CACHE env var and huggingface_hub.constants.HF_HUB_CACHE, since the
     library only reads the env var at import time). Register both with
     monkeypatch so a test's tmp_path doesn't leak into the rest of the
-    session -- notably the @slow tests that hit the real Hub."""
+    session -- notably the @slow tests that hit the real Hub.
+
+    setenv-then-delenv, not delenv(raising=False): monkeypatch records an
+    undo entry only for env keys that already exist, so on a machine with no
+    HF_HUB_CACHE set, delenv alone records nothing and the tmp_path that
+    ensure_local_cache goes on to setdefault survives teardown -- exactly the
+    leak this fixture exists to prevent (verified). Setting a placeholder
+    first forces the undo entry to exist; both entries are then reversed in
+    order by monkeypatch's single teardown, restoring "absent" or the
+    operator's real value as appropriate."""
     from huggingface_hub import constants as hf_constants
 
-    monkeypatch.delenv("HF_HUB_CACHE", raising=False)
     monkeypatch.setattr(hf_constants, "HF_HUB_CACHE", hf_constants.HF_HUB_CACHE)
+    monkeypatch.setenv("HF_HUB_CACHE", "placeholder-forcing-an-undo-entry")
+    monkeypatch.delenv("HF_HUB_CACHE")
     return hf_constants
 
 
