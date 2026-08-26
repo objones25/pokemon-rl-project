@@ -633,40 +633,93 @@ git commit -m "test: add regression test for output_tmp_path cleanup on a crash 
 
 ---
 
-### Task 9: Deferred item 3 — split the `slow` marker into `slow` + `expensive`
+### Task 9: Deferred item 3, corrected — eliminate the CPU-slow tax instead of just relocating it
+
+**Superseded design, kept for the record:** this task originally proposed retagging 7 `run_training`-driving tests from `slow` to a new `expensive` marker, moving their ~60s-per-test cost to a separate opt-in tier rather than the default suite. **A user directly rejected that approach during execution**, on this principle: *"Unless you are actually testing whether torch.compile works, you should monkeypatch it — there is absolutely no reason a test should run for 9 minutes unless the thing being tested takes 9 minutes to run."* That's correct and the original design didn't meet the bar — it treated the slowness as inherent and routed around it instead of asking whether it was necessary. Verified empirically before rewriting this task: `test_run_training_completes_and_checkpoints_at_epoch_boundary` measured at **72.78s** unmodified; monkeypatching `torch.compile` to an identity passthrough alone brought it to **36.73s** (confirmed the other ~36s was NOT pytest-cov overhead — measured `--no-cov` too, same number); additionally monkeypatching `build_encoder` to a tiny fake `nn.Module` (same `(N,1,144,160) -> (N, EMBEDDING_DIM)` interface, no real ResNet-50) brought it to **2.52s** — a 29x reduction, fast enough to belong in the default suite with no marker at all. Verified safe: grepped the 7 tests for any dependency on `GrayscaleResNetEncoder`-specific internals (`.backbone`, isinstance checks) — none found; the 7 tests check orchestration (checkpointing, resuming, logging, publish-gating), not encoder architecture or `torch.compile`'s own correctness (which is PyTorch's job to verify, not this project's — pytest-expert's own "not worth testing" list names third-party library behavior explicitly). Confirmed `push_frozen_encoder`'s `fuse_conv_bn_modules` step and `.to(memory_format=torch.channels_last)` are both safe no-ops against a `nn.Linear`-based fake (no Conv/BN pairs to fuse; `.to(memory_format=...)` silently no-ops on non-4D tensors, verified directly).
+
+**Consequence:** the `expensive` marker Task 1 registered is no longer used by anything after this task — Task 9 now also removes it (a marker registered-but-unused is dead config, and this project's conventions favor no speculative abstraction). `test_run_training_completes_a_few_steps_without_nan` (the 8th, credentialed test) is deliberately EXCLUDED from this fixture — it is the one test whose purpose plausibly benefits from exercising the real encoder and real `torch.compile` end-to-end (it already pays real network/credential cost for other reasons), so it stays exactly as-is: `@pytest.mark.slow`, real weights, real compilation.
 
 **Files:**
 - Modify: `tests/unit/test_contrastive_pretrain_train.py`
+- Modify: `pyproject.toml` (remove the now-unused `expensive` marker and its `addopts` reference)
 
 **Interfaces:**
-- Consumes: the `expensive` marker Task 1 already registered in `pyproject.toml`.
+- Produces: a `fast_run_training` pytest fixture (local to this file) that the 7 retargeted tests consume as a parameter.
 
-**Context:** Resolves item 3 of the deferred-followups plan. Confirmed by direct inspection: 7 of the file's 8 `@pytest.mark.slow` tests monkeypatch `build_train_dataset`/`build_val_dataset` to `_FakeStreamingDataset` and use `pretrained=False` + a fake HF client — their ~60s cost is entirely `torch.compile`, no network/credentials needed. The 8th does not monkeypatch the dataset builders and pulls real pretrained weights — it genuinely needs credentials and stays `slow`.
+- [ ] **Step 1: Add a `_FakeEncoder` class and `fast_run_training` fixture**
 
-- [ ] **Step 1: Retag the 7 CPU-only tests**
+Place this near `_FakeStreamingDataset`'s definition (locate by content, not line number — earlier tasks have shifted this file). Import `EMBEDDING_DIM` from `contrastive_pretrain.model` alongside the file's existing `build_encoder`/`build_projector` import.
 
-Change `@pytest.mark.slow` to `@pytest.mark.expensive` at these 7 locations (identify each by the test name, since line numbers shift after Tasks 1-8's edits): `test_run_training_completes_and_checkpoints_at_epoch_boundary`, `test_run_training_resumes_projector_and_makes_progress`, `test_run_training_skips_dataloader_state_when_local_cache_dir_changed`, `test_run_training_restores_dataloader_state_when_local_cache_dir_matches`, `test_run_training_skips_publish_when_val_loss_does_not_improve`, `test_run_training_logs_contact_sheet_exactly_once_per_epoch`, `test_data_wait_metric_excludes_epoch_boundary_overhead`.
+```python
+class _FakeEncoder(nn.Module):
+    """Tiny stand-in for GrayscaleResNetEncoder -- same (N,1,144,160) ->
+    (N, EMBEDDING_DIM) interface, but cheap enough that these orchestration
+    tests (checkpointing/resuming/logging around run_training, not the
+    encoder's own architecture) don't pay a real ResNet-50's eager-mode CPU
+    cost on every call. Combined with the torch.compile bypass below, this
+    took test_run_training_completes_and_checkpoints_at_epoch_boundary from
+    ~73s to ~2.5s (measured directly, 29x) -- neither the real encoder nor
+    real compilation is what any of these tests check; PyTorch owns
+    verifying torch.compile's own correctness, and none of these tests
+    inspect GrayscaleResNetEncoder-specific internals."""
 
-Leave `test_run_training_completes_a_few_steps_without_nan` as `@pytest.mark.slow` — unchanged.
+    def __init__(self) -> None:
+        super().__init__()
+        self._linear = nn.Linear(144 * 160, EMBEDDING_DIM)
 
-- [ ] **Step 2: Clean up the mid-file import block (E402)**
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self._linear(x.flatten(1).float())
 
-This file has `import contrastive_pretrain.train` and 3 related imports sitting after the first ~9 tests (around line 113) instead of at the top, with no side-effecting statement between them requiring that placement — an artifact of incremental growth. Move those 4 import lines up to join the file's top-of-file import block, in their original relative order.
 
-- [ ] **Step 3: Run the file with both marker selections**
-
-```bash
-uv run pytest -q tests/unit/test_contrastive_pretrain_train.py -m "not slow and not expensive"   # fast subset
-uv run pytest -q tests/unit/test_contrastive_pretrain_train.py -m expensive                        # the 7 CPU-heavy ones, no creds needed
+@pytest.fixture
+def fast_run_training(monkeypatch):
+    """Bypasses torch.compile's uncached JIT compilation (see
+    tests/conftest.py's TORCHINDUCTOR_FX_GRAPH_CACHE=0) and the real
+    ResNet-50 backbone, for run_training-driving tests that check
+    orchestration, not the encoder's architecture or torch.compile's own
+    correctness. Do NOT use this fixture on a test that specifically needs
+    to exercise the real encoder or real compilation end-to-end (there is
+    exactly one such test in this file, and it deliberately does not use
+    this fixture -- see its own docstring)."""
+    monkeypatch.setattr("contrastive_pretrain.train.torch.compile", lambda model, **kwargs: model)
+    monkeypatch.setattr(
+        "contrastive_pretrain.train.build_encoder", lambda pretrained: (_FakeEncoder(), EMBEDDING_DIM)
+    )
 ```
 
-Expected: first run deselects all 8; second run executes exactly the 7 retagged tests and passes (~7 minutes on CPU).
+- [ ] **Step 2: Remove `@pytest.mark.slow` and add the fixture to the 7 CPU-only tests**
 
-- [ ] **Step 4: Commit**
+At each of these 7 test functions (identify by name, not line number: `test_run_training_completes_and_checkpoints_at_epoch_boundary`, `test_run_training_resumes_projector_and_makes_progress`, `test_run_training_skips_dataloader_state_when_local_cache_dir_changed`, `test_run_training_restores_dataloader_state_when_local_cache_dir_matches`, `test_run_training_skips_publish_when_val_loss_does_not_improve`, `test_run_training_logs_contact_sheet_exactly_once_per_epoch`, `test_data_wait_metric_excludes_epoch_boundary_overhead`): delete the `@pytest.mark.slow` decorator entirely (no replacement marker — they now belong in the default fast suite), and add `fast_run_training` as a parameter to the test function's signature (alongside its existing `tmp_path, monkeypatch` params — order doesn't matter).
+
+Leave `test_run_training_completes_a_few_steps_without_nan` completely untouched — no fixture, `@pytest.mark.slow` stays.
+
+- [ ] **Step 3: Clean up the mid-file import block (E402)**
+
+This file has `import contrastive_pretrain.train` and 3 related imports sitting after the first ~9 tests instead of at the top, with no side-effecting statement between them requiring that placement — an artifact of incremental growth. Move those 4 import lines up to join the file's top-of-file import block, in their original relative order.
+
+- [ ] **Step 4: Remove the now-unused `expensive` marker from `pyproject.toml`**
+
+In `[tool.pytest.ini_options]`: delete the `expensive` line from `markers = [...]`, and change `addopts`'s `"-m", "not slow and not expensive",` back to `"-m", "not slow",`.
+
+- [ ] **Step 5: Run the file and the full suite**
 
 ```bash
-git add tests/unit/test_contrastive_pretrain_train.py
-git commit -m "test: split run_training's CPU-slow tests into an expensive marker, distinct from network-slow"
+uv run pytest -q tests/unit/test_contrastive_pretrain_train.py -v
+```
+
+Expected: all tests in this file now pass with only 1 deselected (the credentialed one) — the 7 formerly-slow tests run as part of the default selection, each in a few seconds, not ~60-70s.
+
+```bash
+uv run pytest -q
+```
+
+Expected: total passing count is now 7 higher than before this task (the 7 tests moved from deselected-slow into the default run), coverage still ≥80%.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add tests/unit/test_contrastive_pretrain_train.py pyproject.toml
+git commit -m "test: eliminate run_training tests' CPU-slow tax via fake encoder + torch.compile bypass, not a slow/expensive split"
 ```
 
 ---
@@ -1396,15 +1449,9 @@ git commit -m "test: dedupe augmentation.py's 13x-repeated marker-block construc
 uv run pytest -q
 ```
 
-Expected: all tests pass (should be 199 + however many new tests Tasks 8, 10-19 added, minus none removed), zero warnings, coverage report shows total ≥80%, `slow` and `expensive` tests deselected.
+Expected: all tests pass (should be 200 (post-Task-8) + 7 (Task 9's de-slowed tests rejoining the default run) + however many new tests Tasks 10-19 added, minus none removed), zero warnings, coverage report shows total ≥80%, only `slow` tests deselected (no `expensive` marker exists anymore as of Task 9's correction).
 
-- [ ] **Step 2: Run the `expensive` subset**
-
-```bash
-uv run pytest -q -m expensive
-```
-
-Expected: exactly the 7 tests Task 9 retagged, all pass (~7 min on CPU).
+- [ ] **Step 2: (superseded — no `expensive` marker to check)** Task 9's original design registered an `expensive` marker for a separate opt-in tier; that design was rejected during execution and replaced with monkeypatching `torch.compile`/`build_encoder` so the 7 affected tests run fast in the default suite instead (see Task 9's "Superseded design" note). There is no `expensive` marker left to verify here — skip straight to Step 3.
 
 - [ ] **Step 3: Run the `slow` subset (only if real HF/W&B credentials are available in this environment)**
 
