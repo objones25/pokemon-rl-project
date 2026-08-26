@@ -4,7 +4,6 @@ specific to contrastive_pretrain -- no other package's tests need it.
 """
 
 import pytest
-import torch
 from torch import nn
 
 from contrastive_pretrain.model import build_encoder

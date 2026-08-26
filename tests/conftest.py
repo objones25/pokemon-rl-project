@@ -20,10 +20,7 @@ import os
 
 os.environ.setdefault("TORCHINDUCTOR_FX_GRAPH_CACHE", "0")
 
-from collections.abc import Callable
-
 import pytest
-import torch
 
 
 class FakeHfClient:
@@ -56,15 +53,3 @@ class FakeHfClient:
 @pytest.fixture
 def fake_hf_client() -> FakeHfClient:
     return FakeHfClient()
-
-
-@pytest.fixture
-def random_frame() -> Callable[..., torch.Tensor]:
-    """Factory for a synthetic (1, H, W) uint8 frame -- defaults to the
-    canonical Game Boy resolution (144, 160) that contrastive_pretrain.model
-    hard-requires."""
-
-    def _make(height: int = 144, width: int = 160) -> torch.Tensor:
-        return torch.randint(0, 256, (1, height, width), dtype=torch.uint8)
-
-    return _make

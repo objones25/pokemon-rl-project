@@ -30,7 +30,7 @@ def test_json_formatter_stringifies_non_serializable_extra_values(caplog) -> Non
     assert isinstance(payload["thing"], str)
 
 
-def test_json_formatter_includes_exc_info_when_present(caplog) -> None:
+def test_json_formatter_includes_exc_info_when_present() -> None:
     logger = logging.getLogger("test_logging_config_exc_info")
     formatter = JSONFormatter()
 

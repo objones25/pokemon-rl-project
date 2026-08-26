@@ -263,8 +263,13 @@ def test_run_pipeline_processes_multiple_videos_concurrently() -> None:
     assert result == PipelineResult(completed=5, failed=0)
     manifest = uploader.load_manifest()
     # Every video's completion must actually land in the manifest -- this is
-    # the thing a manifest-save race between threads would lose.
-    assert all(manifest.is_complete(s.video_id) for s in sources)
+    # the thing a manifest-save race between threads would lose. `is True`
+    # (not just truthy) matches what a `for` loop + per-video assert would
+    # have checked. Written as a comprehension to satisfy the no-branching
+    # rule, which trades away naming which specific video failed -- on a
+    # failure here you only learn that at least one of `sources` didn't land,
+    # not which one.
+    assert all(manifest.is_complete(s.video_id) is True for s in sources)
     assert all(
         any(path.startswith(f"shards/{s.video_id}/") for path in client.files) for s in sources
     )

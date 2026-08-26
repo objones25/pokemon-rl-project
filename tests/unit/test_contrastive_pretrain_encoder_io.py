@@ -317,13 +317,16 @@ def test_compute_latent_stats_truncates_at_max_examples(encoder_and_dim: tuple[n
     assert std.shape == (dim,)
 
 
-def test_compute_latent_stats_restores_original_training_mode(encoder: nn.Module) -> None:
-    encoder.train()
+@pytest.mark.parametrize("was_training", [True, False])
+def test_compute_latent_stats_restores_original_training_mode(
+    encoder: nn.Module, was_training: bool
+) -> None:
+    encoder.train(was_training)
     rows = [{"original": torch.randint(0, 256, (1, 144, 160), dtype=torch.uint8)} for _ in range(2)]
 
     compute_latent_stats(encoder, rows, device=torch.device("cpu"), max_examples=2)
 
-    assert encoder.training is True
+    assert encoder.training is was_training
 
 
 def test_load_frozen_encoder_raises_on_revision_parameter() -> None:
