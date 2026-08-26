@@ -371,3 +371,32 @@ def test_build_local_resize_cache_against_real_hub_shard(tmp_path) -> None:
     reloaded = datasets.Dataset.from_parquet(str(output_path))
     assert reloaded.num_rows > 0
     assert reloaded[0]["image"].size == (160, 144)
+
+
+def test_build_local_resize_cache_removes_orphaned_temp_files_when_os_replace_crashes(
+    tmp_path, monkeypatch
+) -> None:
+    """Regression test for the finally block's output_tmp_path.unlink line:
+    forces a crash AFTER to_parquet() has produced a real output_tmp_path
+    (and raw_tmp_path still exists too) but BEFORE os.replace() promotes it
+    into place -- the exact ordering that line exists to clean up after."""
+    shard_path = "shards/vidA/00000.parquet"
+    output_path = tmp_path / shard_path
+    raw_tmp_path = output_path.parent / f"{output_path.name}.raw.tmp"
+    output_tmp_path = output_path.parent / f"{output_path.name}.tmp"
+
+    def _crash(src, dst) -> None:
+        raise RuntimeError("simulated crash before rename")
+
+    monkeypatch.setattr(contrastive_pretrain.resize_cache.os, "replace", _crash)
+
+    with pytest.raises(RuntimeError, match="simulated crash before rename"):
+        build_local_resize_cache(
+            list_shard_paths=lambda: [shard_path],
+            download_shard=lambda path: _native_res_shard_bytes("vidA"),
+            local_cache_dir=tmp_path,
+        )
+
+    assert not raw_tmp_path.exists()
+    assert not output_tmp_path.exists()
+    assert not output_path.exists()  # the rename never happened
