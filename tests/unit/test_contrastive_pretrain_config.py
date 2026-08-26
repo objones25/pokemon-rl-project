@@ -64,3 +64,11 @@ def test_load_config_applies_local_cache_dir_override(tmp_path) -> None:
     config = load_config(path)
 
     assert config.local_cache_dir == "/workspace/contrastive_pretrain/resized_cache"
+
+
+def test_load_config_rejects_unknown_field(tmp_path) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text("not_a_real_field: 123\n")
+
+    with pytest.raises(ValueError, match="unknown config field"):
+        load_config(path)
