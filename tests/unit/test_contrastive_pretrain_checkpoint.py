@@ -16,7 +16,9 @@ def make_training_components():
     def _make():
         model = nn.Linear(2, 2)
         projector = nn.Linear(2, 4)
-        optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
+        optimizer = torch.optim.AdamW(
+            list(model.parameters()) + list(projector.parameters()), lr=1e-3
+        )
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=100)
         return model, projector, optimizer, scheduler
 
