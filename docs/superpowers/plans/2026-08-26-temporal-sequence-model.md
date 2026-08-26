@@ -1759,8 +1759,14 @@ class RecurrentTransformerPolicy(nn.Module):
         nn.init.orthogonal_(self.actor.weight, gain=0.01)
         nn.init.orthogonal_(self.critic.weight, gain=1.0)
 
-    def new_cache(self, n_envs: int, device: torch.device) -> RolloutCache:
-        return RolloutCache.empty(self.config, n_envs, device, dtype=torch.float32)
+    def new_cache(
+        self, n_envs: int, device: torch.device, dtype: torch.dtype = torch.float32
+    ) -> RolloutCache:
+        """`dtype` is the KV cache's storage dtype. The spec's 256 MiB
+        figure for 64 envs x 1024 context is bf16 K+V; float32 doubles it
+        to 512 MiB. float32 is the default because the CPU tests run
+        there, and the PPO rollout loop passes torch.bfloat16 explicitly."""
+        return RolloutCache.empty(self.config, n_envs, device, dtype=dtype)
 
     @torch.no_grad()
     def step(
