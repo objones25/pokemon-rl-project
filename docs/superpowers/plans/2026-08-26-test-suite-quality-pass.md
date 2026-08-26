@@ -56,6 +56,8 @@ In `tests/unit/test_contrastive_pretrain_checkpoint.py`, the test builds a sched
 
 - [ ] **Step 3: Replace `[tool.pytest.ini_options]` in `pyproject.toml`**
 
+Note: the `expensive` marker registered here (and its `addopts` reference) is later removed by Task 9 — see Task 9's "Superseded design, kept for the record" note. Re-executing this step verbatim would re-add that dead config.
+
 `pytest>=9.1.1` is a floating (not pinned) dependency, so per the pytest-expert skill's own config template, use the four individual `strict_*` keys rather than the blanket `strict = true` (which auto-adopts future strictness options — only safe with a pinned pytest). Replace the existing block:
 
 ```toml
