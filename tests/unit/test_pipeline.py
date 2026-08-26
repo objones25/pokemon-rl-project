@@ -9,17 +9,7 @@ from data_collection.pipeline import (
     run_pipeline,
 )
 from data_collection.registry import VideoSource
-
-
-class FakeHfClient:
-    def __init__(self) -> None:
-        self.uploads: dict[str, bytes] = {}
-
-    def upload_bytes(self, data: bytes, path_in_repo: str) -> None:
-        self.uploads[path_in_repo] = data
-
-    def download_bytes(self, path_in_repo: str) -> bytes | None:
-        return self.uploads.get(path_in_repo)
+from tests.conftest import FakeHfClient
 
 
 def _source(video_id: str) -> VideoSource:
@@ -57,7 +47,7 @@ def test_run_pipeline_uploads_shards_and_marks_manifest_complete() -> None:
 
     manifest = uploader.load_manifest()
     assert manifest.is_complete("abc123") is True
-    assert any(path.startswith("shards/abc123/") for path in client.uploads)
+    assert any(path.startswith("shards/abc123/") for path in client.files)
 
 
 def test_process_video_logs_periodic_progress_for_long_videos(caplog) -> None:
@@ -105,7 +95,7 @@ def test_run_pipeline_uploads_a_contact_sheet_preview_per_batch() -> None:
 
     run_pipeline([source], deps)
 
-    assert any(path.startswith("previews/abc123/") for path in client.uploads)
+    assert any(path.startswith("previews/abc123/") for path in client.files)
 
 
 def test_run_pipeline_skips_already_completed_videos() -> None:
@@ -266,4 +256,4 @@ def test_run_pipeline_processes_multiple_videos_concurrently() -> None:
         # Every video's completion must actually land in the manifest --
         # this is the thing a manifest-save race between threads would lose.
         assert manifest.is_complete(source.video_id) is True
-        assert any(path.startswith(f"shards/{source.video_id}/") for path in client.uploads)
+        assert any(path.startswith(f"shards/{source.video_id}/") for path in client.files)

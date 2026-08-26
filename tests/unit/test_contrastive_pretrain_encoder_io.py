@@ -11,7 +11,6 @@ from contrastive_pretrain.encoder_io import (
     push_frozen_encoder,
 )
 from contrastive_pretrain.model import GrayscaleResNetEncoder, build_encoder
-from tests.conftest import FakeHfClient as _FakeHfClient
 
 
 def test_fuse_conv_bn_modules_preserves_output() -> None:
@@ -152,37 +151,35 @@ def test_export_frozen_encoder_does_not_mutate_input_module() -> None:
     assert isinstance(encoder.backbone.bn1, torch.nn.BatchNorm2d)
 
 
-def test_push_frozen_encoder_uploads_three_files() -> None:
+def test_push_frozen_encoder_uploads_three_files(fake_hf_client) -> None:
     encoder, _ = build_encoder(pretrained=False)
-    client = _FakeHfClient()
 
     push_frozen_encoder(
-        client, encoder, latent_mean=torch.zeros(2048), latent_std=torch.ones(2048),
+        fake_hf_client, encoder, latent_mean=torch.zeros(2048), latent_std=torch.ones(2048),
         sleep_func=lambda _: None,
     )
 
-    assert set(client.upload_calls) == {"model.safetensors", "config.json", "latent_stats.json"}
-    stats = json.loads(client.files["latent_stats.json"])
+    assert set(fake_hf_client.upload_calls) == {"model.safetensors", "config.json", "latent_stats.json"}
+    stats = json.loads(fake_hf_client.files["latent_stats.json"])
     assert len(stats["mean"]) == 2048
     assert len(stats["std"]) == 2048
 
 
-def test_push_frozen_encoder_publishes_all_three_files_as_one_atomic_commit() -> None:
+def test_push_frozen_encoder_publishes_all_three_files_as_one_atomic_commit(fake_hf_client) -> None:
     """Regression test for the non-atomic-publish fix: weights, config,
     and latent stats must land as a single Hub commit, not three
     independent ones -- otherwise a mid-publish failure could leave the
     repo with weights but no config.json, which
     _load_frozen_encoder_from_client then hard-fails on."""
     encoder, _ = build_encoder(pretrained=False)
-    client = _FakeHfClient()
 
     push_frozen_encoder(
-        client, encoder, latent_mean=torch.zeros(2048), latent_std=torch.ones(2048),
+        fake_hf_client, encoder, latent_mean=torch.zeros(2048), latent_std=torch.ones(2048),
         sleep_func=lambda _: None,
     )
 
-    assert len(client.commits) == 1
-    assert client.commits[0]["paths"] == ["config.json", "latent_stats.json", "model.safetensors"]
+    assert len(fake_hf_client.commits) == 1
+    assert fake_hf_client.commits[0]["paths"] == ["config.json", "latent_stats.json", "model.safetensors"]
 
 
 def test_push_frozen_encoder_retries_transient_upload_failures() -> None:
@@ -246,7 +243,7 @@ def test_push_frozen_encoder_waits_the_dedicated_rate_limit_delay_not_the_short_
     assert all(s == 120.0 for s in sleeps)
 
 
-def test_load_frozen_encoder_from_client_matches_exported_weights() -> None:
+def test_load_frozen_encoder_from_client_matches_exported_weights(fake_hf_client) -> None:
     from contrastive_pretrain.encoder_io import _load_frozen_encoder_from_client
 
     encoder, _ = build_encoder(pretrained=False)
@@ -254,10 +251,9 @@ def test_load_frozen_encoder_from_client_matches_exported_weights() -> None:
     x = torch.rand(1, 1, 144, 160)
     with torch.no_grad():
         expected = encoder(x)
-    client = _FakeHfClient()
-    push_frozen_encoder(client, encoder, latent_mean=torch.zeros(2048), latent_std=torch.ones(2048))
+    push_frozen_encoder(fake_hf_client, encoder, latent_mean=torch.zeros(2048), latent_std=torch.ones(2048))
 
-    loaded = _load_frozen_encoder_from_client(client)
+    loaded = _load_frozen_encoder_from_client(fake_hf_client)
 
     with torch.no_grad():
         actual = loaded(x)
@@ -266,7 +262,7 @@ def test_load_frozen_encoder_from_client_matches_exported_weights() -> None:
     assert loaded.training is False
 
 
-def test_load_frozen_encoder_from_client_rejects_mismatched_config() -> None:
+def test_load_frozen_encoder_from_client_rejects_mismatched_config(fake_hf_client) -> None:
     """The architecture build_encoder(pretrained=False) always produces is
     fixed regardless of what config.json says, so a repo whose published
     contract doesn't match must fail loudly here rather than be silently
@@ -275,14 +271,13 @@ def test_load_frozen_encoder_from_client_rejects_mismatched_config() -> None:
     from contrastive_pretrain.encoder_io import _load_frozen_encoder_from_client
 
     encoder, _ = build_encoder(pretrained=False)
-    client = _FakeHfClient()
-    push_frozen_encoder(client, encoder, latent_mean=torch.zeros(2048), latent_std=torch.ones(2048))
-    stored_config = json.loads(client.files["config.json"])
+    push_frozen_encoder(fake_hf_client, encoder, latent_mean=torch.zeros(2048), latent_std=torch.ones(2048))
+    stored_config = json.loads(fake_hf_client.files["config.json"])
     stored_config["input_shape_nchw"] = [1, 160, 144]  # transposed -- a real mismatch
-    client.files["config.json"] = json.dumps(stored_config).encode("utf-8")
+    fake_hf_client.files["config.json"] = json.dumps(stored_config).encode("utf-8")
 
     with pytest.raises(ValueError, match="contract mismatch"):
-        _load_frozen_encoder_from_client(client)
+        _load_frozen_encoder_from_client(fake_hf_client)
 
 
 def test_compute_latent_stats_shapes() -> None:

@@ -3,17 +3,7 @@ from pathlib import Path
 import pytest
 
 from data_collection.hf_uploader import HfUploader, Manifest
-
-
-class FakeHfClient:
-    def __init__(self) -> None:
-        self.uploads: dict[str, bytes] = {}
-
-    def upload_bytes(self, data: bytes, path_in_repo: str) -> None:
-        self.uploads[path_in_repo] = data
-
-    def download_bytes(self, path_in_repo: str) -> bytes | None:
-        return self.uploads.get(path_in_repo)
+from tests.conftest import FakeHfClient
 
 
 def test_manifest_starts_empty() -> None:
@@ -78,7 +68,7 @@ def test_upload_shard_writes_to_expected_path(tmp_path: Path) -> None:
     path_in_repo = uploader.upload_shard(shard_path, video_id="abc123", shard_index=3)
 
     assert path_in_repo == "shards/abc123/00003.parquet"
-    assert client.uploads["shards/abc123/00003.parquet"] == b"fake-parquet-bytes"
+    assert client.files["shards/abc123/00003.parquet"] == b"fake-parquet-bytes"
 
 
 def test_upload_preview_writes_to_expected_path(tmp_path: Path) -> None:
@@ -90,7 +80,7 @@ def test_upload_preview_writes_to_expected_path(tmp_path: Path) -> None:
     path_in_repo = uploader.upload_preview(preview_path, video_id="abc123", shard_index=3)
 
     assert path_in_repo == "previews/abc123/00003.png"
-    assert client.uploads["previews/abc123/00003.png"] == b"fake-png-bytes"
+    assert client.files["previews/abc123/00003.png"] == b"fake-png-bytes"
 
 
 def test_load_manifest_returns_empty_when_not_yet_uploaded() -> None:
@@ -149,7 +139,7 @@ def test_upload_shard_retries_transient_upload_failures(tmp_path: Path) -> None:
     path_in_repo = uploader.upload_shard(shard_path, video_id="abc123", shard_index=3)
 
     assert path_in_repo == "shards/abc123/00003.parquet"
-    assert client.uploads["shards/abc123/00003.parquet"] == b"fake-parquet-bytes"
+    assert client.files["shards/abc123/00003.parquet"] == b"fake-parquet-bytes"
     # Ordinary transient failures use the normal short exponential backoff.
     assert sleeps == [1.0, 2.0]
 
