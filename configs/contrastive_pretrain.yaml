@@ -13,3 +13,4 @@ temperature: 0.1
 max_epochs: 100
 checkpoint_interval_steps: 1000
 network_volume_checkpoint_dir: /workspace/contrastive_pretrain/checkpoints
+local_cache_dir: /workspace/contrastive_pretrain/resized_cache
