@@ -1,4 +1,5 @@
 import json
+from unittest.mock import patch
 
 import pytest
 import torch
@@ -297,14 +298,21 @@ def test_compute_latent_stats_shapes(encoder_and_dim: tuple[nn.Module, int]) -> 
 
 
 def test_compute_latent_stats_truncates_at_max_examples(encoder_and_dim: tuple[nn.Module, int]) -> None:
+    """A shape-only assertion can't distinguish truncation from processing
+    all 10 rows -- mean/std are always shape (dim,) regardless of how many
+    rows got averaged. Spying on encoder.forward (which compute_latent_stats
+    reaches via `encoder(frame)` -> nn.Module.__call__ -> self.forward)
+    gives a genuinely black-box count of rows actually processed."""
     encoder, dim = encoder_and_dim
     rows = [
         {"original": torch.randint(0, 256, (1, 144, 160), dtype=torch.uint8)}
         for _ in range(10)
     ]
 
-    mean, std = compute_latent_stats(encoder, rows, device=torch.device("cpu"), max_examples=3)
+    with patch.object(encoder, "forward", wraps=encoder.forward) as spy:
+        mean, std = compute_latent_stats(encoder, rows, device=torch.device("cpu"), max_examples=3)
 
+    assert spy.call_count == 3  # truncated at max_examples, not all 10 rows
     assert mean.shape == (dim,)
     assert std.shape == (dim,)
 
