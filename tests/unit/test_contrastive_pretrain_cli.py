@@ -118,6 +118,83 @@ def test_cli_help_lists_train_and_export_commands() -> None:
     assert "export-frozen-encoder" in result.output
 
 
+def test_cli_help_lists_build_cache_command() -> None:
+    runner = CliRunner()
+    result = runner.invoke(main, ["--help"])
+
+    assert result.exit_code == 0
+    assert "build-cache" in result.output
+
+
+def test_build_cache_command_calls_ensure_local_cache_with_the_config(tmp_path, monkeypatch) -> None:
+    """Building the cache must be runnable on its own, on a cheap CPU pod --
+    otherwise the only way to populate it is to start `train`, which does the
+    ~1 hour build on the A100 after torch.compile and the memory probe."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(f"local_cache_dir: {tmp_path / 'cache'}\n")
+    captured = {}
+
+    monkeypatch.setattr(
+        "contrastive_pretrain.cli.ensure_local_cache",
+        lambda config: captured.update(config=config),
+    )
+    monkeypatch.setattr("contrastive_pretrain.cli.get_token", lambda: "fake-token")
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["build-cache", "--config", str(config_path)])
+
+    assert result.exit_code == 0, result.output
+    assert captured["config"].local_cache_dir == str(tmp_path / "cache")
+
+
+def test_build_cache_command_overrides_num_proc_from_the_command_line(tmp_path, monkeypatch) -> None:
+    """A CPU pod sized for the build has a different core count than the GPU
+    pod the config targets."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(f"local_cache_dir: {tmp_path / 'cache'}\nresize_cache_num_proc: 2\n")
+    captured = {}
+
+    monkeypatch.setattr(
+        "contrastive_pretrain.cli.ensure_local_cache",
+        lambda config: captured.update(config=config),
+    )
+    monkeypatch.setattr("contrastive_pretrain.cli.get_token", lambda: "fake-token")
+
+    runner = CliRunner()
+    result = runner.invoke(
+        main, ["build-cache", "--config", str(config_path), "--num-proc", "12"]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["config"].resize_cache_num_proc == 12
+
+
+def test_build_cache_command_errors_when_local_cache_dir_is_unset(tmp_path, monkeypatch) -> None:
+    """ensure_local_cache is a silent no-op without local_cache_dir, so this
+    command would otherwise report success having built nothing."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("batch_size: 8\n")
+    monkeypatch.setattr("contrastive_pretrain.cli.get_token", lambda: "fake-token")
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["build-cache", "--config", str(config_path)])
+
+    assert result.exit_code != 0
+    assert "local_cache_dir" in result.output
+
+
+def test_build_cache_command_fails_fast_with_no_hf_credentials(tmp_path, monkeypatch) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(f"local_cache_dir: {tmp_path / 'cache'}\n")
+    monkeypatch.setattr("contrastive_pretrain.cli.get_token", lambda: None)
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["build-cache", "--config", str(config_path)])
+
+    assert result.exit_code != 0
+    assert "HF_TOKEN" in result.output
+
+
 def test_train_command_builds_deps_from_config_and_calls_run_training(tmp_path, monkeypatch) -> None:
     config_path = tmp_path / "config.yaml"
     config_path.write_text("batch_size: 8\n")

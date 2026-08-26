@@ -14,3 +14,5 @@ max_epochs: 100
 checkpoint_interval_steps: 1000
 network_volume_checkpoint_dir: /workspace/contrastive_pretrain/checkpoints
 local_cache_dir: /workspace/contrastive_pretrain/resized_cache
+checkpoint_keep_last_n: 3
+resize_cache_num_proc: 8

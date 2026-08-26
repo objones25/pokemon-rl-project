@@ -48,6 +48,20 @@ class TrainingConfig:
     # ensure_local_cache -- so running it on a fresh pod before `train` builds
     # the entire cache, not just a lightweight val-only subset.
     local_cache_dir: str | None = None
+    # Checkpoints are ~336MB each (ResNet-50 encoder + projector + AdamW
+    # moments, measured). Unpruned, a 100-epoch run at
+    # checkpoint_interval_steps=1000 writes ~138 of them -- ~46GB, which on
+    # its own nearly fills the 50GB network volume that must also hold the
+    # resize cache. 3 is a resume tail, not an archive: the *best* encoder is
+    # never only here, it's pushed to the Hub on every val-loss improvement.
+    checkpoint_keep_last_n: int = 3
+    # None (default): resize shards single-threaded, as before this field
+    # existed. The resize is ~8.9s per 500-row shard measured on a real
+    # shard, so a full 367-shard build is roughly an hour of pure CPU work.
+    # Set to the pod's core count to parallelize it (build-cache also takes
+    # --num-proc, since a CPU build pod is sized differently than the GPU
+    # training pod this config otherwise targets).
+    resize_cache_num_proc: int | None = None
 
 
 def load_config(path: str | Path) -> TrainingConfig:

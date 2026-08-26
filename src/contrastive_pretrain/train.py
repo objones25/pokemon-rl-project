@@ -102,6 +102,7 @@ from contrastive_pretrain.checkpoint import (
     build_checkpoint_state,
     find_latest_checkpoint,
     load_checkpoint,
+    prune_checkpoints,
     restore_optimizer_and_scheduler,
     save_checkpoint,
 )
@@ -299,6 +300,21 @@ def run_training(deps: TrainingDeps) -> None:
             checkpoint_dir / f"checkpoint_step{global_step:08d}.pt", ckpt_state
         )
         logger.info("checkpoint_saved", extra={"global_step": global_step})
+        # AFTER the save, never before: pruning first would briefly leave the
+        # run with one fewer resume point than intended, and a crash in the
+        # window between would resume further back than necessary. Pruning
+        # after also means the checkpoint just written is always among the
+        # survivors, since it sorts highest.
+        pruned = prune_checkpoints(checkpoint_dir, config.checkpoint_keep_last_n)
+        if pruned:
+            logger.info(
+                "checkpoints_pruned",
+                extra={
+                    "global_step": global_step,
+                    "deleted_count": len(pruned),
+                    "keep_last_n": config.checkpoint_keep_last_n,
+                },
+            )
 
     prev_step_end = time.monotonic()
     for epoch in range(start_epoch, config.max_epochs):

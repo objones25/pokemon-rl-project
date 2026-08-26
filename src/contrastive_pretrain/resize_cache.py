@@ -14,7 +14,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 import datasets
-from huggingface_hub import HfApi
+from huggingface_hub import HfApi, try_to_load_from_cache
 from huggingface_hub import constants as hf_constants
 from PIL import Image
 
@@ -41,17 +41,54 @@ def _resize_row_for_cache(example: dict) -> dict:
     return {"image": Image.fromarray(frame.squeeze(0).numpy(), mode="L")}
 
 
+def _discard_hub_blob(repo_id: str, filename: str, cache_dir: str) -> None:
+    """Deletes one file from huggingface_hub's download cache, both the
+    blob holding the content and the snapshot symlink pointing at it.
+
+    Called once a shard has been resized, because nothing else ever cleans
+    that cache up: hf_hub_download persists every file it fetches, and for
+    objones25/pokemon-frames that is 64.3GB of raw shards (measured) piling
+    up on a 50GB volume, none of it read again after its shard is resized.
+
+    Resolving BEFORE unlinking matters: the snapshot entry is a symlink to
+    the blob, so unlinking it first would leave the blob (the large part)
+    unreachable and undeletable. Where the two are the same file -- a cache
+    populated without symlinks -- the second unlink is a no-op, which is
+    what missing_ok covers.
+
+    A file that was never cached is not an error: download_bytes may be
+    served by something that never touches the hub cache at all."""
+    cached = try_to_load_from_cache(
+        repo_id=repo_id, filename=filename, cache_dir=cache_dir, repo_type="dataset"
+    )
+    # try_to_load_from_cache returns a str path, None (not cached), or the
+    # _CACHED_NO_EXIST sentinel object -- only the str case is a real file.
+    if not isinstance(cached, str):
+        return
+    snapshot_link = Path(cached)
+    blob = snapshot_link.resolve()
+    snapshot_link.unlink(missing_ok=True)
+    blob.unlink(missing_ok=True)
+
+
 def build_local_resize_cache(
     list_shard_paths: Callable[[], list[str]],
     download_shard: Callable[[str], bytes],
     local_cache_dir: Path,
+    num_proc: int | None = None,
 ) -> None:
     """Downloads and resizes every shard `list_shard_paths()` returns that
     isn't already present under `local_cache_dir`, writing each as a local
     Parquet shard at the same relative path. Safe to interrupt and rerun:
     already-completed shards are skipped, and a shard is never considered
     complete until its output file has been atomically renamed into
-    place."""
+    place.
+
+    `num_proc` is forwarded to .map(); None (the default) keeps the resize
+    single-threaded. Parallelizing is safe with the keep_in_memory=True
+    dataset below specifically because an in-memory dataset has no
+    cache_files, so .map() writes no per-process cache shards anywhere
+    (verified empirically) -- the whole reason keep_in_memory is set here."""
     shard_paths = list_shard_paths()
     completed = 0
     skipped = 0
@@ -92,7 +129,7 @@ def build_local_resize_cache(
             raw_dataset = datasets.Dataset.from_parquet(
                 str(raw_tmp_path), keep_in_memory=True, cache_dir=str(arrow_tmp_dir)
             )
-            resized_dataset = raw_dataset.map(_resize_row_for_cache)
+            resized_dataset = raw_dataset.map(_resize_row_for_cache, num_proc=num_proc)
             resized_dataset.to_parquet(str(output_tmp_path))
             os.replace(output_tmp_path, output_path)
         finally:
@@ -191,16 +228,24 @@ def ensure_local_cache(config: TrainingConfig) -> None:
                 raise FileNotFoundError(f"shard listed but missing on Hub: {path}")
             return data
 
-        return retry_with_backoff(
+        data = retry_with_backoff(
             _fetch,
             max_retries=5,
             base_delay=2.0,
             sleep_func=time.sleep,
             backoff_seconds=rate_limit_aware_backoff(base_delay=2.0, rate_limit_delay=3600.0),
         )
+        # The bytes are in hand, so the cached copy has no further readers --
+        # drop it now rather than letting 64.3GB of raw shards accumulate.
+        # Deliberately after the retry, not inside _fetch: a retried attempt
+        # that failed partway has nothing worth cleaning, and a successful one
+        # must not have its blob removed before its bytes are read.
+        _discard_hub_blob(config.dataset_repo_id, path, hf_constants.HF_HUB_CACHE)
+        return data
 
     build_local_resize_cache(
         list_shard_paths=_list_shard_paths,
         download_shard=_download_shard,
         local_cache_dir=Path(config.local_cache_dir),
+        num_proc=config.resize_cache_num_proc,
     )

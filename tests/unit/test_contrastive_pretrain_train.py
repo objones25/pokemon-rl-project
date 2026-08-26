@@ -463,6 +463,71 @@ def test_run_training_resumes_projector_and_makes_progress(
     assert torch.equal(projector_at_restore[0], saved_projector_weight)
 
 
+def _run_training_writing_four_checkpoints(
+    tmp_path, monkeypatch, checkpoint_keep_last_n: int
+):
+    """8 rows at batch_size=4 is 2 steps per epoch, and max_epochs=2 with
+    checkpoint_interval_steps=1 makes every step a periodic save -- steps 1
+    through 4. The epoch-boundary saves land on steps 2 and 4, reusing those
+    same filenames, so exactly 4 distinct checkpoints are written."""
+    checkpoint_dir = tmp_path / "checkpoints"
+    monkeypatch.setattr(
+        "contrastive_pretrain.train.build_train_dataset",
+        lambda config: _FakeStreamingDataset(n=8),
+    )
+    monkeypatch.setattr(
+        "contrastive_pretrain.train.build_val_dataset",
+        lambda config: _FakeStreamingDataset(n=8),
+    )
+    run_training(
+        TrainingDeps(
+            config=TrainingConfig(
+                pretrained=False,
+                batch_size=4,
+                num_workers=0,
+                max_epochs=2,
+                checkpoint_interval_steps=1,
+                network_volume_checkpoint_dir=str(checkpoint_dir),
+                checkpoint_keep_last_n=checkpoint_keep_last_n,
+            ),
+            frozen_encoder_client=_FakeHfClient(),
+            device=torch.device("cpu"),
+        )
+    )
+    return checkpoint_dir
+
+
+def test_run_training_prunes_old_checkpoints_to_keep_last_n(
+    tmp_path, monkeypatch, fast_run_training
+) -> None:
+    """Without this the volume accumulates every checkpoint ever written --
+    ~336MB each, ~138 of them over a real 100-epoch run (~46GB) on a 50GB
+    network volume that must also hold the resize cache."""
+    checkpoint_dir = _run_training_writing_four_checkpoints(
+        tmp_path, monkeypatch, checkpoint_keep_last_n=2
+    )
+
+    remaining = sorted(p.name for p in checkpoint_dir.glob("checkpoint_step*.pt"))
+
+    assert remaining == ["checkpoint_step00000003.pt", "checkpoint_step00000004.pt"]
+
+
+def test_run_training_leaves_a_resumable_checkpoint_after_pruning(
+    tmp_path, monkeypatch, fast_run_training
+) -> None:
+    """Pruning must never delete the run's own resume point -- at
+    keep_last_n=1 the single survivor has to be the last step trained."""
+    checkpoint_dir = _run_training_writing_four_checkpoints(
+        tmp_path, monkeypatch, checkpoint_keep_last_n=1
+    )
+
+    latest = checkpoint.find_latest_checkpoint(checkpoint_dir)
+
+    assert latest is not None  # pruning must not have emptied the directory
+    assert latest == checkpoint_dir / "checkpoint_step00000004.pt"
+    assert checkpoint.load_checkpoint(latest)["global_step"] == 4
+
+
 def _config_for_resume(
     checkpoint_dir, local_cache_dir: str | None = None
 ) -> TrainingConfig:

@@ -5,6 +5,7 @@ the augmentation policy before spending GPU time on a training run."""
 from __future__ import annotations
 
 import os
+from dataclasses import replace
 from pathlib import Path
 
 import click
@@ -21,6 +22,7 @@ from contrastive_pretrain.config import load_config
 from contrastive_pretrain.dataset import build_val_dataset
 from contrastive_pretrain.encoder_io import compute_latent_stats, push_frozen_encoder
 from contrastive_pretrain.model import build_encoder
+from contrastive_pretrain.resize_cache import ensure_local_cache
 from contrastive_pretrain.train import TrainingDeps, run_training
 from hf_storage.client import RealHfClient
 from observability.logging_config import configure_logging
@@ -106,6 +108,45 @@ def train(config_path: Path) -> None:
 
     deps = TrainingDeps(config=config, frozen_encoder_client=frozen_client, wandb_run=wandb_run)
     run_training(deps)
+
+
+@main.command(name="build-cache")
+@click.option("--config", "config_path", type=click.Path(path_type=Path, exists=True), default=_DEFAULT_CONFIG)
+@click.option(
+    "--num-proc",
+    type=int,
+    default=None,
+    help="Parallel worker processes for the resize (overrides resize_cache_num_proc). Defaults to the config's value.",
+)
+def build_cache_command(config_path: Path, num_proc: int | None) -> None:
+    """Download and resize every shard into the local cache directory.
+
+    Run this once on a fresh pod before `train`. It is the same build
+    `train` would do implicitly, but standalone -- so it can run on a cheap
+    CPU pod instead of burning A100 time on what is pure CPU work, and so a
+    partial build can be resumed without touching the training loop.
+    Interrupt-safe: already-built shards are skipped on a rerun.
+    """
+    if get_token() is None:
+        raise click.ClickException(
+            "No Hugging Face credentials found. Set HF_TOKEN (e.g. in a "
+            ".env file) or run `hf auth login` before using this command."
+        )
+
+    config = load_config(config_path)
+    # ensure_local_cache is a silent no-op without local_cache_dir, so without
+    # this check the command would report success having built nothing.
+    if not config.local_cache_dir:
+        raise click.ClickException(
+            f"local_cache_dir is not set in {config_path} -- nothing to build. "
+            "Set it to a path on the pod's network volume (e.g. "
+            "/workspace/contrastive_pretrain/resized_cache)."
+        )
+    if num_proc is not None:
+        config = replace(config, resize_cache_num_proc=num_proc)
+
+    ensure_local_cache(config)
+    click.echo(f"Resize cache is up to date at {config.local_cache_dir}")
 
 
 @main.command(name="export-frozen-encoder")

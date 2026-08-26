@@ -17,6 +17,26 @@ def test_training_config_defaults_match_spec() -> None:
     assert config.max_epochs == 100
     assert config.checkpoint_interval_steps == 1000
     assert config.shuffle_buffer_size == 10_000
+    assert config.checkpoint_keep_last_n == 3
+    assert config.resize_cache_num_proc is None
+
+
+def test_load_config_reads_checkpoint_keep_last_n(tmp_path) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text("checkpoint_keep_last_n: 5\n")
+
+    config = load_config(path)
+
+    assert config.checkpoint_keep_last_n == 5
+
+
+def test_load_config_reads_resize_cache_num_proc(tmp_path) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text("resize_cache_num_proc: 8\n")
+
+    config = load_config(path)
+
+    assert config.resize_cache_num_proc == 8
 
 
 def test_load_config_applies_yaml_overrides(tmp_path) -> None:

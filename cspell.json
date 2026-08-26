@@ -36,6 +36,8 @@
     "checkpointed",
     "randn",
     "allclose",
-    "monkeypatched"
+    "monkeypatched",
+    "TORCHINDUCTOR",
+    "ENOSPC"
   ]
 }

@@ -82,6 +82,33 @@ def find_latest_checkpoint(checkpoint_dir: str | Path) -> Path | None:
     return candidates[-1] if candidates else None
 
 
+def prune_checkpoints(checkpoint_dir: str | Path, keep_last_n: int) -> list[Path]:
+    """Deletes all but the `keep_last_n` newest checkpoints, returning the
+    paths removed (oldest first). Newest is by the same zero-padded-step
+    filename sort `find_latest_checkpoint` uses, so the resume point is
+    always among the survivors.
+
+    Retention is safe here specifically because the *best* encoder is not
+    kept only on this volume: run_training pushes it to the Hub via
+    push_frozen_encoder whenever val loss improves. These files are resume
+    state, not the artifact -- so keeping a short tail is enough.
+
+    Sized against a real constraint, not taste: a checkpoint is ~336MB
+    (ResNet-50 encoder + projector + AdamW moments, measured), and an
+    unpruned 100-epoch run writes ~138 of them -- ~46GB on a 50GB network
+    volume that must also hold the resize cache."""
+    if keep_last_n < 1:
+        raise ValueError(f"keep_last_n must be at least 1, got {keep_last_n}")
+    checkpoint_dir = Path(checkpoint_dir)
+    if not checkpoint_dir.exists():
+        return []
+    candidates = sorted(checkpoint_dir.glob("checkpoint_step*.pt"))
+    stale = candidates[:-keep_last_n]
+    for path in stale:
+        path.unlink(missing_ok=True)
+    return stale
+
+
 def restore_optimizer_and_scheduler(optimizer: Optimizer, scheduler: LRScheduler, state: dict) -> None:
     """Caller must construct `scheduler` (attached to `optimizer`) BEFORE
     calling this function. This follows PyTorch's documented recommended order

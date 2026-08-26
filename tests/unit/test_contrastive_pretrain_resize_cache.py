@@ -1,5 +1,7 @@
+import hashlib
 import io
 import os
+from pathlib import Path
 
 import datasets
 import numpy as np
@@ -10,9 +12,58 @@ import contrastive_pretrain.resize_cache
 from contrastive_pretrain.config import TrainingConfig
 from contrastive_pretrain.dataset import _resize_to_canonical
 from contrastive_pretrain.resize_cache import (
+    _discard_hub_blob,
     build_local_resize_cache,
     ensure_local_cache,
 )
+
+
+def _populate_hub_cache(cache_dir: Path, repo_id: str, filename: str, data: bytes):
+    """Reproduces the on-disk layout hf_hub_download actually creates: the
+    content lives once in blobs/<sha>, reached through a
+    snapshots/<commit>/<filename> symlink. Built by hand rather than by
+    calling the real hf_hub_download, which would need the network."""
+    repo_dir = cache_dir / ("datasets--" + repo_id.replace("/", "--"))
+    commit = "0" * 40
+    (repo_dir / "refs").mkdir(parents=True, exist_ok=True)
+    (repo_dir / "refs" / "main").write_text(commit)
+    (repo_dir / "blobs").mkdir(parents=True, exist_ok=True)
+    blob = repo_dir / "blobs" / hashlib.sha256(data).hexdigest()
+    blob.write_bytes(data)
+    link = repo_dir / "snapshots" / commit / filename
+    link.parent.mkdir(parents=True, exist_ok=True)
+    link.symlink_to(blob)
+    return link, blob
+
+
+class _RecordingDataset:
+    """Stands in for a datasets.Dataset so the num_proc pass-through can be
+    asserted without actually forking: os.fork() from this multi-threaded
+    test process emits a DeprecationWarning, which `filterwarnings = error`
+    would turn into a spurious failure."""
+
+    def __init__(self, map_calls: list[dict]) -> None:
+        self._map_calls = map_calls
+        self.num_rows = 1
+
+    def map(self, function, **kwargs):
+        self._map_calls.append(kwargs)
+        return self
+
+    def to_parquet(self, path) -> None:
+        Path(path).write_bytes(b"resized-parquet-bytes")
+
+
+class _FakeDatasetsModule:
+    def __init__(self, map_calls: list[dict]) -> None:
+        recording = _RecordingDataset(map_calls)
+
+        class _Dataset:
+            @staticmethod
+            def from_parquet(*args, **kwargs):
+                return recording
+
+        self.Dataset = _Dataset
 
 _SOURCE_PIXELS = np.random.default_rng(0).integers(0, 256, (2160, 2400), dtype=np.uint8)
 
@@ -307,10 +358,11 @@ def test_ensure_local_cache_wires_build_local_resize_cache_when_set(
 ) -> None:
     captured = {}
 
-    def fake_build_local_resize_cache(*, list_shard_paths, download_shard, local_cache_dir):
+    def fake_build_local_resize_cache(*, list_shard_paths, download_shard, local_cache_dir, num_proc):
         captured["list_shard_paths"] = list_shard_paths
         captured["download_shard"] = download_shard
         captured["local_cache_dir"] = local_cache_dir
+        captured["num_proc"] = num_proc
 
     monkeypatch.setattr(
         "contrastive_pretrain.resize_cache.build_local_resize_cache",
@@ -341,6 +393,150 @@ def test_ensure_local_cache_wires_build_local_resize_cache_when_set(
     assert captured["local_cache_dir"] == tmp_path / "cache"
     assert captured["list_shard_paths"]() == ["shards/vidA/00000.parquet", "shards/vidB/00000.parquet"]
     assert captured["download_shard"]("shards/vidA/00000.parquet") == b"raw-bytes-for-shards/vidA/00000.parquet"
+
+
+def test_discard_hub_blob_removes_both_the_snapshot_link_and_the_blob(tmp_path) -> None:
+    """hf_hub_download persists every shard it fetches and nothing ever
+    deletes it. Left alone that is 64.3GB of raw shards (measured against
+    objones25/pokemon-frames) accumulating on a 50GB volume, none of it read
+    again once the shard has been resized."""
+    link, blob = _populate_hub_cache(
+        tmp_path, "objones25/pokemon-frames", "shards/vidA/00000.parquet", b"raw-shard"
+    )
+
+    _discard_hub_blob("objones25/pokemon-frames", "shards/vidA/00000.parquet", str(tmp_path))
+
+    assert not blob.exists()
+    assert not link.exists()
+
+
+def test_discard_hub_blob_leaves_an_unrelated_cached_file_alone(tmp_path) -> None:
+    _, kept_blob = _populate_hub_cache(
+        tmp_path, "objones25/pokemon-frames", "shards/vidB/00000.parquet", b"other-shard"
+    )
+    _populate_hub_cache(
+        tmp_path, "objones25/pokemon-frames", "shards/vidA/00000.parquet", b"raw-shard"
+    )
+
+    _discard_hub_blob("objones25/pokemon-frames", "shards/vidA/00000.parquet", str(tmp_path))
+
+    assert kept_blob.exists()
+
+
+def test_discard_hub_blob_is_a_noop_when_the_file_was_never_cached(tmp_path) -> None:
+    """download_bytes may be served without ever touching the hub cache (a
+    fake in tests, a future direct-streaming client). Cleanup must not turn
+    that into a crash mid-build."""
+    _discard_hub_blob("objones25/pokemon-frames", "shards/absent.parquet", str(tmp_path))
+
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_ensure_local_cache_download_shard_discards_the_blob_after_reading_it(
+    monkeypatch, tmp_path, isolated_hf_hub_cache
+) -> None:
+    """The end-to-end guard for the 64.3GB leak: the wired-up download_shard
+    must leave nothing behind in the hub cache once it has returned the
+    shard's bytes."""
+    captured = {}
+    monkeypatch.setattr(
+        "contrastive_pretrain.resize_cache.build_local_resize_cache",
+        lambda **kwargs: captured.update(kwargs),
+    )
+
+    class _FakeApi:
+        def list_repo_files(self, repo_id, repo_type):
+            return ["shards/vidA/00000.parquet"]
+
+    monkeypatch.setattr("contrastive_pretrain.resize_cache.HfApi", _FakeApi)
+
+    blobs = {}
+
+    class _CachePopulatingClient:
+        """Mirrors what RealHfClient.download_bytes really does: hf_hub_download
+        writes the file into HF_HUB_CACHE, and the bytes are read back out."""
+
+        def __init__(self, api, repo_id, repo_type):
+            pass
+
+        def download_bytes(self, path):
+            link, blob = _populate_hub_cache(
+                Path(isolated_hf_hub_cache.HF_HUB_CACHE),
+                "objones25/pokemon-frames",
+                path,
+                b"raw-shard-bytes",
+            )
+            blobs[path] = (link, blob)
+            return blob.read_bytes()
+
+    monkeypatch.setattr(
+        "contrastive_pretrain.resize_cache.RealHfClient", _CachePopulatingClient
+    )
+
+    ensure_local_cache(TrainingConfig(local_cache_dir=str(tmp_path / "cache")))
+    data = captured["download_shard"]("shards/vidA/00000.parquet")
+
+    assert data == b"raw-shard-bytes"  # the caller still gets its bytes
+    link, blob = blobs["shards/vidA/00000.parquet"]
+    assert not blob.exists()
+    assert not link.exists()
+
+
+def test_build_local_resize_cache_forwards_num_proc_to_the_resize_map(
+    tmp_path, monkeypatch
+) -> None:
+    """The resize is ~8.9s per 500-row shard single-threaded (measured on a
+    real shard); across 367 shards that is roughly an hour of pure CPU work
+    blocking the training start."""
+    map_calls: list[dict] = []
+    monkeypatch.setattr(
+        contrastive_pretrain.resize_cache, "datasets", _FakeDatasetsModule(map_calls)
+    )
+
+    build_local_resize_cache(
+        list_shard_paths=lambda: ["shards/vidA/00000.parquet"],
+        download_shard=lambda path: b"raw",
+        local_cache_dir=tmp_path,
+        num_proc=4,
+    )
+
+    assert map_calls == [{"num_proc": 4}]
+
+
+def test_build_local_resize_cache_defaults_num_proc_to_none(tmp_path, monkeypatch) -> None:
+    map_calls: list[dict] = []
+    monkeypatch.setattr(
+        contrastive_pretrain.resize_cache, "datasets", _FakeDatasetsModule(map_calls)
+    )
+
+    build_local_resize_cache(
+        list_shard_paths=lambda: ["shards/vidA/00000.parquet"],
+        download_shard=lambda path: b"raw",
+        local_cache_dir=tmp_path,
+    )
+
+    assert map_calls == [{"num_proc": None}]
+
+
+def test_ensure_local_cache_forwards_resize_cache_num_proc_from_config(
+    monkeypatch, tmp_path, isolated_hf_hub_cache
+) -> None:
+    captured = {}
+    monkeypatch.setattr(
+        "contrastive_pretrain.resize_cache.build_local_resize_cache",
+        lambda **kwargs: captured.update(kwargs),
+    )
+    monkeypatch.setattr("contrastive_pretrain.resize_cache.HfApi", lambda: object())
+    monkeypatch.setattr(
+        "contrastive_pretrain.resize_cache.RealHfClient",
+        lambda api, repo_id, repo_type: object(),
+    )
+
+    ensure_local_cache(
+        TrainingConfig(local_cache_dir=str(tmp_path / "cache"), resize_cache_num_proc=6)
+    )
+
+    assert captured["num_proc"] == 6
 
 
 @pytest.mark.slow

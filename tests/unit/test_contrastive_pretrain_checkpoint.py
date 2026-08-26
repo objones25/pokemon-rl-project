@@ -6,6 +6,7 @@ from contrastive_pretrain.checkpoint import (
     build_checkpoint_state,
     find_latest_checkpoint,
     load_checkpoint,
+    prune_checkpoints,
     restore_optimizer_and_scheduler,
     save_checkpoint,
 )
@@ -164,6 +165,80 @@ def test_find_latest_checkpoint_returns_none_when_directory_does_not_exist(tmp_p
 def test_load_checkpoint_raises_on_missing_file(tmp_path) -> None:
     with pytest.raises(FileNotFoundError):
         load_checkpoint(tmp_path / "does_not_exist.pt")
+
+
+def test_prune_checkpoints_keeps_only_the_newest_n(tmp_path) -> None:
+    """Each checkpoint is ~336MB (measured: ResNet-50 encoder + projector +
+    AdamW moments). Unpruned, a 100-epoch run writes ~138 of them -- ~46GB,
+    which alone nearly fills the 50GB RunPod network volume that also has to
+    hold the resize cache."""
+    (tmp_path / "checkpoint_step00000100.pt").write_bytes(b"")
+    (tmp_path / "checkpoint_step00000500.pt").write_bytes(b"")
+    (tmp_path / "checkpoint_step00000900.pt").write_bytes(b"")
+    (tmp_path / "checkpoint_step00001300.pt").write_bytes(b"")
+
+    prune_checkpoints(tmp_path, keep_last_n=2)
+
+    remaining = sorted(p.name for p in tmp_path.glob("checkpoint_step*.pt"))
+    assert remaining == ["checkpoint_step00000900.pt", "checkpoint_step00001300.pt"]
+
+
+def test_prune_checkpoints_returns_the_paths_it_deleted(tmp_path) -> None:
+    (tmp_path / "checkpoint_step00000100.pt").write_bytes(b"")
+    (tmp_path / "checkpoint_step00000500.pt").write_bytes(b"")
+    (tmp_path / "checkpoint_step00000900.pt").write_bytes(b"")
+
+    deleted = prune_checkpoints(tmp_path, keep_last_n=1)
+
+    assert deleted == [
+        tmp_path / "checkpoint_step00000100.pt",
+        tmp_path / "checkpoint_step00000500.pt",
+    ]
+
+
+def test_prune_checkpoints_deletes_nothing_when_fewer_than_n_exist(tmp_path) -> None:
+    (tmp_path / "checkpoint_step00000100.pt").write_bytes(b"")
+
+    deleted = prune_checkpoints(tmp_path, keep_last_n=5)
+
+    assert deleted == []
+    assert (tmp_path / "checkpoint_step00000100.pt").exists()
+
+
+def test_prune_checkpoints_leaves_unrelated_files_alone(tmp_path) -> None:
+    """find_latest_checkpoint globs checkpoint_step*.pt specifically, and so
+    must this -- the volume also holds the resize cache."""
+    (tmp_path / "checkpoint_step00000100.pt").write_bytes(b"")
+    (tmp_path / "checkpoint_step00000900.pt").write_bytes(b"")
+    (tmp_path / "notes.txt").write_bytes(b"")
+
+    prune_checkpoints(tmp_path, keep_last_n=1)
+
+    assert (tmp_path / "notes.txt").exists()
+
+
+def test_prune_checkpoints_returns_empty_when_directory_does_not_exist(tmp_path) -> None:
+    assert prune_checkpoints(tmp_path / "nonexistent", keep_last_n=3) == []
+
+
+def test_prune_checkpoints_rejects_keep_last_n_below_one(tmp_path) -> None:
+    """keep_last_n=0 would delete the checkpoint just written, making the run
+    unresumable -- refuse rather than silently destroy it."""
+    with pytest.raises(ValueError, match="keep_last_n must be at least 1"):
+        prune_checkpoints(tmp_path, keep_last_n=0)
+
+
+def test_prune_checkpoints_leaves_the_checkpoint_find_latest_would_pick(tmp_path) -> None:
+    """The retained set must always include the resume point, or a pruned run
+    resumes from an older step than the one it just saved."""
+    (tmp_path / "checkpoint_step00000100.pt").write_bytes(b"")
+    (tmp_path / "checkpoint_step00000500.pt").write_bytes(b"")
+    (tmp_path / "checkpoint_step00000900.pt").write_bytes(b"")
+    (tmp_path / "checkpoint_step00001300.pt").write_bytes(b"")
+
+    prune_checkpoints(tmp_path, keep_last_n=2)
+
+    assert find_latest_checkpoint(tmp_path) == tmp_path / "checkpoint_step00001300.pt"
 
 
 def test_restore_optimizer_and_scheduler_restores_correct_lr(make_training_components) -> None:
