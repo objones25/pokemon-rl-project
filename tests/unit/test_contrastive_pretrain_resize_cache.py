@@ -154,3 +154,35 @@ def test_ensure_local_cache_wires_build_local_resize_cache_when_set(monkeypatch,
     assert captured["local_cache_dir"] == tmp_path / "cache"
     assert captured["list_shard_paths"]() == ["shards/vidA/00000.parquet", "shards/vidB/00000.parquet"]
     assert captured["download_shard"]("shards/vidA/00000.parquet") == b"raw-bytes-for-shards/vidA/00000.parquet"
+
+
+@pytest.mark.slow
+def test_build_local_resize_cache_against_real_hub_shard(tmp_path) -> None:
+    """Confirms the real Hub schema round-trips through the real resize +
+    local Parquet write correctly -- every other test in this file uses
+    synthetic fixtures; this is the one check against the real
+    objones25/pokemon-frames dataset."""
+    from huggingface_hub import HfApi
+
+    from hf_storage.client import RealHfClient
+
+    api = HfApi()
+    client = RealHfClient(api, "objones25/pokemon-frames", repo_type="dataset")
+    shard_paths = [
+        p
+        for p in api.list_repo_files("objones25/pokemon-frames", repo_type="dataset")
+        if p.startswith("shards/")
+    ][:1]
+    assert shard_paths, "expected at least one shard under shards/ in objones25/pokemon-frames"
+
+    build_local_resize_cache(
+        list_shard_paths=lambda: shard_paths,
+        download_shard=lambda path: client.download_bytes(path),
+        local_cache_dir=tmp_path,
+    )
+
+    output_path = tmp_path / shard_paths[0]
+    assert output_path.exists()
+    reloaded = datasets.Dataset.from_parquet(str(output_path))
+    assert reloaded.num_rows > 0
+    assert reloaded[0]["image"].size == (160, 144)
