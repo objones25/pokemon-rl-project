@@ -17,16 +17,21 @@ def test_build_contact_sheet_grid_dimensions() -> None:
 
 
 def test_build_contact_sheet_places_each_frame_in_its_own_cell_and_zero_pads_the_rest() -> None:
-    frames = [np.full((144, 160), i, dtype=np.uint8) for i in range(10)]
+    # Values start at 1, not 0: 0 is reserved as the zero-fill padding
+    # default, so a value of 0 in a frame cell would be indistinguishable
+    # from that cell never having been written (e.g. an off-by-one bug that
+    # skips the first frame). Starting at 1 makes every written cell
+    # unambiguously non-zero.
+    frames = [np.full((144, 160), value, dtype=np.uint8) for value in range(1, 11)]
 
     sheet = build_contact_sheet(frames, cols=4)
 
     # 10 frames at 4 cols -> 3 rows (ceil(10/4)), each cell 144x160.
     assert sheet.shape == (144 * 3, 160 * 4)
-    # Spot-check placement: frame 0 in the top-left cell, frame 9 (last) in
-    # row 2, col 1 -- divmod(9, 4) == (2, 1).
-    assert np.all(sheet[:144, :160] == 0)
-    assert np.all(sheet[288:, 160:320] == 9)
+    # Spot-check placement: frame 0 (value 1) in the top-left cell, frame 9
+    # (value 10, the last frame) in row 2, col 1 -- divmod(9, 4) == (2, 1).
+    assert np.all(sheet[:144, :160] == 1)
+    assert np.all(sheet[288:, 160:320] == 10)
     # The last row's remaining two cells (cols 2 and 3) were never written --
     # must stay at the zero-fill default, not leak stale/garbage data.
     assert np.all(sheet[288:, 320:480] == 0)
