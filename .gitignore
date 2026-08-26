@@ -16,6 +16,10 @@ configs/templates/approved/_preview.png
 *.mkv
 *.webm
 *.log
+# Game Boy ROMs. Supply your own copy; never commit one -- the repo has a
+# GitHub remote and the PPO sub-project needs the ROM at the repo root.
+*.gb
+*.gbc
 .DS_Store
 RUNPOD_SETUP.md
 wandb/
