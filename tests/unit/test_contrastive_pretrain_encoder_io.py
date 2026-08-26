@@ -148,6 +148,38 @@ def test_export_frozen_encoder_does_not_mutate_input_module(encoder: nn.Module) 
     assert isinstance(encoder.backbone.bn1, torch.nn.BatchNorm2d)
 
 
+def test_export_frozen_encoder_does_not_strip_compiled_wrapper_prefix(encoder: nn.Module) -> None:
+    """Pins a hazard, not a guarantee: export_frozen_encoder's deepcopy +
+    fuse_conv_bn_modules path only fuses Conv2d/BatchNorm2d children in
+    place -- it never inspects or renames a wrapping module's own
+    attribute name, so a torch.compile-wrapped encoder's `_orig_mod.`
+    state_dict prefix survives export untouched. checkpoint.py's
+    build_checkpoint_state docstring is explicit that avoiding this is the
+    CALLER's responsibility ("callers must never pass a torch.compile-
+    wrapped model here"), not export_frozen_encoder's job to detect or
+    strip. This test documents that contract: if train.py's
+    push_frozen_encoder call site is ever mutated to pass
+    compiled_encoder instead of the raw encoder, the published artifact's
+    state_dict keys would carry `_orig_mod.` and load_frozen_encoder's
+    plain (uncompiled) encoder would fail to load it -- silently breaking
+    the downstream PPO consumer."""
+
+    class _FakeCompiled(nn.Module):
+        def __init__(self, mod: nn.Module) -> None:
+            super().__init__()
+            self._orig_mod = mod
+
+        def forward(self, *args, **kwargs):
+            return self._orig_mod(*args, **kwargs)
+
+    weights_bytes, _ = export_frozen_encoder(_FakeCompiled(encoder))
+
+    from safetensors.torch import load as safetensors_load
+
+    keys = safetensors_load(weights_bytes).keys()
+    assert all(k.startswith("_orig_mod.") for k in keys)
+
+
 def test_push_frozen_encoder_uploads_three_files(fake_hf_client, encoder: nn.Module) -> None:
     push_frozen_encoder(
         fake_hf_client, encoder, latent_mean=torch.zeros(2048), latent_std=torch.ones(2048),
