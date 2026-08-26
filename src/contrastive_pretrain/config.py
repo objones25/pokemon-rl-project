@@ -43,7 +43,10 @@ class TrainingConfig:
     # populate it automatically on first use (see
     # contrastive_pretrain.resize_cache.ensure_local_cache), eliminating
     # both the per-epoch network round-trips and per-epoch resize work on
-    # every call after that.
+    # every call after that. Note this is not a train-only cost: cli.py's
+    # export-frozen-encoder calls build_val_dataset alone, which also triggers
+    # ensure_local_cache -- so running it on a fresh pod before `train` builds
+    # the entire cache, not just a lightweight val-only subset.
     local_cache_dir: str | None = None
 
 

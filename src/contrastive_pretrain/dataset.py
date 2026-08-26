@@ -154,6 +154,9 @@ def build_train_dataset(config: TrainingConfig):
 
 
 def build_val_dataset(config: TrainingConfig):
+    # Local import: resize_cache.py imports _resize_to_canonical from this
+    # module at module level, so importing resize_cache back at this
+    # module's top level would be circular. Same reason as build_train_dataset.
     from contrastive_pretrain.resize_cache import ensure_local_cache
 
     ensure_local_cache(config)

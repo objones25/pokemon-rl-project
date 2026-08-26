@@ -8,7 +8,11 @@ from PIL import Image
 
 import contrastive_pretrain.resize_cache
 from contrastive_pretrain.config import TrainingConfig
+from contrastive_pretrain.dataset import _resize_to_canonical
 from contrastive_pretrain.resize_cache import build_local_resize_cache, ensure_local_cache
+
+
+_SOURCE_PIXELS = np.random.default_rng(0).integers(0, 256, (2160, 2400), dtype=np.uint8)
 
 
 def _native_res_shard_bytes(video_id: str) -> bytes:
@@ -19,7 +23,7 @@ def _native_res_shard_bytes(video_id: str) -> bytes:
             "timestamp_s": datasets.Value("float64"),
         }
     )
-    pixels = np.random.default_rng(0).integers(0, 256, (2160, 2400), dtype=np.uint8)
+    pixels = _SOURCE_PIXELS
     rows = [{"image": Image.fromarray(pixels, mode="L"), "video_id": video_id, "timestamp_s": 0.0}]
     ds = datasets.Dataset.from_list(rows, features=features)
     buf = io.BytesIO()
@@ -39,6 +43,17 @@ def test_build_local_resize_cache_writes_resized_shard_for_each_listed_path(tmp_
         local_cache_dir=tmp_path,
     )
 
+    # The whole reason _resize_row_for_cache exists is that the obvious
+    # implementations corrupt pixels on the parquet round-trip while
+    # PRESERVING shape (verified during design: a raw tensor/array write comes
+    # back in 32-bit int mode, still 144x160). A size/mode-only assertion would
+    # not have caught the bug this module was written to avoid, so compare
+    # actual pixels against _resize_to_canonical applied to the same source.
+    expected = _resize_to_canonical({"image": Image.fromarray(_SOURCE_PIXELS, mode="L")})[
+        "image"
+    ]  # (1, H, W) uint8
+    expected_pixels = expected.squeeze(0).numpy()
+
     for shard_path in shard_bytes:
         output_path = tmp_path / shard_path
         assert output_path.exists()
@@ -46,6 +61,7 @@ def test_build_local_resize_cache_writes_resized_shard_for_each_listed_path(tmp_
         assert reloaded.num_rows == 1
         assert reloaded[0]["image"].size == (160, 144)  # PIL size is (width, height)
         assert reloaded[0]["image"].mode == "L"
+        assert np.array_equal(np.array(reloaded[0]["image"]), expected_pixels)
 
 
 def test_build_local_resize_cache_leaves_no_temp_files_behind(tmp_path) -> None:
@@ -194,6 +210,41 @@ def test_ensure_local_cache_leaves_an_operator_set_hf_hub_cache_alone(
 
     assert os.environ["HF_HUB_CACHE"] == "/operator/choice"
     assert isolated_hf_hub_cache.HF_HUB_CACHE == "/operator/choice"
+
+
+def test_ensure_local_cache_raises_file_not_found_for_a_shard_missing_on_hub(
+    monkeypatch, tmp_path, isolated_hf_hub_cache
+) -> None:
+    """Not an assert: asserts are stripped under `python -O`, where the
+    failure would resurface as a confusing TypeError from write_bytes(None)."""
+    captured = {}
+    monkeypatch.setattr(
+        "contrastive_pretrain.resize_cache.build_local_resize_cache",
+        lambda **kwargs: captured.update(kwargs),
+    )
+    monkeypatch.setattr(
+        contrastive_pretrain.resize_cache.time, "sleep", lambda seconds: None
+    )
+
+    class _FakeApi:
+        def list_repo_files(self, repo_id, repo_type):
+            return ["shards/vidA/00000.parquet"]
+
+    monkeypatch.setattr("contrastive_pretrain.resize_cache.HfApi", _FakeApi)
+
+    class _MissingClient:
+        def __init__(self, api, repo_id, repo_type):
+            pass
+
+        def download_bytes(self, path):
+            return None
+
+    monkeypatch.setattr("contrastive_pretrain.resize_cache.RealHfClient", _MissingClient)
+
+    ensure_local_cache(TrainingConfig(local_cache_dir=str(tmp_path / "cache")))
+
+    with pytest.raises(FileNotFoundError, match="shard listed but missing on Hub"):
+        captured["download_shard"]("shards/vidA/00000.parquet")
 
 
 def test_ensure_local_cache_retries_a_failing_list_repo_files(

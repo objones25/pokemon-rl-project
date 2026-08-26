@@ -59,8 +59,11 @@ def build_local_resize_cache(
     for shard_path in shard_paths:
         output_path = local_cache_dir / shard_path
         if output_path.exists():
+            # Deliberately not logged per shard: once the cache is fully built
+            # this branch is every shard, on every training start, saying
+            # nothing the resize_cache_complete summary below doesn't already
+            # report as skipped_count.
             skipped += 1
-            logger.info("resize_cache_shard_skipped", extra={"shard_path": shard_path})
             continue
 
         start = time.monotonic()
@@ -181,7 +184,11 @@ def ensure_local_cache(config: TrainingConfig) -> None:
     def _download_shard(path: str) -> bytes:
         def _fetch() -> bytes:
             data = client.download_bytes(path)
-            assert data is not None, f"shard listed but missing on Hub: {path}"
+            # Not an assert: asserts vanish under `python -O`, and the failure
+            # would then surface as a TypeError from write_bytes(None), far
+            # from the real cause.
+            if data is None:
+                raise FileNotFoundError(f"shard listed but missing on Hub: {path}")
             return data
 
         return retry_with_backoff(
