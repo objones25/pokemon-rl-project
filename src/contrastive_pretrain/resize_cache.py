@@ -13,13 +13,9 @@ from collections.abc import Callable
 from pathlib import Path
 
 import datasets
-from huggingface_hub import HfApi
 from PIL import Image
 
-from contrastive_pretrain.config import TrainingConfig
 from contrastive_pretrain.dataset import _resize_to_canonical
-from hf_storage.client import RealHfClient
-from hf_storage.retry import rate_limit_aware_backoff, retry_with_backoff
 
 logger = logging.getLogger(__name__)
 
