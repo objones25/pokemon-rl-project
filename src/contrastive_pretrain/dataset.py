@@ -114,10 +114,23 @@ def build_dataloader(
 
 
 def _load_base_stream(config: TrainingConfig):
+    if config.local_cache_dir:
+        return datasets.load_dataset(
+            "parquet",
+            data_files=f"{config.local_cache_dir}/shards/**/*.parquet",
+            split="train",
+            streaming=True,
+        )
     return datasets.load_dataset(config.dataset_repo_id, streaming=True, split="train")
 
 
 def build_train_dataset(config: TrainingConfig):
+    # Local import: resize_cache.py imports _resize_to_canonical from this
+    # module at module level, so importing resize_cache back at this
+    # module's top level would be circular.
+    from contrastive_pretrain.resize_cache import ensure_local_cache
+
+    ensure_local_cache(config)
     logger.info(
         "build_train_dataset",
         extra={
@@ -128,7 +141,10 @@ def build_train_dataset(config: TrainingConfig):
     )
     ds = _load_base_stream(config)
     ds = ds.filter(lambda ex: ex["video_id"] not in config.val_video_ids)
-    ds = ds.map(_ResizeToCanonicalWithProgress())  # BEFORE shuffle -- see its docstring
+    if not config.local_cache_dir:
+        ds = ds.map(_ResizeToCanonicalWithProgress())  # BEFORE shuffle -- see its
+        # docstring; skipped for the local-cache path, whose frames are
+        # already canonical-sized (see resize_cache.py's design rationale).
     ds = ds.shuffle(buffer_size=config.shuffle_buffer_size, seed=config.seed)
     ds = ds.map(
         functools.partial(to_pair_transform, augmentation_config=AugmentationConfig(), base_seed=config.seed),
@@ -138,13 +154,17 @@ def build_train_dataset(config: TrainingConfig):
 
 
 def build_val_dataset(config: TrainingConfig):
+    from contrastive_pretrain.resize_cache import ensure_local_cache
+
+    ensure_local_cache(config)
     logger.info(
         "build_val_dataset",
         extra={"dataset_repo_id": config.dataset_repo_id, "val_video_ids": config.val_video_ids},
     )
     ds = _load_base_stream(config)
     ds = ds.filter(lambda ex: ex["video_id"] in config.val_video_ids)
-    ds = ds.map(_ResizeToCanonicalWithProgress())
+    if not config.local_cache_dir:
+        ds = ds.map(_ResizeToCanonicalWithProgress())
     ds = ds.map(
         functools.partial(to_pair_transform, augmentation_config=AugmentationConfig(), base_seed=config.seed),
         remove_columns=["image"],

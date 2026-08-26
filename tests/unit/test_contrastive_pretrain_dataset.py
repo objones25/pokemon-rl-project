@@ -196,7 +196,7 @@ def test_build_dataloader_resumes_from_exact_position() -> None:
 import pytest
 
 from contrastive_pretrain.config import TrainingConfig
-from contrastive_pretrain.dataset import build_train_dataset, build_val_dataset
+from contrastive_pretrain.dataset import _load_base_stream, build_train_dataset, build_val_dataset
 
 
 def _synthetic_frame_stream(video_ids: list[str]):
@@ -311,6 +311,134 @@ def test_build_val_dataset_only_yields_held_out_videos() -> None:
 
     for _, row in zip(range(5), ds):
         assert row["video_id"] in config.val_video_ids
+
+
+def test_load_base_stream_reads_from_local_cache_when_configured(tmp_path) -> None:
+    features = datasets.Features(
+        {
+            "image": datasets.Image(),
+            "video_id": datasets.Value("string"),
+            "timestamp_s": datasets.Value("float64"),
+        }
+    )
+    pixels = np.random.default_rng(0).integers(0, 256, (144, 160), dtype=np.uint8)
+    rows = [{"image": Image.fromarray(pixels, mode="L"), "video_id": "cachedA", "timestamp_s": 0.0}]
+    ds = datasets.Dataset.from_list(rows, features=features)
+    shard_path = tmp_path / "shards" / "cachedA" / "00000.parquet"
+    shard_path.parent.mkdir(parents=True)
+    ds.to_parquet(str(shard_path))
+
+    config = TrainingConfig(local_cache_dir=str(tmp_path))
+
+    stream = _load_base_stream(config)
+
+    assert [row["video_id"] for row in stream] == ["cachedA"]
+
+
+def test_build_train_dataset_calls_ensure_local_cache_before_loading(monkeypatch) -> None:
+    call_order: list[str] = []
+    monkeypatch.setattr(
+        "contrastive_pretrain.resize_cache.ensure_local_cache",
+        lambda config: call_order.append("ensure_local_cache"),
+    )
+
+    def fake_load_base_stream(config):
+        call_order.append("load_base_stream")
+        return _synthetic_frame_stream(["train_a"])
+
+    monkeypatch.setattr("contrastive_pretrain.dataset._load_base_stream", fake_load_base_stream)
+    config = TrainingConfig(val_video_ids=("val_a",))
+
+    list(build_train_dataset(config))
+
+    assert call_order == ["ensure_local_cache", "load_base_stream"]
+
+
+def test_build_train_dataset_skips_resize_map_when_local_cache_dir_is_set(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr("contrastive_pretrain.resize_cache.ensure_local_cache", lambda config: None)
+    resize_instantiations: list[int] = []
+
+    class _CountingResize:
+        def __init__(self) -> None:
+            resize_instantiations.append(1)
+
+        def __call__(self, example):
+            return example
+
+    monkeypatch.setattr("contrastive_pretrain.dataset._ResizeToCanonicalWithProgress", _CountingResize)
+    monkeypatch.setattr(
+        "contrastive_pretrain.dataset._load_base_stream",
+        lambda config: _synthetic_frame_stream(["train_a"]),
+    )
+    config = TrainingConfig(val_video_ids=("val_a",), local_cache_dir=str(tmp_path))
+
+    list(build_train_dataset(config))
+
+    assert resize_instantiations == []
+
+
+def test_build_train_dataset_still_uses_resize_map_when_local_cache_dir_is_unset(monkeypatch) -> None:
+    resize_instantiations: list[int] = []
+
+    class _CountingResize:
+        def __init__(self) -> None:
+            resize_instantiations.append(1)
+
+        def __call__(self, example):
+            return example
+
+    monkeypatch.setattr("contrastive_pretrain.dataset._ResizeToCanonicalWithProgress", _CountingResize)
+    monkeypatch.setattr(
+        "contrastive_pretrain.dataset._load_base_stream",
+        lambda config: _synthetic_frame_stream(["train_a"]),
+    )
+    config = TrainingConfig(val_video_ids=("val_a",))
+
+    list(build_train_dataset(config))
+
+    assert resize_instantiations == [1]
+
+
+def test_build_val_dataset_calls_ensure_local_cache_before_loading(monkeypatch) -> None:
+    call_order: list[str] = []
+    monkeypatch.setattr(
+        "contrastive_pretrain.resize_cache.ensure_local_cache",
+        lambda config: call_order.append("ensure_local_cache"),
+    )
+
+    def fake_load_base_stream(config):
+        call_order.append("load_base_stream")
+        return _synthetic_frame_stream(["val_a"])
+
+    monkeypatch.setattr("contrastive_pretrain.dataset._load_base_stream", fake_load_base_stream)
+    config = TrainingConfig(val_video_ids=("val_a",))
+
+    list(build_val_dataset(config))
+
+    assert call_order == ["ensure_local_cache", "load_base_stream"]
+
+
+def test_build_val_dataset_skips_resize_map_when_local_cache_dir_is_set(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr("contrastive_pretrain.resize_cache.ensure_local_cache", lambda config: None)
+    resize_instantiations: list[int] = []
+
+    class _CountingResize:
+        def __init__(self) -> None:
+            resize_instantiations.append(1)
+
+        def __call__(self, example):
+            return example
+
+    monkeypatch.setattr("contrastive_pretrain.dataset._ResizeToCanonicalWithProgress", _CountingResize)
+    monkeypatch.setattr(
+        "contrastive_pretrain.dataset._load_base_stream",
+        lambda config: _synthetic_frame_stream(["val_a"]),
+    )
+    config = TrainingConfig(val_video_ids=("val_a",), local_cache_dir=str(tmp_path))
+
+    list(build_val_dataset(config))
+
+    assert resize_instantiations == []
 
 
 @pytest.mark.slow
