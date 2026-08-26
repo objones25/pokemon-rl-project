@@ -1,16 +1,31 @@
 import pytest
 import torch
+from torchvision.transforms import v2
 
 from contrastive_pretrain.augmentation import (
     AugmentationConfig,
+    AugmentView,
+    MakePair,
     _apply_brightness_contrast,
     _apply_crop_resize,
+    _apply_gaussian_blur,
+    _apply_gaussian_noise,
+    _apply_jpeg_artifact,
     _apply_translate,
+    _resolve_blur_kernel,
+    _resolve_blur_sigma,
     _resolve_brightness_contrast,
     _resolve_crop_box,
+    _resolve_jpeg_quality,
+    _resolve_noise_sigma,
     _resolve_translate_offset,
+    augment_view,
+    make_pair,
     random_brightness_contrast,
     random_crop_resize,
+    random_gaussian_blur,
+    random_gaussian_noise,
+    random_jpeg_artifact,
     random_translate,
 )
 
@@ -32,6 +47,14 @@ def test_augmentation_config_has_spec_defaults() -> None:
 def _marker_frame(size: tuple[int, int] = (144, 160), marker_at: tuple[int, int] = (72, 80)) -> torch.Tensor:
     frame = torch.zeros((1, *size), dtype=torch.uint8)
     frame[0, marker_at[0], marker_at[1]] = 255
+    return frame
+
+
+def _marker_block_frame(
+    size: tuple[int, int] = (144, 160), block: tuple[slice, slice] = (slice(70, 74), slice(78, 82))
+) -> torch.Tensor:
+    frame = torch.zeros((1, *size), dtype=torch.uint8)
+    frame[0, block[0], block[1]] = 255
     return frame
 
 
@@ -138,13 +161,6 @@ def test_random_brightness_contrast_preserves_shape_and_dtype() -> None:
     assert result.dtype == frame.dtype
 
 
-from contrastive_pretrain.augmentation import (
-    _apply_gaussian_noise,
-    _resolve_noise_sigma,
-    random_gaussian_noise,
-)
-
-
 def test_resolve_noise_sigma_stays_within_configured_bound() -> None:
     config = AugmentationConfig(noise_sigma_max=8.0)
     rng = torch.Generator().manual_seed(6)
@@ -184,14 +200,6 @@ def test_random_gaussian_noise_preserves_shape_and_dtype() -> None:
     assert result.dtype == frame.dtype
 
 
-from contrastive_pretrain.augmentation import (
-    _apply_gaussian_blur,
-    _resolve_blur_kernel,
-    _resolve_blur_sigma,
-    random_gaussian_blur,
-)
-
-
 def test_resolve_blur_sigma_stays_within_configured_bound() -> None:
     config = AugmentationConfig(blur_sigma_max=0.8)
     rng = torch.Generator().manual_seed(10)
@@ -215,8 +223,7 @@ def test_apply_gaussian_blur_zero_sigma_is_identity() -> None:
 
 
 def test_apply_gaussian_blur_preserves_shape_and_dtype() -> None:
-    frame = torch.zeros((1, 144, 160), dtype=torch.uint8)
-    frame[0, 70:74, 78:82] = 255
+    frame = _marker_block_frame()
 
     result = _apply_gaussian_blur(frame, sigma=0.8, kernel_size=3)
 
@@ -225,8 +232,7 @@ def test_apply_gaussian_blur_preserves_shape_and_dtype() -> None:
 
 
 def test_random_gaussian_blur_preserves_shape_and_dtype() -> None:
-    frame = torch.zeros((1, 144, 160), dtype=torch.uint8)
-    frame[0, 70:74, 78:82] = 255
+    frame = _marker_block_frame()
     config = AugmentationConfig()
     rng = torch.Generator().manual_seed(11)
 
@@ -234,13 +240,6 @@ def test_random_gaussian_blur_preserves_shape_and_dtype() -> None:
 
     assert result.shape == frame.shape
     assert result.dtype == frame.dtype
-
-
-from contrastive_pretrain.augmentation import (
-    _apply_jpeg_artifact,
-    _resolve_jpeg_quality,
-    random_jpeg_artifact,
-)
 
 
 def test_resolve_jpeg_quality_stays_within_configured_bounds() -> None:
@@ -253,8 +252,7 @@ def test_resolve_jpeg_quality_stays_within_configured_bounds() -> None:
 
 
 def test_apply_jpeg_artifact_preserves_shape_and_dtype() -> None:
-    frame = torch.zeros((1, 144, 160), dtype=torch.uint8)
-    frame[0, 70:74, 78:82] = 255
+    frame = _marker_block_frame()
 
     result = _apply_jpeg_artifact(frame, quality=80)
 
@@ -263,8 +261,7 @@ def test_apply_jpeg_artifact_preserves_shape_and_dtype() -> None:
 
 
 def test_apply_jpeg_artifact_at_high_quality_stays_close_to_original() -> None:
-    frame = torch.zeros((1, 144, 160), dtype=torch.uint8)
-    frame[0, 70:74, 78:82] = 255
+    frame = _marker_block_frame()
 
     result = _apply_jpeg_artifact(frame, quality=95)
 
@@ -273,8 +270,7 @@ def test_apply_jpeg_artifact_at_high_quality_stays_close_to_original() -> None:
 
 
 def test_random_jpeg_artifact_preserves_shape_and_dtype() -> None:
-    frame = torch.zeros((1, 144, 160), dtype=torch.uint8)
-    frame[0, 70:74, 78:82] = 255
+    frame = _marker_block_frame()
     config = AugmentationConfig()
     rng = torch.Generator().manual_seed(13)
 
@@ -284,12 +280,8 @@ def test_random_jpeg_artifact_preserves_shape_and_dtype() -> None:
     assert result.dtype == frame.dtype
 
 
-from contrastive_pretrain.augmentation import augment_view, make_pair
-
-
 def test_augment_view_preserves_shape_and_dtype() -> None:
-    frame = torch.zeros((1, 144, 160), dtype=torch.uint8)
-    frame[0, 70:74, 78:82] = 255
+    frame = _marker_block_frame()
     config = AugmentationConfig()
     rng = torch.Generator().manual_seed(14)
 
@@ -300,8 +292,7 @@ def test_augment_view_preserves_shape_and_dtype() -> None:
 
 
 def test_make_pair_produces_two_independently_sampled_views() -> None:
-    frame = torch.zeros((1, 144, 160), dtype=torch.uint8)
-    frame[0, 70:74, 78:82] = 255
+    frame = _marker_block_frame()
     config = AugmentationConfig()
     rng = torch.Generator().manual_seed(15)
 
@@ -313,8 +304,7 @@ def test_make_pair_produces_two_independently_sampled_views() -> None:
 
 
 def test_make_pair_is_reproducible_given_the_same_seed() -> None:
-    frame = torch.zeros((1, 144, 160), dtype=torch.uint8)
-    frame[0, 70:74, 78:82] = 255
+    frame = _marker_block_frame()
     config = AugmentationConfig()
 
     view_a1, view_b1 = make_pair(frame, config, torch.Generator().manual_seed(42))
@@ -360,8 +350,7 @@ def test_augment_view_rejects_wrong_shape_input() -> None:
 
 
 def test_augment_view_composition_order_is_translate_crop_brightness_noise_blur_jpeg() -> None:
-    frame = torch.zeros((1, 144, 160), dtype=torch.uint8)
-    frame[0, 70:74, 78:82] = 255
+    frame = _marker_block_frame()
     config = AugmentationConfig()
 
     result = augment_view(frame, config, torch.Generator().manual_seed(20))
@@ -378,14 +367,8 @@ def test_augment_view_composition_order_is_translate_crop_brightness_noise_blur_
     assert torch.equal(result, expected)
 
 
-from torchvision.transforms import v2
-
-from contrastive_pretrain.augmentation import AugmentView, MakePair
-
-
 def test_augment_view_transform_matches_function_given_same_seed() -> None:
-    frame = torch.zeros((1, 144, 160), dtype=torch.uint8)
-    frame[0, 70:74, 78:82] = 255
+    frame = _marker_block_frame()
     config = AugmentationConfig()
 
     transform = AugmentView(config, torch.Generator().manual_seed(7))
@@ -402,8 +385,7 @@ def test_augment_view_transform_is_an_nn_module() -> None:
 
 
 def test_augment_view_transform_composes_with_torchvision_compose() -> None:
-    frame = torch.zeros((1, 144, 160), dtype=torch.uint8)
-    frame[0, 70:74, 78:82] = 255
+    frame = _marker_block_frame()
     config = AugmentationConfig()
 
     pipeline = v2.Compose([AugmentView(config, torch.Generator().manual_seed(3))])
@@ -414,8 +396,7 @@ def test_augment_view_transform_composes_with_torchvision_compose() -> None:
 
 
 def test_make_pair_transform_matches_function_given_same_seed() -> None:
-    frame = torch.zeros((1, 144, 160), dtype=torch.uint8)
-    frame[0, 70:74, 78:82] = 255
+    frame = _marker_block_frame()
     config = AugmentationConfig()
 
     transform = MakePair(config, torch.Generator().manual_seed(9))
@@ -444,8 +425,7 @@ def test_make_pair_transform_usable_as_a_dataset_transform_argument() -> None:
         def __len__(self) -> int:
             return len(self._frames)
 
-    frame = torch.zeros((1, 144, 160), dtype=torch.uint8)
-    frame[0, 70:74, 78:82] = 255
+    frame = _marker_block_frame()
     dataset = _FrameDataset(
         [frame], transform=MakePair(AugmentationConfig(), torch.Generator().manual_seed(11))
     )
