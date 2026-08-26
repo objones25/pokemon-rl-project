@@ -1,4 +1,5 @@
 import io
+import os
 
 import datasets
 import numpy as np
@@ -44,6 +45,23 @@ def test_build_local_resize_cache_writes_resized_shard_for_each_listed_path(tmp_
         assert reloaded.num_rows == 1
         assert reloaded[0]["image"].size == (160, 144)  # PIL size is (width, height)
         assert reloaded[0]["image"].mode == "L"
+
+
+def test_build_local_resize_cache_leaves_no_temp_files_behind(tmp_path) -> None:
+    """Every intermediate -- the raw bytes, the in-progress output, and the
+    parquet builder's Arrow copy -- is scratch on the same volume as the cache
+    and must not survive the shard that produced it. Left alone, the Arrow
+    copies alone would be roughly the size of the entire source dataset."""
+    shard_path = "shards/vidA/00000.parquet"
+
+    build_local_resize_cache(
+        list_shard_paths=lambda: [shard_path],
+        download_shard=lambda path: _native_res_shard_bytes("vidA"),
+        local_cache_dir=tmp_path,
+    )
+
+    survivors = sorted(p.relative_to(tmp_path).as_posix() for p in tmp_path.rglob("*"))
+    assert survivors == ["shards", "shards/vidA", shard_path]
 
 
 def test_build_local_resize_cache_skips_shards_whose_output_already_exists(tmp_path) -> None:
@@ -117,7 +135,69 @@ def test_ensure_local_cache_is_a_noop_when_local_cache_dir_is_unset(monkeypatch)
     assert calls == []
 
 
-def test_ensure_local_cache_wires_build_local_resize_cache_when_set(monkeypatch, tmp_path) -> None:
+@pytest.fixture
+def isolated_hf_hub_cache(monkeypatch):
+    """ensure_local_cache redirects huggingface_hub's download cache onto the
+    local_cache_dir volume, which means mutating process-global state (the
+    HF_HUB_CACHE env var and huggingface_hub.constants.HF_HUB_CACHE, since the
+    library only reads the env var at import time). Register both with
+    monkeypatch so a test's tmp_path doesn't leak into the rest of the
+    session -- notably the @slow tests that hit the real Hub."""
+    from huggingface_hub import constants as hf_constants
+
+    monkeypatch.delenv("HF_HUB_CACHE", raising=False)
+    monkeypatch.setattr(hf_constants, "HF_HUB_CACHE", hf_constants.HF_HUB_CACHE)
+    return hf_constants
+
+
+def test_ensure_local_cache_redirects_hf_hub_download_cache_onto_the_volume(
+    monkeypatch, tmp_path, isolated_hf_hub_cache
+) -> None:
+    """Without this, hf_hub_download persists every downloaded shard under
+    ~/.cache/huggingface/hub -- the container's small overlay disk on a RunPod
+    pod, not the /workspace volume -- and a full build ENOSPCs. Asserts the
+    CONSTANT, not just the env var: huggingface_hub snapshots HF_HUB_CACHE at
+    import time, so setting the env var alone would be a silent no-op here."""
+    monkeypatch.setattr(
+        "contrastive_pretrain.resize_cache.build_local_resize_cache",
+        lambda **kwargs: None,
+    )
+    monkeypatch.setattr("contrastive_pretrain.resize_cache.HfApi", lambda: object())
+    monkeypatch.setattr(
+        "contrastive_pretrain.resize_cache.RealHfClient",
+        lambda api, repo_id, repo_type: object(),
+    )
+    cache_dir = tmp_path / "cache"
+
+    ensure_local_cache(TrainingConfig(local_cache_dir=str(cache_dir)))
+
+    assert isolated_hf_hub_cache.HF_HUB_CACHE == str(cache_dir / ".hf_hub_cache")
+    assert os.environ["HF_HUB_CACHE"] == str(cache_dir / ".hf_hub_cache")
+
+
+def test_ensure_local_cache_leaves_an_operator_set_hf_hub_cache_alone(
+    monkeypatch, tmp_path, isolated_hf_hub_cache
+) -> None:
+    monkeypatch.setattr(
+        "contrastive_pretrain.resize_cache.build_local_resize_cache",
+        lambda **kwargs: None,
+    )
+    monkeypatch.setattr("contrastive_pretrain.resize_cache.HfApi", lambda: object())
+    monkeypatch.setattr(
+        "contrastive_pretrain.resize_cache.RealHfClient",
+        lambda api, repo_id, repo_type: object(),
+    )
+    monkeypatch.setenv("HF_HUB_CACHE", "/operator/choice")
+
+    ensure_local_cache(TrainingConfig(local_cache_dir=str(tmp_path / "cache")))
+
+    assert os.environ["HF_HUB_CACHE"] == "/operator/choice"
+    assert isolated_hf_hub_cache.HF_HUB_CACHE == "/operator/choice"
+
+
+def test_ensure_local_cache_wires_build_local_resize_cache_when_set(
+    monkeypatch, tmp_path, isolated_hf_hub_cache
+) -> None:
     captured = {}
 
     def fake_build_local_resize_cache(*, list_shard_paths, download_shard, local_cache_dir):

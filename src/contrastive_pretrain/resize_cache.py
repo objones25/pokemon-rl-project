@@ -8,12 +8,14 @@ from __future__ import annotations
 
 import logging
 import os
+import shutil
 import time
 from collections.abc import Callable
 from pathlib import Path
 
 import datasets
 from huggingface_hub import HfApi
+from huggingface_hub import constants as hf_constants
 from PIL import Image
 
 from contrastive_pretrain.config import TrainingConfig
@@ -67,14 +69,37 @@ def build_local_resize_cache(
         output_path.parent.mkdir(parents=True, exist_ok=True)
         raw_tmp_path = output_path.parent / f"{output_path.name}.raw.tmp"
         output_tmp_path = output_path.parent / f"{output_path.name}.tmp"
+        arrow_tmp_dir = output_path.parent / f"{output_path.name}.arrow.tmp"
         try:
             raw_tmp_path.write_bytes(raw_bytes)
-            raw_dataset = datasets.Dataset.from_parquet(str(raw_tmp_path))
+            # Left to its defaults, from_parquet spills a full Arrow copy of
+            # every shard into ~/.cache/huggingface/datasets and never cleans
+            # it up -- on a RunPod pod that is the container's small overlay
+            # disk, not the /workspace volume this whole cache targets, so a
+            # full build (~130GB of raw shards) would ENOSPC there.
+            #
+            # keep_in_memory=True is necessary but NOT sufficient (measured):
+            # it drops the .map() cache file and detaches the returned dataset
+            # from disk, but the parquet *builder* still writes its
+            # parquet-train.arrow copy. cache_dir puts that copy on the volume,
+            # per shard, so the `finally` below can delete it -- keep_in_memory
+            # is what makes that deletion safe, since neither raw_dataset nor
+            # resized_dataset reads from it afterwards. A raw shard is ~175MB,
+            # comfortably in RAM on a training pod.
+            raw_dataset = datasets.Dataset.from_parquet(
+                str(raw_tmp_path), keep_in_memory=True, cache_dir=str(arrow_tmp_dir)
+            )
             resized_dataset = raw_dataset.map(_resize_row_for_cache)
             resized_dataset.to_parquet(str(output_tmp_path))
             os.replace(output_tmp_path, output_path)
         finally:
+            # Every intermediate, not just the raw bytes: a crash inside .map()
+            # or .to_parquet() would otherwise strand a partial <shard>.tmp.
+            # After a successful os.replace, output_tmp_path is already gone,
+            # which is exactly what missing_ok=True is for.
             raw_tmp_path.unlink(missing_ok=True)
+            output_tmp_path.unlink(missing_ok=True)
+            shutil.rmtree(arrow_tmp_dir, ignore_errors=True)
 
         elapsed = time.monotonic() - start
         completed += 1
@@ -98,9 +123,36 @@ def ensure_local_cache(config: TrainingConfig) -> None:
     config.local_cache_dir. Safe to call on every build_train_dataset/
     build_val_dataset invocation -- already-built shards are skipped, so
     a fully-populated cache makes this a handful of fast filesystem
-    existence checks, not a re-download."""
+    existence checks, not a re-download.
+
+    Side effect: when local_cache_dir IS set, this repoints
+    huggingface_hub's own download cache onto that same volume (see the
+    comment below) -- process-global state, deliberately, because the
+    shared RealHfClient offers no per-call cache_dir hook."""
     if not config.local_cache_dir:
         return
+
+    # RealHfClient.download_bytes goes through hf_hub_download, which also
+    # persists every downloaded file to ~/.cache/huggingface/hub and never
+    # cleans it up -- again the container's small overlay disk on a RunPod pod,
+    # not the /workspace volume. Point it at the volume instead. setdefault, so
+    # an operator who configured HF_HUB_CACHE themselves wins.
+    #
+    # The env var alone is NOT enough: huggingface_hub reads it exactly once,
+    # when huggingface_hub.constants is imported (verified empirically on
+    # huggingface_hub 1.28.0), which already happened at this module's import.
+    # hf_hub_download does re-read constants.HF_HUB_CACHE at call time when
+    # cache_dir is None, so writing the resolved value through to the constant
+    # is what actually takes effect; the env var is set too so subprocesses
+    # (DataLoader workers) inherit it. Redirecting rather than eliminating the
+    # duplicate copy is deliberate: dropping it entirely would mean threading a
+    # cache_dir through the shared hf_storage.client.RealHfClient, which serves
+    # other packages -- out of scope here. The practical problem is which disk
+    # fills up, and this fixes that.
+    os.environ.setdefault(
+        "HF_HUB_CACHE", str(Path(config.local_cache_dir) / ".hf_hub_cache")
+    )
+    hf_constants.HF_HUB_CACHE = os.environ["HF_HUB_CACHE"]
 
     api = HfApi()
     client = RealHfClient(api, config.dataset_repo_id, repo_type="dataset")
