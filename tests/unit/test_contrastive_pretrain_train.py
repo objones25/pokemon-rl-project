@@ -598,6 +598,8 @@ def test_data_wait_metric_excludes_epoch_boundary_overhead(tmp_path, monkeypatch
     real_info = contrastive_pretrain.train.logger.info
 
     def _spy_info(event, *args, **kwargs):
+        # rule 4 exception: this filters which of the spy's captured calls to
+        # keep, not test-case branching.
         if event == "data_wait":
             logged_data_wait.append(kwargs.get("extra", {}))
         return real_info(event, *args, **kwargs)

@@ -54,14 +54,16 @@ def test_build_local_resize_cache_writes_resized_shard_for_each_listed_path(tmp_
     ]  # (1, H, W) uint8
     expected_pixels = expected.squeeze(0).numpy()
 
-    for shard_path in shard_bytes:
-        output_path = tmp_path / shard_path
+    def _assert_resized_shard_matches(output_path, expected_pixels) -> None:
         assert output_path.exists()
         reloaded = datasets.Dataset.from_parquet(str(output_path))
         assert reloaded.num_rows == 1
         assert reloaded[0]["image"].size == (160, 144)  # PIL size is (width, height)
         assert reloaded[0]["image"].mode == "L"
         assert np.array_equal(np.array(reloaded[0]["image"]), expected_pixels)
+
+    _assert_resized_shard_matches(tmp_path / "shards/vidA/00000.parquet", expected_pixels)
+    _assert_resized_shard_matches(tmp_path / "shards/vidB/00000.parquet", expected_pixels)
 
 
 def test_build_local_resize_cache_leaves_no_temp_files_behind(tmp_path) -> None:
@@ -109,6 +111,8 @@ def test_build_local_resize_cache_leaves_no_partial_file_on_failure_and_resumes_
     failing_shard = "shards/vidB/00000.parquet"
 
     def failing_download(path: str) -> bytes:
+        # rule 4 exception: this is the fake's simulated per-call behavior
+        # (one shard fails, the other doesn't), not case-selection.
         if path == failing_shard:
             raise RuntimeError("simulated network failure")
         return _native_res_shard_bytes("vidA")
@@ -282,6 +286,8 @@ def test_ensure_local_cache_retries_a_failing_list_repo_files(
     class _FlakyApi:
         def list_repo_files(self, repo_id, repo_type):
             attempts.append(repo_id)
+            # rule 4 exception: simulates two transient failures then success
+            # across repeated calls, not independent cases.
             if len(attempts) < 3:
                 raise RuntimeError("transient hub failure")
             return ["shards/vidA/00000.parquet", "README.md"]

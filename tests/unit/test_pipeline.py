@@ -173,12 +173,18 @@ def test_run_pipeline_processes_next_video_after_one_fails() -> None:
     bad_source = _source("bad_video")
     good_source = _source("good_video")
 
-    def frame_source(video_source: VideoSource, resume_seconds: float = 0.0):
-        if video_source.video_id == "bad_video":
-            raise RuntimeError("network blip")
-            yield  # pragma: no cover - unreachable, makes this a generator
+    def _raising_source(video_source: VideoSource, resume_seconds: float = 0.0):
+        raise RuntimeError("network blip")
+        yield  # pragma: no cover - unreachable, makes this a generator
+
+    def _yielding_source(video_source: VideoSource, resume_seconds: float = 0.0):
         for _ in range(3):
             yield _frame()
+
+    frame_generators = {"bad_video": _raising_source, "good_video": _yielding_source}
+
+    def frame_source(video_source: VideoSource, resume_seconds: float = 0.0):
+        return frame_generators[video_source.video_id](video_source, resume_seconds)
 
     client = FakeHfClient()
     uploader = HfUploader(client, repo_id="me/pokemon-frames")
@@ -210,6 +216,9 @@ def test_run_pipeline_resumes_from_last_checkpoint_after_failure() -> None:
         # checkpoint interval, so a checkpoint fires mid-stream.
         for _ in range(250):
             yield rng.integers(0, 255, size=(3, 4), dtype=np.uint8)
+        # rule 4 exception: sequences this one video's two retry attempts
+        # (fail on the first call, succeed on the second), not independent
+        # input cases -- see pytest-expert skill's rules.md.
         if len(call_resume_seconds) == 1:
             raise RuntimeError("network blip after first pass")
 
@@ -253,8 +262,9 @@ def test_run_pipeline_processes_multiple_videos_concurrently() -> None:
 
     assert result == PipelineResult(completed=5, failed=0)
     manifest = uploader.load_manifest()
-    for source in sources:
-        # Every video's completion must actually land in the manifest --
-        # this is the thing a manifest-save race between threads would lose.
-        assert manifest.is_complete(source.video_id) is True
-        assert any(path.startswith(f"shards/{source.video_id}/") for path in client.files)
+    # Every video's completion must actually land in the manifest -- this is
+    # the thing a manifest-save race between threads would lose.
+    assert all(manifest.is_complete(s.video_id) for s in sources)
+    assert all(
+        any(path.startswith(f"shards/{s.video_id}/") for path in client.files) for s in sources
+    )

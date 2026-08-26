@@ -13,6 +13,8 @@ def test_retry_with_backoff_succeeds_after_transient_failures() -> None:
 
     def flaky() -> None:
         attempts["count"] += 1
+        # rule 4 exception: models "still failing" state across repeated calls
+        # within one retry_with_backoff() run, not an input case.
         if attempts["count"] < 3:
             raise RuntimeError("transient")
 
@@ -39,6 +41,8 @@ def test_retry_with_backoff_uses_injected_backoff_function() -> None:
 
     def flaky() -> None:
         attempts["count"] += 1
+        # rule 4 exception: models "still failing" state across repeated calls
+        # within one retry_with_backoff() run, not an input case.
         if attempts["count"] < 3:
             raise RuntimeError("transient")
 
