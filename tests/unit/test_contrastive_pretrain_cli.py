@@ -29,6 +29,24 @@ def test_preview_command_writes_contact_sheet(tmp_path: Path) -> None:
     assert saved.shape == (144 * 2, 480)
 
 
+def test_preview_command_with_limit_one_selects_a_single_frame(tmp_path: Path) -> None:
+    frames_dir = tmp_path / "frames"
+    frames_dir.mkdir()
+    for i in range(5):
+        frame = np.full((144, 160), 50 + i, dtype=np.uint8)
+        Image.fromarray(frame).save(frames_dir / f"frame_{i}.png")
+
+    out_path = tmp_path / "preview.png"
+    runner = CliRunner()
+    result = runner.invoke(
+        main, ["preview", "--frames-dir", str(frames_dir), "--out", str(out_path), "--limit", "1"]
+    )
+
+    assert result.exit_code == 0, result.output
+    saved = np.array(Image.open(out_path))
+    assert saved.shape == (144, 480)  # one row, one (original|view_a|view_b) triple wide
+
+
 def test_preview_command_errors_on_empty_directory(tmp_path: Path) -> None:
     frames_dir = tmp_path / "frames"
     frames_dir.mkdir()
@@ -106,7 +124,7 @@ def test_train_command_builds_deps_from_config_and_calls_run_training(tmp_path, 
     captured = {}
 
     monkeypatch.setattr("contrastive_pretrain.cli.run_training", lambda deps: captured.update(deps=deps))
-    monkeypatch.setattr("contrastive_pretrain.cli.RealHfClient", lambda *a, **k: object())
+    monkeypatch.setattr("contrastive_pretrain.cli.RealHfClient", lambda *_a, **_k: "the-frozen-encoder-client")
     monkeypatch.setattr("contrastive_pretrain.cli.HfApi", lambda: _FakeHfApi())
     monkeypatch.setattr("contrastive_pretrain.cli.get_token", lambda: "fake-token")
     monkeypatch.setenv("WANDB_API_KEY", "fake-key")
@@ -117,6 +135,7 @@ def test_train_command_builds_deps_from_config_and_calls_run_training(tmp_path, 
 
     assert result.exit_code == 0, result.output
     assert captured["deps"].config.batch_size == 8
+    assert captured["deps"].frozen_encoder_client == "the-frozen-encoder-client"
 
 
 def test_train_command_fails_fast_with_no_hf_credentials(tmp_path, monkeypatch) -> None:
@@ -177,13 +196,13 @@ def test_export_frozen_encoder_command_success_path(tmp_path, monkeypatch) -> No
 
     monkeypatch.setattr(
         "contrastive_pretrain.cli.build_val_dataset",
-        lambda config: [
+        lambda _config: [
             {"original": torch.randint(0, 256, (1, 144, 160), dtype=torch.uint8)}
             for _ in range(2)
         ],
     )
     monkeypatch.setattr("contrastive_pretrain.cli.HfApi", lambda: _FakeHfApi())
-    monkeypatch.setattr("contrastive_pretrain.cli.RealHfClient", lambda *a, **k: "the-client")
+    monkeypatch.setattr("contrastive_pretrain.cli.RealHfClient", lambda *_a, **_k: "the-client")
 
     def _fake_push(client, pushed_encoder, latent_mean, latent_std):
         captured["client"] = client
