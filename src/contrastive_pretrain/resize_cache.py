@@ -158,11 +158,25 @@ def ensure_local_cache(config: TrainingConfig) -> None:
     client = RealHfClient(api, config.dataset_repo_id, repo_type="dataset")
 
     def _list_shard_paths() -> list[str]:
-        return [
-            p
-            for p in api.list_repo_files(config.dataset_repo_id, repo_type="dataset")
-            if p.startswith("shards/")
-        ]
+        # Retried on the same terms as _download_shard below: this runs on
+        # every build_train_dataset/build_val_dataset call, including when the
+        # cache is fully built (build_local_resize_cache always lists to know
+        # what to iterate), so an un-retried transient Hub hiccup or rate limit
+        # here would kill the whole training start before a single batch.
+        def _fetch() -> list[str]:
+            return [
+                p
+                for p in api.list_repo_files(config.dataset_repo_id, repo_type="dataset")
+                if p.startswith("shards/")
+            ]
+
+        return retry_with_backoff(
+            _fetch,
+            max_retries=5,
+            base_delay=2.0,
+            sleep_func=time.sleep,
+            backoff_seconds=rate_limit_aware_backoff(base_delay=2.0, rate_limit_delay=3600.0),
+        )
 
     def _download_shard(path: str) -> bytes:
         def _fetch() -> bytes:

@@ -6,6 +6,7 @@ import numpy as np
 import pytest
 from PIL import Image
 
+import contrastive_pretrain.resize_cache
 from contrastive_pretrain.config import TrainingConfig
 from contrastive_pretrain.resize_cache import build_local_resize_cache, ensure_local_cache
 
@@ -193,6 +194,43 @@ def test_ensure_local_cache_leaves_an_operator_set_hf_hub_cache_alone(
 
     assert os.environ["HF_HUB_CACHE"] == "/operator/choice"
     assert isolated_hf_hub_cache.HF_HUB_CACHE == "/operator/choice"
+
+
+def test_ensure_local_cache_retries_a_failing_list_repo_files(
+    monkeypatch, tmp_path, isolated_hf_hub_cache
+) -> None:
+    """list_repo_files runs on every build_train_dataset/build_val_dataset
+    call, cache fully built or not, so an un-retried transient Hub failure
+    here kills the training start before a single batch."""
+    captured = {}
+
+    monkeypatch.setattr(
+        "contrastive_pretrain.resize_cache.build_local_resize_cache",
+        lambda **kwargs: captured.update(kwargs),
+    )
+    monkeypatch.setattr(
+        "contrastive_pretrain.resize_cache.RealHfClient",
+        lambda api, repo_id, repo_type: object(),
+    )
+    monkeypatch.setattr(
+        contrastive_pretrain.resize_cache.time, "sleep", lambda seconds: None
+    )
+
+    attempts = []
+
+    class _FlakyApi:
+        def list_repo_files(self, repo_id, repo_type):
+            attempts.append(repo_id)
+            if len(attempts) < 3:
+                raise RuntimeError("transient hub failure")
+            return ["shards/vidA/00000.parquet", "README.md"]
+
+    monkeypatch.setattr("contrastive_pretrain.resize_cache.HfApi", _FlakyApi)
+
+    ensure_local_cache(TrainingConfig(local_cache_dir=str(tmp_path / "cache")))
+
+    assert captured["list_shard_paths"]() == ["shards/vidA/00000.parquet"]
+    assert len(attempts) == 3  # two transient failures, retried, then success
 
 
 def test_ensure_local_cache_wires_build_local_resize_cache_when_set(
