@@ -13,9 +13,13 @@ from collections.abc import Callable
 from pathlib import Path
 
 import datasets
+from huggingface_hub import HfApi
 from PIL import Image
 
+from contrastive_pretrain.config import TrainingConfig
 from contrastive_pretrain.dataset import _resize_to_canonical
+from hf_storage.client import RealHfClient
+from hf_storage.retry import rate_limit_aware_backoff, retry_with_backoff
 
 logger = logging.getLogger(__name__)
 
@@ -83,4 +87,47 @@ def build_local_resize_cache(
     logger.info(
         "resize_cache_complete",
         extra={"shard_count": completed, "skipped_count": skipped, "total_rows": total_rows},
+    )
+
+
+def ensure_local_cache(config: TrainingConfig) -> None:
+    """No-op if config.local_cache_dir is unset. Otherwise wires
+    build_local_resize_cache to the real Hub (HfApi.list_repo_files +
+    RealHfClient.download_bytes, retried with
+    hf_storage.retry.rate_limit_aware_backoff) and runs it against
+    config.local_cache_dir. Safe to call on every build_train_dataset/
+    build_val_dataset invocation -- already-built shards are skipped, so
+    a fully-populated cache makes this a handful of fast filesystem
+    existence checks, not a re-download."""
+    if not config.local_cache_dir:
+        return
+
+    api = HfApi()
+    client = RealHfClient(api, config.dataset_repo_id, repo_type="dataset")
+
+    def _list_shard_paths() -> list[str]:
+        return [
+            p
+            for p in api.list_repo_files(config.dataset_repo_id, repo_type="dataset")
+            if p.startswith("shards/")
+        ]
+
+    def _download_shard(path: str) -> bytes:
+        def _fetch() -> bytes:
+            data = client.download_bytes(path)
+            assert data is not None, f"shard listed but missing on Hub: {path}"
+            return data
+
+        return retry_with_backoff(
+            _fetch,
+            max_retries=5,
+            base_delay=2.0,
+            sleep_func=time.sleep,
+            backoff_seconds=rate_limit_aware_backoff(base_delay=2.0, rate_limit_delay=3600.0),
+        )
+
+    build_local_resize_cache(
+        list_shard_paths=_list_shard_paths,
+        download_shard=_download_shard,
+        local_cache_dir=Path(config.local_cache_dir),
     )

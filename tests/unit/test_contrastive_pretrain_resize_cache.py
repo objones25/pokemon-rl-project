@@ -5,7 +5,8 @@ import numpy as np
 import pytest
 from PIL import Image
 
-from contrastive_pretrain.resize_cache import build_local_resize_cache
+from contrastive_pretrain.config import TrainingConfig
+from contrastive_pretrain.resize_cache import build_local_resize_cache, ensure_local_cache
 
 
 def _native_res_shard_bytes(video_id: str) -> bytes:
@@ -101,3 +102,55 @@ def test_build_local_resize_cache_leaves_no_partial_file_on_failure_and_resumes_
 
     assert download_calls == [failing_shard]  # ok_shard skipped, not re-downloaded
     assert (tmp_path / failing_shard).exists()
+
+
+def test_ensure_local_cache_is_a_noop_when_local_cache_dir_is_unset(monkeypatch) -> None:
+    calls = []
+    monkeypatch.setattr(
+        "contrastive_pretrain.resize_cache.build_local_resize_cache",
+        lambda **kwargs: calls.append(kwargs),
+    )
+    config = TrainingConfig(local_cache_dir=None)
+
+    ensure_local_cache(config)
+
+    assert calls == []
+
+
+def test_ensure_local_cache_wires_build_local_resize_cache_when_set(monkeypatch, tmp_path) -> None:
+    captured = {}
+
+    def fake_build_local_resize_cache(*, list_shard_paths, download_shard, local_cache_dir):
+        captured["list_shard_paths"] = list_shard_paths
+        captured["download_shard"] = download_shard
+        captured["local_cache_dir"] = local_cache_dir
+
+    monkeypatch.setattr(
+        "contrastive_pretrain.resize_cache.build_local_resize_cache",
+        fake_build_local_resize_cache,
+    )
+
+    class _FakeApi:
+        def list_repo_files(self, repo_id, repo_type):
+            assert repo_id == "objones25/pokemon-frames"
+            assert repo_type == "dataset"
+            return ["shards/vidA/00000.parquet", "README.md", "shards/vidB/00000.parquet"]
+
+    monkeypatch.setattr("contrastive_pretrain.resize_cache.HfApi", _FakeApi)
+
+    class _FakeClient:
+        def __init__(self, api, repo_id, repo_type):
+            pass
+
+        def download_bytes(self, path):
+            return b"raw-bytes-for-" + path.encode()
+
+    monkeypatch.setattr("contrastive_pretrain.resize_cache.RealHfClient", _FakeClient)
+
+    config = TrainingConfig(local_cache_dir=str(tmp_path / "cache"))
+
+    ensure_local_cache(config)
+
+    assert captured["local_cache_dir"] == tmp_path / "cache"
+    assert captured["list_shard_paths"]() == ["shards/vidA/00000.parquet", "shards/vidB/00000.parquet"]
+    assert captured["download_shard"]("shards/vidA/00000.parquet") == b"raw-bytes-for-shards/vidA/00000.parquet"
