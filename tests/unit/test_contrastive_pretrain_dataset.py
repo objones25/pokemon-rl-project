@@ -1,14 +1,47 @@
+import datasets
 import numpy as np
+import pytest
 import torch
 from PIL import Image
 
 from contrastive_pretrain.augmentation import AugmentationConfig
+from contrastive_pretrain.config import TrainingConfig
 from contrastive_pretrain.dataset import (
-    _ResizeToCanonicalWithProgress,
+    _load_base_stream,
     _resize_to_canonical,
+    _ResizeToCanonicalWithProgress,
+    build_dataloader,
+    build_train_dataset,
+    build_val_dataset,
     row_seed,
     to_pair_transform,
 )
+
+_ROW_FEATURES = datasets.Features(
+    {
+        "image": datasets.Image(),
+        "video_id": datasets.Value("string"),
+        "timestamp_s": datasets.Value("float64"),
+        "game": datasets.Value("string"),
+    }
+)
+
+
+class _CountingResize:
+    """Stub for _ResizeToCanonicalWithProgress that records how many times
+    it was instantiated, letting a test assert whether build_train_dataset/
+    build_val_dataset added the resize map to the pipeline without needing
+    a working resize implementation. Tests using this must reset
+    `instantiation_count` to 0 (e.g. via monkeypatch.setattr) before
+    running, so counts don't leak across tests."""
+
+    instantiation_count = 0
+
+    def __init__(self) -> None:
+        type(self).instantiation_count += 1
+
+    def __call__(self, example: dict) -> dict:
+        return example
 
 
 def _grayscale_example(video_id: str = "abc123", timestamp_s: float = 5.0) -> dict:
@@ -114,11 +147,6 @@ def test_to_pair_transform_differs_across_rows() -> None:
     assert not torch.equal(result1["view_a"], result2["view_a"])
 
 
-import datasets
-
-from contrastive_pretrain.dataset import build_dataloader
-
-
 def _synthetic_iterable_dataset():
     base = datasets.Dataset.from_dict({"value": list(range(20))})
     return base.to_iterable_dataset(num_shards=4)
@@ -193,39 +221,30 @@ def test_build_dataloader_resumes_from_exact_position() -> None:
     assert actual_next_two_batches == expected_next_two_batches
 
 
-import pytest
-
-from contrastive_pretrain.config import TrainingConfig
-from contrastive_pretrain.dataset import _load_base_stream, build_train_dataset, build_val_dataset
-
-
 def _synthetic_frame_stream(video_ids: list[str]):
-    features = datasets.Features(
-        {
-            "image": datasets.Image(),
-            "video_id": datasets.Value("string"),
-            "timestamp_s": datasets.Value("float64"),
-            "game": datasets.Value("string"),
-        }
-    )
     rows = [
         _grayscale_example(video_id=vid, timestamp_s=float(i))
         for i, vid in enumerate(video_ids)
     ]
-    return datasets.Dataset.from_list(rows, features=features).to_iterable_dataset()
+    return datasets.Dataset.from_list(rows, features=_ROW_FEATURES).to_iterable_dataset()
 
 
-def test_build_train_dataset_excludes_val_videos_fast(monkeypatch) -> None:
+@pytest.fixture
+def patch_load_base_stream(monkeypatch):
+    def _apply(video_ids: list[str]):
+        stream = _synthetic_frame_stream(video_ids)
+        monkeypatch.setattr("contrastive_pretrain.dataset._load_base_stream", lambda config: stream)
+        return stream
+
+    return _apply
+
+
+def test_build_train_dataset_excludes_val_videos_fast(patch_load_base_stream) -> None:
     """Fast, network-free regression test for the train/val split filter
     itself -- the only prior coverage of this exact filter logic was
     @pytest.mark.slow and needs real Hub access, so a swapped in/not-in
     would previously ship undetected by the fast suite."""
-    monkeypatch.setattr(
-        "contrastive_pretrain.dataset._load_base_stream",
-        lambda config: _synthetic_frame_stream(
-            ["train_a", "val_a", "val_b", "train_b"]
-        ),
-    )
+    patch_load_base_stream(["train_a", "val_a", "val_b", "train_b"])
     config = TrainingConfig(val_video_ids=("val_a", "val_b"))
 
     ds = build_train_dataset(config)
@@ -233,13 +252,8 @@ def test_build_train_dataset_excludes_val_videos_fast(monkeypatch) -> None:
     assert [row["video_id"] for row in ds] == ["train_a", "train_b"]
 
 
-def test_build_val_dataset_only_yields_held_out_videos_fast(monkeypatch) -> None:
-    monkeypatch.setattr(
-        "contrastive_pretrain.dataset._load_base_stream",
-        lambda config: _synthetic_frame_stream(
-            ["train_a", "val_a", "val_b", "train_b"]
-        ),
-    )
+def test_build_val_dataset_only_yields_held_out_videos_fast(patch_load_base_stream) -> None:
+    patch_load_base_stream(["train_a", "val_a", "val_b", "train_b"])
     config = TrainingConfig(val_video_ids=("val_a", "val_b"))
 
     ds = build_val_dataset(config)
@@ -260,14 +274,6 @@ def test_build_train_dataset_resizes_native_resolution_frames_before_shuffling(
     resize -> shuffle -> to_pair_transform) still produces correctly-shaped
     views when fed an oversized frame -- i.e. the resize-before-shuffle
     reordering didn't break the pipeline."""
-    features = datasets.Features(
-        {
-            "image": datasets.Image(),
-            "video_id": datasets.Value("string"),
-            "timestamp_s": datasets.Value("float64"),
-            "game": datasets.Value("string"),
-        }
-    )
 
     def _large_frame_stream(config):
         pixels = np.random.default_rng(0).integers(0, 256, (2160, 2400), dtype=np.uint8)
@@ -279,7 +285,7 @@ def test_build_train_dataset_resizes_native_resolution_frames_before_shuffling(
                 "game": "red",
             }
         ]
-        return datasets.Dataset.from_list(rows, features=features).to_iterable_dataset()
+        return datasets.Dataset.from_list(rows, features=_ROW_FEATURES).to_iterable_dataset()
 
     monkeypatch.setattr(
         "contrastive_pretrain.dataset._load_base_stream", _large_frame_stream
@@ -354,49 +360,31 @@ def test_build_train_dataset_calls_ensure_local_cache_before_loading(monkeypatch
     assert call_order == ["ensure_local_cache", "load_base_stream"]
 
 
-def test_build_train_dataset_skips_resize_map_when_local_cache_dir_is_set(monkeypatch, tmp_path) -> None:
+def test_build_train_dataset_skips_resize_map_when_local_cache_dir_is_set(
+    monkeypatch, tmp_path, patch_load_base_stream
+) -> None:
     monkeypatch.setattr("contrastive_pretrain.resize_cache.ensure_local_cache", lambda config: None)
-    resize_instantiations: list[int] = []
-
-    class _CountingResize:
-        def __init__(self) -> None:
-            resize_instantiations.append(1)
-
-        def __call__(self, example):
-            return example
-
+    monkeypatch.setattr(_CountingResize, "instantiation_count", 0)
     monkeypatch.setattr("contrastive_pretrain.dataset._ResizeToCanonicalWithProgress", _CountingResize)
-    monkeypatch.setattr(
-        "contrastive_pretrain.dataset._load_base_stream",
-        lambda config: _synthetic_frame_stream(["train_a"]),
-    )
+    patch_load_base_stream(["train_a"])
     config = TrainingConfig(val_video_ids=("val_a",), local_cache_dir=str(tmp_path))
 
     list(build_train_dataset(config))
 
-    assert resize_instantiations == []
+    assert _CountingResize.instantiation_count == 0
 
 
-def test_build_train_dataset_still_uses_resize_map_when_local_cache_dir_is_unset(monkeypatch) -> None:
-    resize_instantiations: list[int] = []
-
-    class _CountingResize:
-        def __init__(self) -> None:
-            resize_instantiations.append(1)
-
-        def __call__(self, example):
-            return example
-
+def test_build_train_dataset_still_uses_resize_map_when_local_cache_dir_is_unset(
+    monkeypatch, patch_load_base_stream
+) -> None:
+    monkeypatch.setattr(_CountingResize, "instantiation_count", 0)
     monkeypatch.setattr("contrastive_pretrain.dataset._ResizeToCanonicalWithProgress", _CountingResize)
-    monkeypatch.setattr(
-        "contrastive_pretrain.dataset._load_base_stream",
-        lambda config: _synthetic_frame_stream(["train_a"]),
-    )
+    patch_load_base_stream(["train_a"])
     config = TrainingConfig(val_video_ids=("val_a",))
 
     list(build_train_dataset(config))
 
-    assert resize_instantiations == [1]
+    assert _CountingResize.instantiation_count == 1
 
 
 def test_build_val_dataset_calls_ensure_local_cache_before_loading(monkeypatch) -> None:
@@ -418,27 +406,31 @@ def test_build_val_dataset_calls_ensure_local_cache_before_loading(monkeypatch) 
     assert call_order == ["ensure_local_cache", "load_base_stream"]
 
 
-def test_build_val_dataset_skips_resize_map_when_local_cache_dir_is_set(monkeypatch, tmp_path) -> None:
+def test_build_val_dataset_skips_resize_map_when_local_cache_dir_is_set(
+    monkeypatch, tmp_path, patch_load_base_stream
+) -> None:
     monkeypatch.setattr("contrastive_pretrain.resize_cache.ensure_local_cache", lambda config: None)
-    resize_instantiations: list[int] = []
-
-    class _CountingResize:
-        def __init__(self) -> None:
-            resize_instantiations.append(1)
-
-        def __call__(self, example):
-            return example
-
+    monkeypatch.setattr(_CountingResize, "instantiation_count", 0)
     monkeypatch.setattr("contrastive_pretrain.dataset._ResizeToCanonicalWithProgress", _CountingResize)
-    monkeypatch.setattr(
-        "contrastive_pretrain.dataset._load_base_stream",
-        lambda config: _synthetic_frame_stream(["val_a"]),
-    )
+    patch_load_base_stream(["val_a"])
     config = TrainingConfig(val_video_ids=("val_a",), local_cache_dir=str(tmp_path))
 
     list(build_val_dataset(config))
 
-    assert resize_instantiations == []
+    assert _CountingResize.instantiation_count == 0
+
+
+def test_build_val_dataset_still_uses_resize_map_when_local_cache_dir_is_unset(
+    monkeypatch, patch_load_base_stream
+) -> None:
+    monkeypatch.setattr(_CountingResize, "instantiation_count", 0)
+    monkeypatch.setattr("contrastive_pretrain.dataset._ResizeToCanonicalWithProgress", _CountingResize)
+    patch_load_base_stream(["val_a"])
+    config = TrainingConfig(val_video_ids=("val_a",))
+
+    list(build_val_dataset(config))
+
+    assert _CountingResize.instantiation_count == 1
 
 
 @pytest.mark.slow
