@@ -145,26 +145,23 @@ def _distinct_frame_count(frames) -> int:
     """Module-level, not the test body: number of distinct frames in a
     (N, 1, 144, 160) batch, by hashing each env's raw bytes.
 
-    This is the only thing that can catch worker-to-slot index threading
-    going wrong: worker_main writes into buffer.array[index] while the
-    parent reads self._frame_slot, the shared-memory slices are deliberately
-    unlocked because they're disjoint, and no unit test can reach this since
-    worker_main constructs a real PyBoyEmulator directly. If every worker
-    wrote into the same slot -- or the parent read one slot for every env --
-    every env would silently receive the same screen and this returns 1,
-    even though four independent action sequences ran."""
+    On its own this is NOT sufficient to catch total collapse (every worker
+    writing into the same slot): the unwritten slots keep shared memory's
+    zero-initialised bytes, which are identical to each other but distinct
+    from the one real frame, so a 4-env total collapse still reports 2. It
+    must be paired with `_zero_frame_count` -- see the test below."""
     return len({frames[i, 0].tobytes() for i in range(frames.shape[0])})
 
 
-def _assert_each_env_frame_matches_its_shared_memory_slot(frames, buffer_array) -> None:
-    """Module-level, not the test body: the parent's VecStep.frames[i] must
-    be byte-identical to buffer.array[i] for every env -- the parent's view
-    and the shared block must agree on which env owns which slot."""
-    for i in range(frames.shape[0]):
-        assert (frames[i, 0] == buffer_array[i]).all(), (
-            f"env {i}'s VecStep frame does not match shared-memory slot {i}; "
-            "the parent's view and the shared block disagree on slot ownership"
-        )
+def _zero_frame_count(frames) -> int:
+    """Module-level, not the test body: number of frames in the batch that
+    are entirely zero, i.e. a shared-memory slot no worker ever wrote into.
+    Paired with `_distinct_frame_count` to catch total collapse: if every
+    worker wrote slot 0, slots 1..3 stay all-zero, `_distinct_frame_count`
+    alone reports 2 (one real frame + the shared zero value) and a bare
+    `> 1` check would pass despite the catastrophe. Requiring
+    `_zero_frame_count == 0` closes that gap."""
+    return sum(1 for i in range(frames.shape[0]) if not frames[i, 0].any())
 
 
 @_needs_rom
@@ -175,13 +172,22 @@ def test_a_random_agent_drives_four_real_envs_end_to_end(tmp_path) -> None:
     random policy, with no PPO anywhere. Four envs rather than 64 so the test
     is minutes, not hours; the vectorization logic is identical.
 
-    Also covers worker-to-slot index threading (see
-    _distinct_frame_count): the random policy already sends each env an
-    independent action every step, so after enough steps the four envs'
-    game states -- and therefore their frames -- must have diverged. A
-    previous review established this is the *only* place that divergence
-    can be observed, since worker_main builds a real emulator directly and
-    is invisible to unit tests.
+    Also covers *total* worker-to-slot collapse (every worker writing into
+    the same shared-memory slot, or a slot nobody ever wrote into): the
+    random policy already sends each env an independent action every step,
+    so after enough steps the four envs' frames must be four distinct,
+    non-zero values (see _distinct_frame_count / _zero_frame_count).
+
+    This does NOT cover a pure index *swap* between two envs (e.g. env 0's
+    worker writes into slot 1 and vice versa): both slots would still hold
+    four distinct, non-zero real frames, so nothing at this layer can see a
+    swap -- a review caught an earlier version of this test overclaiming
+    that coverage. The direct worker-to-slot binding is covered at the unit
+    level instead, in
+    tests/unit/test_pokemon_env_subprocess_backend.py::test_handle_command_writes_only_its_own_slot,
+    where an injected FakeEmulator makes handle_command (worker_main's pure
+    dispatch core) callable with a frame of known content without spawning
+    a process.
 
     Also writes a contact sheet so a human can look at what the agents saw."""
     import numpy as np
@@ -199,7 +205,6 @@ def test_a_random_agent_drives_four_real_envs_end_to_end(tmp_path) -> None:
         metrics = rollout_metrics(step, vec_env.last_components, vec_env.clip_fire_rate, 0)
         sheet = contact_sheet(step.frames)
         np.save(tmp_path / "contact_sheet.npy", sheet)
-        buffer_snapshot = np.array(buffer.array)
     finally:
         vec_env.close()
         buffer.close()
@@ -208,5 +213,4 @@ def test_a_random_agent_drives_four_real_envs_end_to_end(tmp_path) -> None:
     assert (step.frames.shape, step.aux.shape) == ((4, 1, 144, 160), (4, 32))
     assert bool(((step.aux >= -1.0) & (step.aux <= 1.0)).all()) is True
     assert metrics["reward/mean"] >= 0.0
-    assert _distinct_frame_count(step.frames) > 1
-    _assert_each_env_frame_matches_its_shared_memory_slot(step.frames, buffer_snapshot)
+    assert (_distinct_frame_count(step.frames), _zero_frame_count(step.frames)) == (4, 0)
