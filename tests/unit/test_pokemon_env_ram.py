@@ -55,6 +55,69 @@ def test_event_flag_count_spans_2488_flags(fake_emulator) -> None:
     assert ram.event_flag_count(fake_emulator) == 2488
 
 
+def test_event_flag_boundaries_are_the_documented_addresses() -> None:
+    """The width test above proves the range is 311 bytes wide, but it derives
+    both endpoints from the constants under test -- a shift by the same
+    amount in both would still pass. This pins the literal addresses."""
+    assert (ram.EVENT_FLAGS_START, ram.EVENT_FLAGS_END) == (0xD747, 0xD87E)
+
+
+def test_party_size_reads_the_party_count_address(fake_emulator) -> None:
+    fake_emulator.memory[0xD163] = 4
+
+    assert ram.party_size(fake_emulator) == 4
+
+
+def test_party_levels_reads_every_slot_at_its_own_stride(fake_emulator) -> None:
+    """Distinct values per slot are the point -- identical values would pass
+    even if every slot read the same address."""
+    fake_emulator.memory[ram.PARTY_LEVEL_BASE + ram.PARTY_STRIDE * 0] = 10
+    fake_emulator.memory[ram.PARTY_LEVEL_BASE + ram.PARTY_STRIDE * 1] = 20
+    fake_emulator.memory[ram.PARTY_LEVEL_BASE + ram.PARTY_STRIDE * 2] = 30
+    fake_emulator.memory[ram.PARTY_LEVEL_BASE + ram.PARTY_STRIDE * 3] = 40
+    fake_emulator.memory[ram.PARTY_LEVEL_BASE + ram.PARTY_STRIDE * 4] = 50
+    fake_emulator.memory[ram.PARTY_LEVEL_BASE + ram.PARTY_STRIDE * 5] = 60
+
+    assert ram.party_levels(fake_emulator) == [10, 20, 30, 40, 50, 60]
+
+
+def test_opponent_levels_reads_every_slot_at_its_own_stride(fake_emulator) -> None:
+    fake_emulator.memory[ram.OPPONENT_LEVEL_BASE + ram.PARTY_STRIDE * 0] = 10
+    fake_emulator.memory[ram.OPPONENT_LEVEL_BASE + ram.PARTY_STRIDE * 1] = 20
+    fake_emulator.memory[ram.OPPONENT_LEVEL_BASE + ram.PARTY_STRIDE * 2] = 30
+    fake_emulator.memory[ram.OPPONENT_LEVEL_BASE + ram.PARTY_STRIDE * 3] = 40
+    fake_emulator.memory[ram.OPPONENT_LEVEL_BASE + ram.PARTY_STRIDE * 4] = 50
+    fake_emulator.memory[ram.OPPONENT_LEVEL_BASE + ram.PARTY_STRIDE * 5] = 60
+
+    assert ram.opponent_levels(fake_emulator) == [10, 20, 30, 40, 50, 60]
+
+
+def test_party_hp_returns_current_and_max_for_each_slot(fake_emulator) -> None:
+    """Both fields are uint16 big-endian, so the low byte lands at addr + 1."""
+    fake_emulator.memory[ram.PARTY_HP_BASE + 1] = 30
+    fake_emulator.memory[ram.PARTY_MAX_HP_BASE + 1] = 60
+    fake_emulator.memory[ram.PARTY_HP_BASE + ram.PARTY_STRIDE + 1] = 10
+    fake_emulator.memory[ram.PARTY_MAX_HP_BASE + ram.PARTY_STRIDE + 1] = 40
+
+    assert ram.party_hp(fake_emulator)[:2] == [(30, 60), (10, 40)]
+
+
+def test_in_battle_is_false_in_the_overworld(fake_emulator) -> None:
+    assert ram.in_battle(fake_emulator) is False
+
+
+def test_in_battle_is_true_when_the_battle_flag_is_set(fake_emulator) -> None:
+    fake_emulator.memory[0xD057] = 1
+
+    assert ram.in_battle(fake_emulator) is True
+
+
+def test_museum_ticket_set_reads_bit_zero_of_its_own_address(fake_emulator) -> None:
+    fake_emulator.memory[0xD754] = 0b0000_0001
+
+    assert ram.museum_ticket_set(fake_emulator) is True
+
+
 def test_read_money_decodes_binary_coded_decimal(fake_emulator) -> None:
     """Three bytes, two decimal digits each. Read as plain hex, 0x12 0x34 0x56
     becomes 1193046 instead of 123456."""
