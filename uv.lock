@@ -1382,7 +1382,6 @@ dependencies = [
     { name = "pyboy" },
     { name = "python-dotenv" },
     { name = "pyyaml" },
-    { name = "ruff" },
     { name = "safetensors" },
     { name = "torch" },
     { name = "torchdata" },
@@ -1395,6 +1394,7 @@ dependencies = [
 dev = [
     { name = "pytest" },
     { name = "pytest-cov" },
+    { name = "ruff" },
 ]
 
 [package.metadata]
@@ -1409,7 +1409,6 @@ requires-dist = [
     { name = "pyboy", specifier = ">=2.7.0" },
     { name = "python-dotenv", specifier = ">=1.2.3" },
     { name = "pyyaml", specifier = ">=6.0.3" },
-    { name = "ruff", specifier = ">=0.16.5" },
     { name = "safetensors", specifier = ">=0.8.0" },
     { name = "torch", specifier = ">=2.13.0" },
     { name = "torchdata", specifier = ">=0.11.0" },
@@ -1422,6 +1421,7 @@ requires-dist = [
 dev = [
     { name = "pytest", specifier = ">=9.1.1" },
     { name = "pytest-cov", specifier = ">=7.1.0" },
+    { name = "ruff", specifier = ">=0.16.5" },
 ]
 
 [[package]]

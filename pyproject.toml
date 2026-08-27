@@ -15,7 +15,6 @@ dependencies = [
     "pyboy>=2.7.0",
     "python-dotenv>=1.2.3",
     "pyyaml>=6.0.3",
-    "ruff>=0.16.5",
     "safetensors>=0.8.0",
     "torch>=2.13.0",
     "torchdata>=0.11.0",
@@ -104,4 +103,5 @@ exclude_also = [
 dev = [
     "pytest>=9.1.1",
     "pytest-cov>=7.1.0",
+    "ruff>=0.16.5",
 ]

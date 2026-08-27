@@ -61,12 +61,13 @@ def test_config_rejects_minibatch_envs_less_than_one() -> None:
         PPOConfig(frozen_encoder_revision="abc123", minibatch_envs=0)
 
 
-def test_config_rejects_gamma_not_strictly_between_zero_and_one() -> None:
-    with pytest.raises(ValueError, match="gamma=1.0 must lie in"):
-        PPOConfig(frozen_encoder_revision="abc123", gamma=1.0)
+@pytest.mark.parametrize("gamma", [0.0, 1.0])
+def test_config_rejects_gamma_not_strictly_between_zero_and_one(gamma: float) -> None:
+    with pytest.raises(ValueError, match="must lie in"):
+        PPOConfig(frozen_encoder_revision="abc123", gamma=gamma)
 
 
 def test_validate_against_n_envs_succeeds_when_divisible() -> None:
     config = PPOConfig(frozen_encoder_revision="abc123", minibatch_envs=8)
-    # Should not raise
-    config.validate_against_n_envs(64)
+
+    assert config.validate_against_n_envs(64) is None
