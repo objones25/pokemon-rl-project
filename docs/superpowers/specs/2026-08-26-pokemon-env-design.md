@@ -510,6 +510,37 @@ Per CLAUDE.md's gates: seeded, CPU-only, tiny synthetic fixtures by default;
 - **Telemetry consumers**: the attention-distance heatmap artifact from the
   sequence-model spec's Observability section.
 
+### Known gaps carried out of implementation
+
+Surfaced by the whole-branch review and deliberately not fixed in the env
+sub-project. Recorded here because the SDD workspace that held them is
+scratch, and these are real:
+
+- **The exploration heatmap is not yet the artifact this spec promises.**
+  `telemetry.exploration_heatmap` folds `x` and `y` mod 16, so most distinct
+  coordinates collide in the rendered image. Worse, there is no cheap runtime
+  path for coordinate keys to reach the parent at all: the only route today is
+  a full `STATE_DICT` round trip, which ships ~10.7 MB of emulator state to
+  extract ~80 KB of coordinates. Making this the "single most informative
+  artifact" it is described as above needs a dedicated coords-extraction
+  command in the worker protocol — new feature work, and it belongs with
+  whoever designs PPO's telemetry consumers.
+- **`rollout_metrics` emits 5 of the ~9 per-update scalars** listed under
+  Observability. The missing ones (new coordinates, badges, event flags,
+  episode lengths, steps/sec) need data the env does not currently surface to
+  the parent — same handoff as above.
+- **`EnvConfig.seed` and `EnvConfig.frozen_encoder_repo_id` are unused.** Both
+  exist for the PPO trainer, which does not exist yet. If PPO ends up not
+  needing them, delete them rather than leaving dead config.
+- **`ram.party_levels` / `ram.party_hp` read all six party slots regardless of
+  `party_size`,** so stale RAM in unused slots can inflate `level_score` and
+  aux slots 1–12. This matches the reference implementation, and
+  `max_historical` means it is paid at most once per run, but it is a genuine
+  source of a plausible-but-wrong number if reward tuning ever looks strange.
+- **`clip_fire_rate` counts reset observations in its denominator,** which
+  dilutes it slightly. Deliberate and documented in the tests; read the 0.1%
+  threshold above with that in mind.
+
 ## Open questions
 
 - Whether 64 envs is right for our per-step cost. PWhiddy's 64 is tuned for a
