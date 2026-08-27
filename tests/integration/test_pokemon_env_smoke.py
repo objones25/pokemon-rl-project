@@ -70,3 +70,21 @@ def test_screen_frame_returns_a_copy_not_a_live_view() -> None:
     emulator.close()
 
     assert (first == before).all()
+
+
+@_needs_rom
+def test_generated_init_state_leaves_the_player_in_the_overworld() -> None:
+    """The script's frame counts are guesses until this runs. If the agent is
+    still in a menu, every one of 64 envs starts every episode in that menu.
+    party_size 0 and a non-zero map id is the post-intro, pre-starter state."""
+    from pokemon_env import ram
+    from pokemon_env.init_state import INTRO_SCRIPT, generate_init_state
+
+    emulator = PyBoyEmulator(str(_ROM))
+    state = generate_init_state(emulator, INTRO_SCRIPT)
+    emulator.load_state(state)
+    map_id = emulator.read_memory(ram.MAP_ID_ADDR)
+    in_battle = ram.in_battle(emulator)
+    emulator.close()
+
+    assert (map_id != 0, in_battle) == (True, False)

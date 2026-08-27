@@ -1,0 +1,7 @@
+# Belt-and-suspenders: the root .gitignore already excludes artifacts/
+# entirely. This file makes the exclusion visible from inside the directory
+# itself and survives if the root entry is ever accidentally reverted.
+# init.state is a PyBoy memory dump derived from a ROM we don't redistribute
+# -- see src/pokemon_env/init_state.py.
+*
+!.gitignore

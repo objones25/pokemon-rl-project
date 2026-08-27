@@ -23,3 +23,7 @@ configs/templates/approved/_preview.png
 .DS_Store
 RUNPOD_SETUP.md
 wandb/
+
+# Generated emulator save states. ROM-derived, so never committed -- see
+# src/pokemon_env/init_state.py.
+artifacts/
