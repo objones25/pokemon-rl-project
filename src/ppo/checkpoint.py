@@ -21,7 +21,11 @@ from pathlib import Path
 import torch
 
 from checkpointing.io import load_checkpoint, prune_checkpoints, save_checkpoint
-from pokemon_env.checkpoint import build_env_checkpoint_state, restore_env_checkpoint
+from pokemon_env.checkpoint import (
+    ENV_CHECKPOINT_PATTERN,
+    build_env_checkpoint_state,
+    restore_env_checkpoint,
+)
 from ppo.config import PPOConfig
 from ppo.normalizer import ReturnScaler
 from sequence_model.checkpoint import (
@@ -36,7 +40,10 @@ from sequence_model.config import PolicyConfig
 logger = logging.getLogger(__name__)
 
 POLICY_PATTERN = "policy_update*.pt"
-ENV_PATTERN = "env_update*.pt"
+# Reuses pokemon_env.checkpoint's own constant rather than a second literal of
+# the same string, so a future rename there can't silently desync pruning and
+# resume from what that module actually writes.
+ENV_PATTERN = ENV_CHECKPOINT_PATTERN
 MANIFEST_PATTERN = "manifest_update*.json"
 
 

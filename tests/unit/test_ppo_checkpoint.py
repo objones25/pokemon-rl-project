@@ -11,7 +11,13 @@ from pathlib import Path
 import pytest
 import torch
 
-from ppo.checkpoint import MANIFEST_PATTERN, resume, write_checkpoint
+from ppo.checkpoint import (
+    ENV_PATTERN,
+    MANIFEST_PATTERN,
+    POLICY_PATTERN,
+    resume,
+    write_checkpoint,
+)
 from ppo.config import PPOConfig
 from ppo.normalizer import ReturnScaler
 from sequence_model.cache import RolloutCache
@@ -228,3 +234,29 @@ def test_resume_selects_update_eleven_over_nine_and_ten(tmp_path) -> None:
     result = resume(**harness.resume_kwargs())
 
     assert result.update == 11
+
+
+def test_write_checkpoint_prunes_all_three_globs_to_keep_last_n(tmp_path) -> None:
+    """Every other test in this file writes at most keep_last_n=3 updates, so
+    prune_checkpoints's candidates[:-keep_last_n] is always empty and unlink()
+    never runs -- a wrong pattern, a wrong keep_last_n argument, or a pruning
+    call dropped entirely would all pass the rest of this suite silently. On
+    the real 48-hour run the symptom is disk quietly filling until the volume
+    is full, with no error until something unrelated fails. Writes
+    keep_last_n + 1 = 3 checkpoints at keep_last_n=2 and checks exact
+    surviving update numbers -- not just a count -- across all three globs."""
+    harness = _checkpoint_harness(tmp_path)
+    pruning_config = dataclasses.replace(harness.config, keep_last_n=2)
+
+    for update in (1, 2, 3):
+        kwargs = harness.kwargs(update=update)
+        kwargs["config"] = pruning_config
+        write_checkpoint(**kwargs)
+
+    policy_survivors = {p.name for p in tmp_path.glob(POLICY_PATTERN)}
+    env_survivors = {p.name for p in tmp_path.glob(ENV_PATTERN)}
+    manifest_survivors = {p.name for p in tmp_path.glob(MANIFEST_PATTERN)}
+
+    assert policy_survivors == {"policy_update000002.pt", "policy_update000003.pt"}
+    assert env_survivors == {"env_update000002.pt", "env_update000003.pt"}
+    assert manifest_survivors == {"manifest_update000002.json", "manifest_update000003.json"}
