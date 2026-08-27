@@ -64,8 +64,15 @@ def write_checkpoint(
     git_commit: str,
 ) -> Path:
     directory.mkdir(parents=True, exist_ok=True)
-    policy_file = directory / f"policy_update{update}.pt"
-    env_file = directory / f"env_update{update}.pt"
+    # Zero-padded: checkpointing.io.find_latest_checkpoint/prune_checkpoints
+    # both sort by filename, and that module's own docstring states the
+    # precondition explicitly ("callers must zero-pad: step900 sorts after
+    # step1300 as a string"). Six digits covers 999,999 updates, far beyond
+    # any run this design contemplates. Unpadded, prune_checkpoints would
+    # delete the newest checkpoints and keep old ones past update 9 -- silent
+    # data loss on exactly the preemptible run this task exists to protect.
+    policy_file = directory / f"policy_update{update:06d}.pt"
+    env_file = directory / f"env_update{update:06d}.pt"
 
     save_checkpoint(
         policy_file,
@@ -90,7 +97,7 @@ def write_checkpoint(
         "frozen_encoder_revision": config.frozen_encoder_revision,
         "wandb_run_id": wandb_run_id,
     }
-    manifest_file = directory / f"manifest_update{update}.json"
+    manifest_file = directory / f"manifest_update{update:06d}.json"
     # Written LAST. Everything above may exist without this; nothing resumes
     # from a checkpoint this file does not name.
     manifest_file.write_text(json.dumps(manifest, indent=2))

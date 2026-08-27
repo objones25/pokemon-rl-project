@@ -137,7 +137,7 @@ def test_the_manifest_names_both_files_and_their_sizes(tmp_path) -> None:
     harness = _checkpoint_harness(tmp_path)
 
     write_checkpoint(**harness.kwargs(update=3))
-    manifest = json.loads((tmp_path / "manifest_update3.json").read_text())
+    manifest = json.loads((tmp_path / "manifest_update000003.json").read_text())
 
     assert set(manifest) >= {"update", "global_step", "policy_file", "env_file", "sizes"}
 
@@ -155,7 +155,7 @@ def test_resume_skips_a_checkpoint_whose_manifest_was_never_written(tmp_path) ->
     harness = _checkpoint_harness(tmp_path)
     write_checkpoint(**harness.kwargs(update=1))
     write_checkpoint(**harness.kwargs(update=2))
-    (tmp_path / "manifest_update2.json").unlink()
+    (tmp_path / "manifest_update000002.json").unlink()
 
     result = resume(**harness.resume_kwargs())
 
@@ -166,7 +166,7 @@ def test_resume_skips_a_checkpoint_whose_env_file_is_truncated(tmp_path) -> None
     harness = _checkpoint_harness(tmp_path)
     write_checkpoint(**harness.kwargs(update=1))
     write_checkpoint(**harness.kwargs(update=2))
-    (tmp_path / "env_update2.pt").write_bytes(b"short")
+    (tmp_path / "env_update000002.pt").write_bytes(b"short")
 
     result = resume(**harness.resume_kwargs())
 
@@ -210,3 +210,21 @@ def test_resume_restores_the_rng_state(tmp_path) -> None:
     resume(**harness.resume_kwargs())
 
     assert torch.equal(torch.rand(3), expected)
+
+
+def test_resume_selects_update_eleven_over_nine_and_ten(tmp_path) -> None:
+    """checkpointing.io.find_latest_checkpoint/prune_checkpoints both sort by
+    filename and document that callers must zero-pad ("step900 sorts after
+    step1300 as a string"). Unpadded, "manifest_update10.json" sorts BEFORE
+    "manifest_update9.json" lexically -- resume would pick a stale checkpoint,
+    and prune_checkpoints (out of this module's control) would delete the
+    newest files and keep old ones. Pins the fix past the two-digit boundary
+    where the bug first appears."""
+    harness = _checkpoint_harness(tmp_path)
+    write_checkpoint(**harness.kwargs(update=9))
+    write_checkpoint(**harness.kwargs(update=10))
+    write_checkpoint(**harness.kwargs(update=11))
+
+    result = resume(**harness.resume_kwargs())
+
+    assert result.update == 11
