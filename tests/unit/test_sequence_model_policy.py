@@ -79,6 +79,47 @@ def test_forward_chunk_with_burn_in_matches_recorded_rollout_outputs(
     assert (stepped[:, 7:] - chunked.logits).abs().max().item() == pytest.approx(0.0, abs=1e-5)
 
 
+def test_a_weight_update_mid_cache_makes_the_rollout_diverge_from_forward_chunk(
+    tiny_config: PolicyConfig,
+) -> None:
+    """The test above drives the whole rollout under ONE set of weights, which
+    is not the production shape: PPO updates theta every n_steps and the ring
+    buffer is carried across that boundary, never recomputed. So the burn-in
+    region's K/V were built by theta_old-1 while forward_chunk recomputes them
+    under theta_old.
+
+    The consequence is that the rollout-recorded logits are NOT what
+    forward_chunk reproduces, so PPO's epoch-1 importance ratio is not 1.0
+    unless pi_old is recomputed at update start. This pins the behaviour so it
+    stays a documented property rather than a surprise ten hours into a paid
+    run -- see "The rollout path is still stale" in the design spec.
+
+    Thresholded at 1e-5, which sits four orders above the control's ~1e-9 and
+    an order below the smallest post-update divergence."""
+    control = _divergence_across_an_update(tiny_config, perturbation=0.0)
+    after_update = _divergence_across_an_update(tiny_config, perturbation=1e-3)
+
+    assert int((control > 1e-5).sum()) == 0
+    assert int((after_update > 1e-5).sum()) == _PROBE_GRAD
+
+
+def test_the_stale_cache_divergence_is_largest_at_the_oldest_gradient_token(
+    tiny_config: PolicyConfig,
+) -> None:
+    """The structural signature that identifies this as staleness rather than
+    numerical noise: token 0's window is entirely pre-update, and the stale
+    fraction shrinks as the window fills with post-update entries, so the
+    divergence peaks at the oldest gradient-carrying token.
+
+    The decay magnitude is asserted alongside the argmax because argmax alone
+    passes by luck on the no-update control, where the ordering is just
+    numerical noise."""
+    after_update = _divergence_across_an_update(tiny_config, perturbation=1e-3)
+
+    assert int(after_update.argmax()) == 0
+    assert after_update[0].item() > 2 * after_update[-1].item()
+
+
 def test_forward_chunk_returns_only_the_gradient_region(
     policy: RecurrentTransformerPolicy,
 ) -> None:
@@ -233,6 +274,66 @@ def test_step_output_is_not_an_inference_tensor(policy: RecurrentTransformerPoli
 
     assert out.logits.is_inference() is False
     assert out.value.is_inference() is False
+
+
+_PROBE_PREFIX = 7  # context_len - 1 for tiny_config, the production burn_in
+_PROBE_GRAD = 6
+
+
+def _divergence_across_an_update(
+    config: PolicyConfig, perturbation: float
+) -> torch.Tensor:
+    """Helper, not a test: reproduces the production rollout shape, where a PPO
+    update lands while the ring buffer still holds K/V written under the
+    previous weights.
+
+      1. roll _PROBE_PREFIX steps -- fills the burn-in region under theta_A
+      2. perturb every parameter by `perturbation` -- stands in for one update
+      3. roll _PROBE_GRAD steps against the now-stale cache, recording logits
+      4. forward_chunk over the whole sequence at theta_B
+
+    Returns per-token max |recorded - chunk| over the gradient region.
+    `perturbation=0.0` is the control: no update, so the two must agree."""
+    total = _PROBE_PREFIX + _PROBE_GRAD
+    torch.manual_seed(0)
+    policy = RecurrentTransformerPolicy(config, torch.zeros(16), torch.ones(16))
+    generator = torch.Generator().manual_seed(7)
+    latent = torch.randn(1, total, 16, generator=generator)
+    aux = torch.randn(1, total, 4, generator=generator)
+    action = torch.randint(0, 7, (1, total), generator=generator)
+    reward = torch.randn(1, total, generator=generator)
+    cache = policy.new_cache(n_envs=1, device=torch.device("cpu"))
+
+    _run_rollout(
+        policy,
+        latent[:, :_PROBE_PREFIX], aux[:, :_PROBE_PREFIX],
+        action[:, :_PROBE_PREFIX], reward[:, :_PROBE_PREFIX], cache,
+    )
+    _perturb(policy, generator, perturbation)
+    recorded = _run_rollout(
+        policy,
+        latent[:, _PROBE_PREFIX:], aux[:, _PROBE_PREFIX:],
+        action[:, _PROBE_PREFIX:], reward[:, _PROBE_PREFIX:], cache,
+    )
+    chunked = policy.forward_chunk(
+        latent, aux, action, reward,
+        abs_pos=torch.arange(total).expand(1, total),
+        episode_id=torch.zeros(1, total, dtype=torch.long),
+        burn_in=_PROBE_PREFIX,
+    )
+
+    return (recorded - chunked.logits).abs().amax(dim=-1)[0]
+
+
+def _perturb(
+    policy: RecurrentTransformerPolicy, generator: torch.Generator, scale: float
+) -> None:
+    """Helper, not a test: moves every parameter, standing in for one PPO
+    update. Deliberately iid noise rather than a real gradient step -- the
+    point is only that theta changed between the two rollout phases."""
+    with torch.no_grad():
+        for parameter in policy.parameters():
+            parameter.add_(torch.randn(parameter.shape, generator=generator) * scale)
 
 
 def _episode(seq_len: int, n_envs: int) -> tuple[torch.Tensor, ...]:

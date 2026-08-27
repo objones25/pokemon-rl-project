@@ -120,16 +120,65 @@ against costs 963 TFLOP, or **8.0 s**:
 | **Burn-in, gradients through prefix** | 131k | **0.20 s** | **exact** (chosen) |
 
 The chosen row costs **0.10 s/epoch more** than §5's proposal — 1.3% of the
-rollout it accompanies — and removes the staleness entirely. R2D2 (Kapturowski
-et al. 2019) introduced burn-in for precisely the representational-drift failure
-§5's approach invites.
+rollout it accompanies — and removes the staleness **from the update path**.
+R2D2 (Kapturowski et al. 2019) introduced burn-in for precisely the
+representational-drift failure §5's approach invites.
 
-And here it is genuinely exact, which an RNN cannot achieve: a transformer with
-a 1024-wide sliding window has **no infinite recurrence**. Its state at step `t`
-is a deterministic function of the last 1024 tokens. Prepend 1023 tokens, apply
-a sliding-window causal mask, and every gradient-carrying position sees
-*precisely* the window it saw at rollout, evaluated at current weights — which
-is exactly what PPO's importance ratio requires.
+The update path is genuinely exact in a way an RNN cannot achieve: a
+transformer with a 1024-wide sliding window has **no infinite recurrence**. Its
+state at step `t` is a deterministic function of the last 1024 tokens. Prepend
+1023 tokens, apply a sliding-window causal mask, and every gradient-carrying
+position sees *precisely* the window it saw at rollout, recomputed from raw
+observations at current weights.
+
+### The rollout path is still stale, and PPO must correct for it
+
+That exactness is about *which tokens* are in each window. It does not extend to
+the weights those tokens' K/V were built under, and an earlier draft of this
+section wrongly concluded that it did.
+
+The ring buffer is carried across update boundaries and never recomputed, so
+during a rollout it holds a mix: entries written this rollout under `θ_old`, and
+carried-over entries written under `θ_old-1`. With `n_steps = context_len =
+1024`, token `i` of a chunk has `1023 - i` of its window inherited from the
+previous rollout — every token but the last, and roughly half the window on
+average. `forward_chunk` recomputes all of it under one set of weights. So the
+**behaviour policy that actually chose the actions is not exactly `π_θ_old`**,
+and the logits recorded during rollout are not what `forward_chunk` reproduces.
+
+Measured on the real module (`tests/unit/test_sequence_model_policy.py` pins
+this), max `|ratio - 1|` at epoch 1 for an all-parameter perturbation of size
+`eps`, against a no-update control that sits at 1.9e-09:
+
+| `eps` | 2L/32d | 8L/128d | **8L/512d (production)** |
+|---|---|---|---|
+| 1e-4 | 5.1e-06 | 4.7e-05 | 4.9e-04 |
+| 1e-3 | 6.3e-05 | 7.3e-04 | **9.7e-03** |
+| 1e-2 | 4.6e-03 | 5.3e-02 | **5.1e-01** |
+
+It scales sharply with depth and width. PPO's clip threshold is 0.2, and AdamW's
+per-coordinate normalization puts ~16 optimizer steps at `lr = 3e-4` around
+`eps ≈ 5e-3` — between the last two rows. At that size the epoch-1 ratio can
+leave the clip range on staleness alone, so clipping fires on data that never
+went off-policy and silently throttles the learning signal. (The perturbation is
+iid noise, while a real update is structured and gradient-aligned; treat these as
+order-of-magnitude, not prediction.)
+
+**Requirement on PPO:** recompute `π_old` and `V_old` with one `no_grad`
+`forward_chunk` pass at update start, and use those as the importance-ratio
+denominator and the GAE baseline — *not* the logits and values recorded during
+rollout. This makes the epoch-1 ratio exactly 1.0 by construction, and reduces
+the residual approximation to ordinary off-policy action sampling, which is
+what the ratio exists to correct. Cost is one forward-only chunk pass, ~0.14 s
+against an 8.0 s rollout (**1.7%**), and it fuses with epoch 1's forward pass.
+
+**Log `max|ratio - 1|` at epoch 1.** After the above it must be exactly 0;
+anything else is a real bug, which makes it a free and decisive invariant.
+
+Refreshing the cache under new weights after each update is the alternative and
+is *not* recommended: same forward-pass cost, but it requires retaining the last
+`context_len` observations per env to recompute from (~512 MB of latents at
+production shape), and it still does not remove the need to recompute `π_old`.
 
 ### Gradients flow through the burn-in prefix (departing from R2D2)
 
@@ -452,6 +501,12 @@ Recorded here because these are seams, and seams are where requirements get
 dropped — each was identified by the final whole-branch review as belonging to
 neither spec until named.
 
+- **Recomputing `π_old` and `V_old` at update start** rather than using the
+  logits and values recorded during rollout — see "The rollout path is still
+  stale" above. This is the most load-bearing item in this list: skipping it
+  does not crash, it silently biases the importance ratio by an amount that at
+  production depth and width is the same order as the clip threshold. Pair it
+  with the epoch-1 `max|ratio - 1|` invariant.
 - **Telemetry consumers**: W&B/JSON-lines emission, the sampling policy, and the
   attention-distance heatmap artifact (see Observability above).
 - **`latent_stats.json` loading**: `InputAdapter` validates the stats it is
