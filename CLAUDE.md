@@ -8,10 +8,12 @@ PPO trains it against a RAM-derived reward. Full rationale:
 Sub-projects are designed and planned independently (`docs/superpowers/specs/`,
 then `docs/superpowers/plans/`) in the order: data collection -> CNN
 pretraining -> sequence model -> environment -> PPO trainer. Each gets its own
-spec and implementation plan before code is written. **PPO is the only stage
-not yet built** — its spec (`docs/superpowers/specs/2026-08-27-ppo-trainer-design.md`)
-is written and answers the sequence-model and env handoffs; the implementation
-plan and `src/ppo/` are the next work.
+spec and implementation plan before code is written. **`src/ppo/` now exists**
+— rollout, GAE, the clipped update, checkpointing, telemetry, pre-flight
+gates, and the `pokemon-ppo` CLI, per
+`docs/superpowers/specs/2026-08-27-ppo-trainer-design.md`. The four gates in
+that spec's §8 (SDPA backend, rollout throughput, a memory probe, and a
+50-update live smoke run) are what stand between it and the first paid run.
 
 ## Attribution — do not remove
 
@@ -30,13 +32,14 @@ and here. If you change a RAM address, cite the reader you took it from.
 | `src/contrastive_pretrain/` | SimCLR ResNet-50 + projector, augmentation, resize cache, training loop, frozen-encoder export | Trains the encoder past export — downstream it is frozen |
 | `src/sequence_model/` | `RecurrentTransformerPolicy`, GQA+RoPE attention, ring-buffer KV cache, masks, checkpoint schema | Contains a training loop; PPO owns that |
 | `src/pokemon_env/` | PyBoy wrapper, RAM readers, §4 reward, 32-d aux state, 64-way subprocess vectorization, env checkpoint | Knows about PPO, advantages, or losses |
+| `src/ppo/` | Rollout, GAE, clipped losses, the update pass, checkpoint orchestration, telemetry, pre-flight gates | Knows about RAM addresses or emulator internals |
 | `src/checkpointing/` | Atomic writes, newest-first discovery, retention glob | Knows what a checkpoint contains |
 | `src/hf_storage/` | `HfClient` / `AtomicHfClient` Protocols + `RealHfClient`, retry with rate-limit backoff | Imports from any sub-project |
 | `src/observability/` | JSON-lines logging, W&B wrapper, contact sheets | Is optional in a long-running component |
 
-Entry points (`pyproject.toml`): `data-collection {curate,run}` and
-`contrastive-pretrain {preview,train,build-cache,export-frozen-encoder}`.
-There is no `pokemon_env` CLI yet.
+Entry points (`pyproject.toml`): `data-collection {curate,run}`,
+`contrastive-pretrain {preview,train,build-cache,export-frozen-encoder}`, and
+`pokemon-ppo {train,preflight}`. There is no `pokemon_env` CLI yet.
 
 ## Frozen contracts — changing one silently breaks a trained model
 

@@ -26,6 +26,7 @@ dependencies = [
 [project.scripts]
 data-collection = "data_collection.cli:main"
 contrastive-pretrain = "contrastive_pretrain.cli:main"
+pokemon-ppo = "ppo.cli:main"
 
 [build-system]
 requires = ["hatchling"]
