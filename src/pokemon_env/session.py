@@ -118,7 +118,7 @@ class EnvSession:
             "rewards": self._rewards.state_dict(),
             "step_count": self._step_count,
             "episode_id": self._episode_id,
-            "episode_lengths": self._episode_lengths,
+            "episode_lengths": list(self._episode_lengths),
         }
 
     def load_state_dict(self, state: dict) -> None:

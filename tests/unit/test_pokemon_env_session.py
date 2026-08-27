@@ -129,3 +129,23 @@ def test_state_dict_round_trips_the_episode_length_history() -> None:
     restored.load_state_dict(state)
 
     assert restored.stats()["episode_lengths"] == [2]
+
+
+def test_state_dict_snapshot_is_unaffected_by_a_later_reset_on_the_same_session() -> None:
+    """state_dict() must copy episode_lengths, not alias the live list.
+    InProcessBackend hands this dict straight back to callers with no
+    serialization boundary in between, so a caller holding an earlier
+    snapshot must not see it mutate underneath them when the session that
+    produced it keeps running."""
+    session = EnvSession(FakeEmulator(), EnvConfig(max_steps=2), init_state=b"init")
+    session.reset()
+    session.step(0)
+    session.step(0)
+    session.reset()
+    snapshot = session.state_dict()
+
+    session.step(0)
+    session.step(0)
+    session.reset()
+
+    assert snapshot["episode_lengths"] == [2]
