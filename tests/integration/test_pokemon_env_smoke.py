@@ -26,11 +26,14 @@ _needs_rom = pytest.mark.skipif(
 
 @_needs_rom
 def test_save_state_is_small_enough_to_checkpoint_all_64_envs() -> None:
-    """THE measurement the design spec makes task one. The whole
-    cache-vs-emulator-state decision pivots on it: if 64 emulator states are
-    negligible beside the sequence model's 256 MiB KV cache, both get saved
-    together. The 256 KiB bound is 5x the ~50 KB estimate -- generous enough
-    not to be brittle, tight enough that a wildly larger state fails loudly."""
+    """THE measurement the design spec makes task one. Measured: one state is
+    167,677 B (~164 KiB) -- the earlier ~50 KB estimate was 3.3x low. 64 of
+    them is 10.73 MB, 4.0% of the sequence model's 256 MiB KV cache, so
+    "save both" holds: the cache-vs-emulator-state decision this measurement
+    pivots on. The 256 KiB bound is only ~1.5x the measured size -- it is a
+    regression guard against PyBoy's state growing, not a generous margin,
+    so re-cost this before adding envs, frame history, or a second emulator
+    per env."""
     emulator = PyBoyEmulator(str(_ROM))
     emulator.tick(60, False)
 
