@@ -11,7 +11,6 @@ from pathlib import Path
 from hf_storage.client import HfClient
 from hf_storage.retry import rate_limit_aware_backoff, retry_with_backoff
 
-
 _MANIFEST_PATH = "manifest.json"
 
 
