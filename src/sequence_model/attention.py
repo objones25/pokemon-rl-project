@@ -20,6 +20,8 @@ the chunked-forward tests unrunnable under the CPU-only test rule."""
 
 from __future__ import annotations
 
+import math
+
 import torch
 import torch.nn.functional as F
 from torch import nn
@@ -68,6 +70,30 @@ class GroupedQueryAttention(nn.Module):
         q, k, v = self._project(x, cos, sin)
         attended = F.scaled_dot_product_attention(q, k, v, attn_mask=mask, enable_gqa=True)
         return self._merge_heads(attended)
+
+    @torch.no_grad()
+    def attention_diagnostics(
+        self, x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor, mask: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Returns (q, k, probabilities) for telemetry. Off the hot path --
+        the caller invokes this on a sampled minibatch every N updates, not
+        during training, because it materializes the full attention matrix
+        that SDPA deliberately never forms.
+
+        Reuses `_project` so this can never diverge from the real forward:
+        q/k are post-RoPE and post-QK-norm, the same tensors SDPA would
+        consume in forward_chunk. k is expanded to query-head width (the
+        same expand-reshape enable_gqa performs internally) before the
+        scaled dot product, so `probabilities` has query-head width and
+        lines up with `q` and `attention_logit_max`'s expectations."""
+        q, k, _ = self._project(x, cos, sin)
+        n_rep = q.shape[1] // k.shape[1]
+        k_expanded = k.repeat_interleave(n_rep, dim=1)
+        scale = 1.0 / math.sqrt(q.shape[-1])
+        scores = (q.float() @ k_expanded.float().transpose(-2, -1)) * scale
+        scores = scores.masked_fill(~mask, float("-inf"))
+        probabilities = torch.softmax(scores, dim=-1)
+        return q, k, probabilities
 
     def forward_step(
         self,

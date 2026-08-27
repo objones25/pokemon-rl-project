@@ -45,9 +45,13 @@ def attention_logit_max(
     q: torch.Tensor, k: torch.Tensor, mask: torch.Tensor
 ) -> float:
     """`q` (B, H, L, D), `k` (B, H_kv, L, D), `mask` broadcastable
-    (B, 1, L, L) bool. Returns the largest scaled logit at an UNMASKED
-    position -- masked positions are never attended to, so including them
-    would raise false alarms on every step."""
+    (B, 1, L, L) bool. `q` and `k` must be post-RoPE and post-QK-norm --
+    the same tensors the real forward pass attends with, not raw
+    projections -- or the reported magnitude describes a model you are not
+    training. `GroupedQueryAttention.attention_diagnostics` returns exactly
+    this pair. Returns the largest scaled logit at an UNMASKED position --
+    masked positions are never attended to, so including them would raise
+    false alarms on every step."""
     scale = 1.0 / math.sqrt(q.shape[-1])
     n_rep = q.shape[1] // k.shape[1]
     k_expanded = k.repeat_interleave(n_rep, dim=1)
