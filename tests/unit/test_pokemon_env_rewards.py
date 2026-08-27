@@ -89,11 +89,19 @@ def test_coordinates_are_not_recorded_during_battle(fake_emulator, accumulator) 
 
 
 def test_a_badge_earns_exactly_the_clip_cap(fake_emulator, accumulator) -> None:
+    """In-battle isolates the badge component from the first-coordinate
+    exploration credit that the all-zero fake memory would otherwise fire
+    at (0, 0, 0): without it, badge (1.00) + explore (0.30) clip to the same
+    1.0 that badge alone should produce, so the test would pass for any
+    badge_weight >= 0.70. Asserting clipped is False as well closes the top:
+    it fails a badge_weight above 1.00 too, where the pre-clip gain exceeds
+    1.0 and clipping (not badge_weight) starts doing the work."""
+    fake_emulator.memory[ram.IN_BATTLE_ADDR] = 1
     fake_emulator.memory[ram.BADGES_ADDR] = 0b0000_0001
 
     result = accumulator.step(fake_emulator)
 
-    assert result.reward == pytest.approx(1.0)
+    assert (result.reward, result.clipped) == (pytest.approx(1.0), False)
 
 
 def test_a_step_crossing_several_components_clips_to_exactly_one(
