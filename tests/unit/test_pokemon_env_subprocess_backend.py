@@ -460,6 +460,26 @@ def test_close_releases_the_pipe(frame_buffer) -> None:
     assert connection.closed is True
 
 
+def test_handle_command_returns_session_stats_for_the_stats_command() -> None:
+    session = EnvSession(FakeEmulator(), EnvConfig(), init_state=b"")
+    session.reset()
+    frame_slot = np.zeros((144, 160), dtype=np.uint8)
+
+    payload = handle_command(session, Command.STATS, None, frame_slot)
+
+    assert payload["stats"]["step_count"] == 0
+
+
+def test_handle_command_does_not_overwrite_the_frame_slot_for_stats() -> None:
+    session = EnvSession(FakeEmulator(), EnvConfig(), init_state=b"")
+    session.reset()
+    frame_slot = np.full((144, 160), 7, dtype=np.uint8)
+
+    handle_command(session, Command.STATS, None, frame_slot)
+
+    assert frame_slot[0, 0] == 7
+
+
 def test_build_subprocess_vec_env_preflights_the_rom(tmp_path) -> None:
     """Without this check a wrong path spawns 64 processes that each die
     inside PyBoyEmulator.__init__, and the parent surfaces only a bare

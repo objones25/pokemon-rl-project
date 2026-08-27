@@ -6,7 +6,7 @@ from pokemon_env.config import EnvConfig
 from pokemon_env.session import EnvSession
 from pokemon_env.vec_env import InProcessBackend, VecPokemonEnv
 
-from .fakes import FakeEmulator
+from .fakes import FakeBackend, FakeEmulator
 
 
 @pytest.fixture
@@ -162,6 +162,13 @@ def test_load_state_dict_rejects_a_different_env_count(vec_env) -> None:
 
     with pytest.raises(ValueError, match="cannot be redistributed"):
         vec_env.load_state_dict(state)
+
+
+def test_stats_returns_one_entry_per_env_in_env_order() -> None:
+    backends = [FakeBackend(step_count=1), FakeBackend(step_count=2)]
+    vec_env = VecPokemonEnv(backends, EnvConfig(n_envs=2))
+
+    assert [entry["step_count"] for entry in vec_env.stats()] == [1, 2]
 
 
 def test_load_state_dict_rejects_a_stale_schema_version(vec_env) -> None:

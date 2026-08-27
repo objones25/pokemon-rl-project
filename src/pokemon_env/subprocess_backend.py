@@ -11,6 +11,7 @@ worker, which CUDA does not support."""
 
 from __future__ import annotations
 
+import logging
 import multiprocessing as mp
 from collections.abc import Callable
 from enum import StrEnum
@@ -23,6 +24,8 @@ from pokemon_env.config import EnvConfig
 from pokemon_env.emulator import SCREEN_HEIGHT, SCREEN_WIDTH, Emulator, PyBoyEmulator
 from pokemon_env.session import EnvSession, StepResult
 from pokemon_env.vec_env import VecPokemonEnv
+
+logger = logging.getLogger(__name__)
 
 
 class WorkerConnection(Protocol):
@@ -55,6 +58,7 @@ class Command(StrEnum):
     STEP = "STEP"
     STATE_DICT = "STATE_DICT"
     LOAD_STATE = "LOAD_STATE"
+    STATS = "STATS"
     CLOSE = "CLOSE"
 
 
@@ -128,6 +132,8 @@ def handle_command(
     elif command == Command.LOAD_STATE:
         session.load_state_dict(argument)  # type: ignore[arg-type]
         return {"ok": True}
+    elif command == Command.STATS:
+        return {"stats": session.stats()}
     else:
         raise ValueError(f"unknown command {command!r}")
 
@@ -154,7 +160,8 @@ def worker_main(
                 break
             try:
                 conn.send(("ok", handle_command(session, command, argument, buffer.array[index])))
-            except Exception as error:  # noqa: BLE001 -- must reach the parent, not die silently
+            except Exception as error:  # must reach the parent, not die silently
+                logger.exception("worker_command_failed", extra={"command": str(command)})
                 conn.send(("error", f"{type(error).__name__}: {error}"))
     finally:
         session.close()
@@ -267,7 +274,7 @@ class SubprocessBackend:
         exhausts the parent's descriptor table."""
         try:
             self._conn.close()
-        except OSError:
+        except OSError:  # obs: allow LOG007 -- the pipe is already closed; nothing to report
             pass
 
     def _to_result(self, payload: dict) -> StepResult:
@@ -334,10 +341,16 @@ class SubprocessBackend:
         self._last_episode_id = state["last_episode_id"]
         self._call(Command.LOAD_STATE, state["session"])
 
+    def stats(self) -> dict:
+        """One round trip per update, not per step. The payload is ~1.3 KB per
+        env, against the 168 KB a STATE_DICT round trip ships to extract the
+        same coordinates."""
+        return self._call(Command.STATS)["stats"]
+
     def close(self) -> None:
         try:
             self._conn.send((Command.CLOSE, None))
-        except (BrokenPipeError, OSError):
+        except (BrokenPipeError, OSError):  # obs: allow LOG007 -- worker already gone at shutdown
             pass
         self._process.join(timeout=5)
         if self._process.is_alive():

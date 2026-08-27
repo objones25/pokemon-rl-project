@@ -24,7 +24,11 @@ from pokemon_env.config import EnvConfig
 from pokemon_env.emulator import SCREEN_HEIGHT, SCREEN_WIDTH
 from pokemon_env.session import EnvSession, StepResult
 
-VEC_ENV_SCHEMA_VERSION = 1
+# Bumped 1->2 because EnvSession.load_state_dict now reads
+# state["episode_lengths"] directly (Task 2); a checkpoint written before that
+# change has no such key and would otherwise fail with a bare KeyError instead
+# of this module's legible version-mismatch error.
+VEC_ENV_SCHEMA_VERSION = 2
 
 
 class EnvBackend(Protocol):
@@ -32,6 +36,7 @@ class EnvBackend(Protocol):
     def step(self, action: int) -> StepResult: ...
     def state_dict(self) -> dict: ...
     def load_state_dict(self, state: dict) -> None: ...
+    def stats(self) -> dict: ...
     def close(self) -> None: ...
 
 
@@ -62,6 +67,9 @@ class InProcessBackend:
 
     def load_state_dict(self, state: dict) -> None:
         self._session.load_state_dict(state["session"])
+
+    def stats(self) -> dict:
+        return self._session.stats()
 
     def close(self) -> None:
         self._session.close()
@@ -143,6 +151,10 @@ class VecPokemonEnv:
             done=np.array([r.done for r in results], dtype=bool),
             episode_id=np.array([r.episode_id for r in results], dtype=np.int64),
         )
+
+    def stats(self) -> list[dict]:
+        """One dict per env, in env order. Called once per PPO update."""
+        return [backend.stats() for backend in self._backends]
 
     def state_dict(self) -> dict:
         return {
