@@ -57,16 +57,20 @@ def test_a_positive_advantage_is_clipped_at_one_plus_the_clip_range() -> None:
 
 
 def test_the_clip_fraction_counts_the_positions_where_clipping_bound() -> None:
-    logits = torch.zeros(1, 2, 2)
-    action = torch.zeros(1, 2, dtype=torch.int64)
-    logprob_old = torch.log_softmax(logits, dim=-1)[..., 0] - torch.tensor([[1.0, 0.0]])
+    """4 positions, exactly 1 exceeds clip_range -> 0.25. Asymmetric on
+    purpose: with an even 2-2 split the complement of the correct fraction is
+    also 0.5, so a flipped comparison operator produces the same number and
+    the test cannot tell them apart."""
+    logits = torch.zeros(1, 4, 2)
+    action = torch.zeros(1, 4, dtype=torch.int64)
+    logprob_old = torch.log_softmax(logits, dim=-1)[..., 0] - torch.tensor([[1.0, 0.0, 0.0, 0.0]])
 
     output = ppo_losses(
-        logits, torch.zeros(1, 2), action, logprob_old,
-        advantage=torch.ones(1, 2), value_target=torch.zeros(1, 2), config=_config(),
+        logits, torch.zeros(1, 4), action, logprob_old,
+        advantage=torch.ones(1, 4), value_target=torch.zeros(1, 4), config=_config(),
     )
 
-    assert output.clip_fraction == pytest.approx(0.5)
+    assert output.clip_fraction == pytest.approx(0.25)
 
 
 def test_the_value_loss_is_the_mean_squared_error_against_the_target() -> None:
