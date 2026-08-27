@@ -155,8 +155,32 @@ tests in this sub-project.
 
 `F.scaled_dot_product_attention(..., attn_mask=bool_mask, enable_gqa=True)` was
 verified to work forward *and* backward on CPU with the composed
-`causal ∧ sliding_window ∧ same_episode` mask. Mask cost is 8.4 MB at batch 2,
-~34 MB at batch 8. One code path, CUDA and CPU alike, fully testable.
+`causal ∧ sliding_window ∧ same_episode` mask. One code path, CUDA and CPU
+alike, fully testable.
+
+**The bool mask costs 8.4 MB at batch 2 and ~34 MB at batch 8 — but that is the
+mask alone, not the attention memory.** An earlier revision of this spec quoted
+those figures as if they bounded the training path; they do not. Passing a
+materialized `attn_mask` rules out the FlashAttention backend on CUDA, so
+`forward_chunk` lands on either the memory-efficient or the math backend, and
+which one is not settled: whether the memory-efficient backend accepts
+`enable_gqa=True` in torch 2.13 decides it. On the math backend the score
+tensor at production shape (B=8, H=8, L=2047) is ~536 MB in bf16, plus its
+softmax and the tensors saved for backward — an order of magnitude above the
+mask.
+
+**Pre-run gate, on the pod, before the first paid GPU hour** (it cannot be
+settled locally: backend introspection rejects CPU tensors):
+
+1. Build production-shaped CUDA tensors and query
+   `torch.backends.cuda.SDPAParams(q, k, v, mask, 0.0, False, True)` against
+   `can_use_flash_attention(p, True)` and `can_use_efficient_attention(p, True)`.
+2. Profile one `forward_chunk` for peak memory.
+
+If it resolves to the math backend, the escape hatches are (a) drop
+`enable_gqa` and hand-expand K/V with expand-reshape — never `.repeat()` — so
+the memory-efficient backend applies, or (b) express the sliding window
+structurally rather than as a materialized mask.
 
 `enable_gqa=True` also means no hand-written `repeat_kv`, which eliminates the
 `x.repeat()` query-head-permutation bug at the source rather than testing for it.
@@ -400,12 +424,52 @@ That last metric is the honest check on this component's entire premise. If the
 model never attends past 8 steps, the 1024-context design is dead weight, and
 that should surface in hour one rather than week two.
 
+**Ownership, which an earlier revision left unassigned and which is why the
+emission side went unbuilt:** this sub-project ships the *producers* only —
+`sequence_model.telemetry`'s pure metric functions, and
+`GroupedQueryAttention.attention_diagnostics`, which hands back the post-RoPE
+q/k and the materialized attention probabilities that SDPA never forms. Without
+that hook the PPO loop would have to re-derive projections by hand, which is how
+a debug path silently diverges from the model you are actually training.
+
+The *consumers* belong to the PPO sub-project and must appear in its spec: the
+W&B run and JSON-lines emission, the sampling policy (which minibatch, how
+often — these functions are off the hot path by design), and the periodic
+attention-distance heatmap PNG, which belongs beside
+`src/observability/visualization.py`. Nothing in `src/sequence_model/` imports
+`src/observability/`, and that is deliberate.
+
 ## Out of scope
 
 - The PyBoy environment, its RAM readers, and the reward function's semantics.
 - The PPO loss, GAE, and the training loop that drives updates.
 - Any offline or supervised pretraining of this model.
 - GTrXL gating, and any context length beyond 1024.
+
+## Handoff: what the PPO sub-project's spec must decide
+
+Recorded here because these are seams, and seams are where requirements get
+dropped — each was identified by the final whole-branch review as belonging to
+neither spec until named.
+
+- **Telemetry consumers**: W&B/JSON-lines emission, the sampling policy, and the
+  attention-distance heatmap artifact (see Observability above).
+- **`latent_stats.json` loading**: `InputAdapter` validates the stats it is
+  handed (shape against `latent_dim`, `std > 0`), but *fetching* them from the
+  frozen-encoder repo is PPO's job. A dead encoder channel with `std == 0` would
+  otherwise divide by the 1e-6 floor and feed ~1e6-scale inputs to a value head.
+- **The `cache.reset(done)` ordering contract**: reset must run *after* the
+  `step()` whose transition ended the episode, not before the next one, or the
+  final transition of every episode attends to a cleared cache.
+- **Checkpoint and resume for the RL run.** This spec does not address it, and
+  CLAUDE.md requires it be decided at design time for any long or paid
+  unattended job — not discovered afterwards. The policy exposes a plain
+  `state_dict`; what else must be checkpointed (optimizer, per-env `RolloutCache`
+  state, env RNG, the `max_historical` reward baselines from §4) and at what
+  cadence is a PPO-side design decision, and it is the one most likely to be
+  discovered the hard way ten hours into a paid run.
+- **The CUDA SDPA backend measurement** (see the SDPA section above) — a gate to
+  clear before the first paid GPU hour.
 
 ## Open questions / future extensions
 
