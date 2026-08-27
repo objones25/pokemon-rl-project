@@ -417,7 +417,7 @@ point without guessing.
 ### Audit baseline
 
 `audit_observability.py src/` currently reports **12 findings**
-(`LOG004:5, LOG006:3, LOG007:4`). This sub-project takes it to **9**:
+(`LOG004:5, LOG006:3, LOG007:4`). This sub-project takes it to **7**:
 
 - `tracking.py:50,56` — LOG006, fixed with `exc_info=True`.
 - `subprocess_backend.py:157` — a false positive on the heuristic (it forwards
