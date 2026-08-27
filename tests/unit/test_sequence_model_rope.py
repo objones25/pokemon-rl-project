@@ -73,3 +73,38 @@ def test_rope_attention_score_depends_only_on_relative_distance() -> None:
     ).sum()
 
     assert near.item() == pytest.approx(far.item(), abs=1e-5)
+
+
+_ACCELERATOR = torch.accelerator.current_accelerator(check_available=True)
+# Narrowed to a plain string so the test body never dereferences an Optional:
+# a type checker cannot see that @skipif already ruled None out.
+_ACCELERATOR_TYPE = "" if _ACCELERATOR is None else _ACCELERATOR.type
+
+
+@pytest.mark.skipif(
+    _ACCELERATOR is None,
+    reason="no local accelerator; the CPU float64 path is covered by the other tests",
+)
+def test_rope_tables_on_the_local_accelerator_match_the_cpu_result_exactly() -> None:
+    """Training targets CUDA, where the float64 reduction stays on-device.
+    This guards the LOCAL path only: MPS has no float64, so it falls back
+    to CPU, and that fallback has a silent-corruption trap. The fused
+    `positions.to(device="cpu", dtype=torch.float64)` reinterprets an MPS
+    int64 tensor's bits rather than converting them -- position 1 comes
+    back as 5e-324 -- yielding an all-zero angle table with no error.
+
+    Asserted at a large position, not at 0: cos(0) is 1.0 under the bug
+    too, so a position-0 check would pass against corrupt output."""
+    positions = torch.tensor([[0, 1, 163840]])
+
+    cos, sin = rope_tables(positions, head_dim=64, theta=10000.0)
+    accel_cos, accel_sin = rope_tables(
+        positions.to(_ACCELERATOR_TYPE), head_dim=64, theta=10000.0
+    )
+
+    assert (accel_cos.device.type, accel_sin.device.type) == (
+        _ACCELERATOR_TYPE,
+        _ACCELERATOR_TYPE,
+    )
+    assert (accel_cos.cpu() - cos).abs().max().item() == pytest.approx(0.0, abs=1e-7)
+    assert (accel_sin.cpu() - sin).abs().max().item() == pytest.approx(0.0, abs=1e-7)

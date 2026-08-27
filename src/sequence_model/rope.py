@@ -26,13 +26,40 @@ def rope_tables(
     positions: torch.Tensor, head_dim: int, theta: float
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """`positions` is an integer tensor of absolute step indices, shape
-    (B, T). Returns (cos, sin), each (B, T, head_dim // 2), float32."""
+    (B, T). Returns (cos, sin), each (B, T, head_dim // 2), float32, on
+    `positions.device`.
+
+    The float64 reduction stays ON-DEVICE everywhere it can, which is the
+    case that matters: training runs on RunPod CUDA, where float64 is
+    supported natively and this is a pure device-local computation. Routing
+    it through the host instead would put a copy and a synchronisation point
+    on the rollout hot path, thousands of times per second, for no gain.
+
+    MPS is the sole exception -- it has no float64 at all and raises
+    "Cannot convert a MPS Tensor to float64" -- so on Apple Silicon, which
+    is only ever the local test machine, the reduction falls back to CPU.
+    The `.to(device)` calls below are no-ops when the compute device already
+    is the target, so CUDA pays nothing for this branch.
+
+    The move and the cast are two separate calls on purpose. The fused
+    `positions.to(device="cpu", dtype=torch.float64)` REINTERPRETS an MPS
+    int64 tensor's bit patterns as float64 instead of converting them --
+    position 1 comes back as 5e-324, 163840 as 8.09e-319 -- so it silently
+    yields an all-zero angle table rather than raising. Moving first and
+    casting second is correct on every device."""
     half = head_dim // 2
+    device = positions.device
+    compute_device = torch.device("cpu") if device.type == "mps" else device
     inv_freq = theta ** (
-        -torch.arange(0, half, dtype=torch.float64, device=positions.device) / half
+        -torch.arange(0, half, dtype=torch.float64, device=compute_device) / half
     )
-    angle = (positions.to(torch.float64).unsqueeze(-1) * inv_freq) % (2 * math.pi)
-    return angle.cos().to(torch.float32), angle.sin().to(torch.float32)
+    angle = (
+        positions.to(compute_device).to(torch.float64).unsqueeze(-1) * inv_freq
+    ) % (2 * math.pi)
+    return (
+        angle.cos().to(torch.float32).to(device),
+        angle.sin().to(torch.float32).to(device),
+    )
 
 
 def apply_rope(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
