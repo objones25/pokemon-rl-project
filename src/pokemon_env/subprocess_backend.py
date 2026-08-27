@@ -12,14 +12,16 @@ worker, which CUDA does not support."""
 from __future__ import annotations
 
 import multiprocessing as mp
+from collections.abc import Callable
 from enum import StrEnum
 from multiprocessing.connection import Connection
+from multiprocessing.process import BaseProcess
 from multiprocessing.shared_memory import SharedMemory
 
 import numpy as np
 
 from pokemon_env.config import EnvConfig
-from pokemon_env.emulator import SCREEN_HEIGHT, SCREEN_WIDTH, PyBoyEmulator
+from pokemon_env.emulator import SCREEN_HEIGHT, SCREEN_WIDTH, Emulator, PyBoyEmulator
 from pokemon_env.session import EnvSession, StepResult
 from pokemon_env.vec_env import VecPokemonEnv
 
@@ -107,10 +109,11 @@ def worker_main(
     config: EnvConfig,
     rom_path: str,
     init_state: bytes,
+    emulator_factory: Callable[[str], Emulator] = PyBoyEmulator,
 ) -> None:
     """Worker entry point. Owns exactly one emulator for its lifetime."""
     buffer = FrameBuffer.attach(shm_name, config.n_envs)
-    session = EnvSession(PyBoyEmulator(rom_path), config, init_state)
+    session = EnvSession(emulator_factory(rom_path), config, init_state)
     try:
         while True:
             command, argument = conn.recv()
@@ -126,6 +129,33 @@ def worker_main(
         conn.close()
 
 
+SpawnWorker = Callable[
+    [str, int, EnvConfig, str, bytes], tuple[Connection, BaseProcess]
+]
+
+
+def spawn_real_worker(
+    shm_name: str,
+    index: int,
+    config: EnvConfig,
+    rom_path: str,
+    init_state: bytes,
+) -> tuple[Connection, BaseProcess]:
+    """The production spawn. Module-level so `spawn` can pickle it by
+    reference, and injectable so SubprocessBackend's timeout, error-routing
+    and respawn logic can be tested without a real process or a ROM."""
+    context = mp.get_context("spawn")
+    parent_conn, child_conn = context.Pipe()
+    process = context.Process(
+        target=worker_main,
+        args=(child_conn, shm_name, index, config, rom_path, init_state),
+        daemon=True,
+    )
+    process.start()
+    child_conn.close()
+    return parent_conn, process
+
+
 class SubprocessBackend:
     """Parent-side handle on one worker. Respawns it from init.state on death
     or timeout rather than taking the whole run down."""
@@ -138,6 +168,7 @@ class SubprocessBackend:
         rom_path: str,
         init_state: bytes,
         frame_slot: np.ndarray,
+        spawn_worker: SpawnWorker = spawn_real_worker,
     ) -> None:
         self._index = index
         self._shm_name = shm_name
@@ -145,6 +176,7 @@ class SubprocessBackend:
         self._rom_path = rom_path
         self._init_state = init_state
         self._frame_slot = frame_slot
+        self._spawn_worker = spawn_worker
         self._respawns = 0
         self._spawn()
 
@@ -153,22 +185,9 @@ class SubprocessBackend:
         return self._respawns
 
     def _spawn(self) -> None:
-        context = mp.get_context("spawn")
-        self._conn, child_conn = context.Pipe()
-        self._process = context.Process(
-            target=worker_main,
-            args=(
-                child_conn,
-                self._shm_name,
-                self._index,
-                self._config,
-                self._rom_path,
-                self._init_state,
-            ),
-            daemon=True,
+        self._conn, self._process = self._spawn_worker(
+            self._shm_name, self._index, self._config, self._rom_path, self._init_state
         )
-        self._process.start()
-        child_conn.close()
 
     def _call(self, command: Command, argument: object = None) -> dict:
         self._conn.send((command, argument))

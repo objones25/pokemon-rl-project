@@ -184,10 +184,10 @@ def test_a_random_agent_drives_four_real_envs_end_to_end(tmp_path) -> None:
     swap -- a review caught an earlier version of this test overclaiming
     that coverage. The direct worker-to-slot binding is covered at the unit
     level instead, in
-    tests/unit/test_pokemon_env_subprocess_backend.py::test_handle_command_writes_only_its_own_slot,
-    where an injected FakeEmulator makes handle_command (worker_main's pure
-    dispatch core) callable with a frame of known content without spawning
-    a process.
+    tests/unit/test_pokemon_env_subprocess_backend.py::test_worker_main_writes_only_into_its_own_slot,
+    where an injected FakeEmulator lets worker_main itself run end-to-end --
+    including its slot-index selection -- with a frame of known content and
+    no spawned process.
 
     Also writes a contact sheet so a human can look at what the agents saw."""
     import numpy as np
