@@ -444,12 +444,31 @@ def test_diagnostics_residual_norm_matches_the_untouched_rms_norm_scale() -> Non
     assert metrics["model/residual_norm"] == pytest.approx(32**0.5, rel=1e-3)
 
 
-def test_diagnostics_does_not_build_a_gradient_graph() -> None:
-    """It runs on a sampled minibatch beside the update; if it kept a graph it
-    would hold the full attention matrix alive across the optimizer step."""
+_FINAL_NORM_REQUIRES_GRAD: list[bool] = []
+
+
+def _record_final_norm_requires_grad(
+    module: torch.nn.Module, args: tuple, output: torch.Tensor
+) -> None:
+    """Hand-written forward-hook capture, not mock.patch: records whether
+    final_norm's own output required grad, which is the decorator's actual
+    observable effect."""
+    _FINAL_NORM_REQUIRES_GRAD.append(output.requires_grad)
+
+
+def test_diagnostics_runs_final_norm_without_requiring_grad() -> None:
+    """`@torch.no_grad()`'s observable effect is that intermediate
+    activations inside diagnostics do not require grad even when the input
+    does -- not that inputs["latent"].grad stays None, which is trivially
+    true either way because nothing ever calls .backward(). A forward hook
+    on final_norm pins the real effect: with the decorator, its output
+    must not require grad even though latent does."""
     policy, inputs = _tiny_policy_and_chunk_inputs()
     inputs["latent"].requires_grad_(True)
+    _FINAL_NORM_REQUIRES_GRAD.clear()
+    handle = policy.final_norm.register_forward_hook(_record_final_norm_requires_grad)
 
     policy.diagnostics(**inputs)
+    handle.remove()
 
-    assert inputs["latent"].grad is None
+    assert _FINAL_NORM_REQUIRES_GRAD == [False]
