@@ -461,13 +461,34 @@ neither spec until named.
 - **The `cache.reset(done)` ordering contract**: reset must run *after* the
   `step()` whose transition ended the episode, not before the next one, or the
   final transition of every episode attends to a cleared cache.
-- **Checkpoint and resume for the RL run.** This spec does not address it, and
-  CLAUDE.md requires it be decided at design time for any long or paid
-  unattended job — not discovered afterwards. The policy exposes a plain
-  `state_dict`; what else must be checkpointed (optimizer, per-env `RolloutCache`
-  state, env RNG, the `max_historical` reward baselines from §4) and at what
-  cadence is a PPO-side design decision, and it is the one most likely to be
-  discovered the hard way ten hours into a paid run.
+- **Checkpoint and resume for the RL run.** ~~This spec does not address it~~ —
+  the sequence-model half is now implemented in `sequence_model/checkpoint.py`,
+  with the shared file I/O (atomic write, discovery, retention) in
+  `checkpointing/io.py`. `build_policy_checkpoint_state` /
+  `restore_policy_checkpoint` cover policy `state_dict`, optimizer, an optional
+  scheduler, the per-env `RolloutCache`, and RNG, and validate config drift,
+  the `_orig_mod.` compile prefix, and ring-buffer shape on load.
+
+  **What PPO still owns**, and must decide in its own spec:
+
+  - *Whether to checkpoint the KV cache at all.* The serializer takes
+    `RolloutCache | None` and deliberately does not decide. Saving it costs
+    256 MiB per checkpoint (bf16, 64 envs × 1024 context) against ~284 MB for
+    policy + AdamW moments, and it is only meaningful if the **PyBoy emulator
+    state is saved too** — a cache restored against a freshly-booted env is
+    memory of a game position the env no longer occupies, which is worse than
+    starting empty. Dropping it costs each env truncated context for at most
+    `context_len` steps, roughly one update's worth of weaker value estimates.
+    Note the cache is *already* one-update stale in steady state (it holds K/V
+    computed under the pre-update weights and is never recomputed), so resuming
+    empty is a larger version of an error the loop tolerates continuously, not
+    a new kind.
+  - *Emulator state, the `max_historical` reward baselines from §4, and update
+    counters* — none of these are sequence-model state, and none are covered.
+  - *Cadence and retention.* `prune_checkpoints` takes `keep_last_n` and a
+    filename glob (parameterized so a PPO run and the pretraining run can share
+    one network volume without pruning each other's resume point); what those
+    values are is a PPO config decision.
 - **The CUDA SDPA backend measurement** (see the SDPA section above) — a gate to
   clear before the first paid GPU hour.
 
