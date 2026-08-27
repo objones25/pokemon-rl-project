@@ -77,3 +77,30 @@ def test_action_embedding_has_one_row_per_action_plus_episode_start(
     adapter: InputAdapter,
 ) -> None:
     assert tuple(adapter.action_embed.weight.shape) == (8, 4)
+
+
+def test_adapter_rejects_latent_mean_shaped_wrong_for_config_latent_dim(
+    tiny_config: PolicyConfig,
+) -> None:
+    """These stats come from a JSON file written by a different
+    sub-project; a mismatched shape must raise rather than broadcast
+    silently."""
+    with pytest.raises(ValueError, match=r"latent_mean has shape \(1,\)"):
+        InputAdapter(tiny_config, torch.zeros(1), torch.ones(16))
+
+
+def test_adapter_rejects_latent_std_shaped_wrong_for_config_latent_dim(
+    tiny_config: PolicyConfig,
+) -> None:
+    with pytest.raises(ValueError, match=r"latent_std has shape \(1,\)"):
+        InputAdapter(tiny_config, torch.zeros(16), torch.ones(1))
+
+
+def test_adapter_rejects_a_zero_latent_std(tiny_config: PolicyConfig) -> None:
+    """A dead encoder channel with std 0 currently divides by 1e-6 and
+    feeds ~1e6-scale inputs to a PPO value head."""
+    std = torch.ones(16)
+    std[3] = 0.0
+
+    with pytest.raises(ValueError, match="latent_std must be strictly positive"):
+        InputAdapter(tiny_config, torch.zeros(16), std)

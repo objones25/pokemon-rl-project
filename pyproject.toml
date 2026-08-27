@@ -46,7 +46,7 @@ addopts = [
     "--cov=src",
     "--cov-branch",
     "--cov-report=term-missing:skip-covered",
-    "--cov-fail-under=92",
+    "--cov-fail-under=93",
     "-m", "not slow",
 ]
 markers = [
@@ -83,7 +83,7 @@ omit = ["*/__main__.py"]
 [tool.coverage.report]
 show_missing = true
 skip_covered = true
-fail_under = 92
+fail_under = 93
 exclude_also = [
     "if TYPE_CHECKING:",
     "raise NotImplementedError",

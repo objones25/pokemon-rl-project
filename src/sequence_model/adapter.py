@@ -28,10 +28,28 @@ class InputAdapter(nn.Module):
         self, config: PolicyConfig, latent_mean: torch.Tensor, latent_std: torch.Tensor
     ) -> None:
         super().__init__()
+        if latent_mean.shape != (config.latent_dim,):
+            raise ValueError(
+                f"latent_mean has shape {tuple(latent_mean.shape)}, expected "
+                f"({config.latent_dim},) to match config.latent_dim; a mismatched stats "
+                "vector broadcasts silently instead of raising"
+            )
+        if latent_std.shape != (config.latent_dim,):
+            raise ValueError(
+                f"latent_std has shape {tuple(latent_std.shape)}, expected "
+                f"({config.latent_dim},) to match config.latent_dim; a mismatched stats "
+                "vector broadcasts silently instead of raising"
+            )
+        if not torch.all(latent_std > 0):
+            raise ValueError(
+                "latent_std must be strictly positive in every dimension; a dead encoder "
+                "channel with std 0 divides by ~1e-6 and feeds ~1e6-scale inputs to the "
+                "PPO value head"
+            )
         self.config = config
         self.register_buffer("latent_mean", latent_mean)
         self.register_buffer("latent_std", latent_std)
-        self.action_embed = nn.Embedding(config.action_dim + 1, config.action_embed_dim)
+        self.action_embed = nn.Embedding(config.episode_start_action + 1, config.action_embed_dim)
         self.reward_proj = nn.Linear(1, config.reward_feat_dim, bias=False)
         fused_dim = (
             config.latent_dim

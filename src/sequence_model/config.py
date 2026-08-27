@@ -45,6 +45,12 @@ class PolicyConfig:
             )
         if self.head_dim % 2 != 0:
             raise ValueError(f"head_dim={self.head_dim} must be even; RoPE pairs it in halves")
+        if self.context_len < 1:
+            raise ValueError(
+                f"context_len={self.context_len} must be >= 1; with context_len=0 the window "
+                "term (q - k) < context_len is False even on the diagonal, producing a fully-"
+                "masked row and all-NaN from softmax"
+            )
 
     @property
     def n_rep(self) -> int:
