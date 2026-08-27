@@ -17,6 +17,21 @@ def _vec_step(n_envs: int, reward: float = 0.0) -> VecStep:
     )
 
 
+def _empty_stats(n_envs: int) -> list[dict]:
+    """Helper, not a test: stats entries with no progress, for tests that only
+    care about the reward/env-level fields rollout_metrics reports."""
+    return [
+        {
+            "coord_keys": [],
+            "badges": 0,
+            "event_flags": 0,
+            "step_count": 0,
+            "episode_lengths": [],
+        }
+        for _ in range(n_envs)
+    ]
+
+
 def _vec_step_with_rewards(rewards: np.ndarray) -> VecStep:
     """Helper, not a test. Lets a test give each env a different reward so
     mean/max/sum are distinguishable."""
@@ -68,11 +83,13 @@ def test_contact_sheet_pads_a_non_square_batch() -> None:
 def test_exploration_heatmap_marks_a_visited_coordinate() -> None:
     """Asserting only heatmap.sum() > 0 would pass for any unpacking of the
     coord_key bits, including x and y swapped. Pin down the exact cell that
-    map=3, x=10, y=20 must land on given this module's own map-grid layout,
-    so a wrong shift/mask order fails this test instead of passing it."""
+    map=3, x=10, y=20 must land on given this module's own map-grid layout --
+    a single map at a 64x64 image renders one tile at the origin, so the true
+    (x, y) lands directly at (row=y, column=x) -- so a wrong shift/mask order
+    fails this test instead of passing it."""
     heatmap = exploration_heatmap([ram.coord_key(x=10, y=20, map_id=3)], height=64, width=64)
 
-    assert int(heatmap[4, 58]) == 1
+    assert int(heatmap[20, 10]) == 1
     assert int(heatmap.sum()) == 1
 
 
@@ -90,6 +107,7 @@ def test_rollout_metrics_flattens_components_with_a_prefix() -> None:
         components={"explore": 0.3, "badges": 0.0},
         clip_fire_rate=0.0,
         respawns=0,
+        stats=_empty_stats(4),
     )
 
     assert metrics["reward/explore"] == pytest.approx(0.3)
@@ -105,6 +123,7 @@ def test_rollout_metrics_reports_mean_reward() -> None:
         components={},
         clip_fire_rate=0.0,
         respawns=0,
+        stats=_empty_stats(4),
     )
 
     assert metrics["reward/mean"] == pytest.approx(0.25)
@@ -114,7 +133,7 @@ def test_rollout_metrics_surfaces_the_clip_fire_rate() -> None:
     """Above roughly 0.1% the weights are miscalibrated and achievement
     ordering is being flattened."""
     metrics = rollout_metrics(
-        _vec_step(4), components={}, clip_fire_rate=0.02, respawns=0
+        _vec_step(4), components={}, clip_fire_rate=0.02, respawns=0, stats=_empty_stats(4)
     )
 
     assert metrics["env/clip_fire_rate"] == pytest.approx(0.02)
@@ -124,7 +143,60 @@ def test_rollout_metrics_surfaces_worker_respawns() -> None:
     """A rising respawn rate is a leading indicator of memory pressure or a
     bad state, long before it shows in reward."""
     metrics = rollout_metrics(
-        _vec_step(4), components={}, clip_fire_rate=0.0, respawns=3
+        _vec_step(4), components={}, clip_fire_rate=0.0, respawns=3, stats=_empty_stats(4)
     )
 
     assert metrics["env/worker_respawns"] == pytest.approx(3.0)
+
+
+def test_two_coordinates_one_tile_apart_do_not_collide_in_the_heatmap() -> None:
+    """The old projection folded x and y mod 16, so (0, 0) and (0, 16) in the
+    same map landed in the same pixel. That collision is why the artifact did
+    not show what the env spec promised."""
+    heatmap = exploration_heatmap([ram.coord_key(0, 0, 5), ram.coord_key(0, 16, 5)])
+
+    assert int((heatmap > 0).sum()) == 2
+
+
+def test_the_heatmap_counts_a_repeated_coordinate_once_per_occurrence() -> None:
+    key = ram.coord_key(3, 4, 5)
+
+    heatmap = exploration_heatmap([key, key])
+
+    assert int(heatmap.max()) == 2
+
+
+def test_rollout_metrics_reports_badges_from_the_env_stats() -> None:
+    step = _vec_step(n_envs=2)
+    stats = [
+        {"coord_keys": [1], "badges": 3, "event_flags": 10, "step_count": 5, "episode_lengths": []},
+        {"coord_keys": [2], "badges": 1, "event_flags": 20, "step_count": 7, "episode_lengths": []},
+    ]
+
+    metrics = rollout_metrics(step, {}, 0.0, 0, stats)
+
+    assert metrics["progress/badges_max"] == pytest.approx(3.0)
+
+
+def test_rollout_metrics_counts_unique_coordinates_across_envs_without_double_counting() -> None:
+    step = _vec_step(n_envs=2)
+    stats = [
+        {"coord_keys": [1, 2], "badges": 0, "event_flags": 0, "step_count": 0, "episode_lengths": []},
+        {"coord_keys": [2, 3], "badges": 0, "event_flags": 0, "step_count": 0, "episode_lengths": []},
+    ]
+
+    metrics = rollout_metrics(step, {}, 0.0, 0, stats)
+
+    assert metrics["explore/unique_coords_total"] == pytest.approx(3.0)
+
+
+def test_rollout_metrics_reports_mean_completed_episode_length() -> None:
+    step = _vec_step(n_envs=2)
+    stats = [
+        {"coord_keys": [], "badges": 0, "event_flags": 0, "step_count": 0, "episode_lengths": [10]},
+        {"coord_keys": [], "badges": 0, "event_flags": 0, "step_count": 0, "episode_lengths": [20, 30]},
+    ]
+
+    metrics = rollout_metrics(step, {}, 0.0, 0, stats)
+
+    assert metrics["episode/length_mean"] == pytest.approx(20.0)

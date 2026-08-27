@@ -33,28 +33,49 @@ def contact_sheet(frames: np.ndarray) -> np.ndarray:
     return sheet
 
 
+MAP_TILE = 64
+MAPS_SHOWN = 12
+
+
 def exploration_heatmap(
     coord_keys: Iterable[int], height: int = 256, width: int = 256
 ) -> np.ndarray:
     """Visit counts over all envs, projected into one image.
 
     ram.coord_key packs (map_id << 16) | (x << 8) | y, each field a uint8, so
-    unpacking here must mirror that exactly: map_id = (key >> 16) & 0xFF,
-    x = (key >> 8) & 0xFF, y = key & 0xFF. Maps are laid out on a grid by id
-    rather than by true world position -- the reference implementation's
-    global_map.py has the real projection, and swapping it in later changes
-    only this function."""
-    heatmap = np.zeros((height, width), dtype=np.uint32)
-    maps_per_row = max(width // 16, 1)
+    unpacking here mirrors that exactly.
+
+    Coordinates render at their true (x, y) inside a per-map tile. The earlier
+    version folded x and y mod 16, which collided most distinct coordinates in
+    the same map -- the artifact looked plausible and showed almost nothing.
+    Only the top MAPS_SHOWN maps by unique-coordinate count get a tile: a
+    64x64 tile holds Pokemon Red's largest map, and a 256x256 image holds
+    twelve of them at 4 per row with room for the labels a caller may draw."""
+    counts: dict[int, int] = {}
     for key in coord_keys:
+        counts[key] = counts.get(key, 0) + 1
+
+    unique_per_map: dict[int, int] = {}
+    for key in counts:
         map_id = (key >> 16) & 0xFF
-        x = (key >> 8) & 0xFF
-        y = key & 0xFF
-        origin_row = (map_id // maps_per_row) * 16
-        origin_column = (map_id % maps_per_row) * 16
-        row = (origin_row + y % 16) % height
-        column = (origin_column + x % 16) % width
-        heatmap[row, column] += 1
+        unique_per_map[map_id] = unique_per_map.get(map_id, 0) + 1
+
+    ranked = sorted(unique_per_map, key=lambda m: (-unique_per_map[m], m))[:MAPS_SHOWN]
+    tile_index = {map_id: position for position, map_id in enumerate(ranked)}
+    maps_per_row = max(width // MAP_TILE, 1)
+
+    heatmap = np.zeros((height, width), dtype=np.uint32)
+    for key, count in counts.items():
+        map_id = (key >> 16) & 0xFF
+        position = tile_index.get(map_id)
+        if position is None:
+            continue
+        origin_row = (position // maps_per_row) * MAP_TILE
+        origin_column = (position % maps_per_row) * MAP_TILE
+        row = origin_row + min((key & 0xFF), MAP_TILE - 1)
+        column = origin_column + min(((key >> 8) & 0xFF), MAP_TILE - 1)
+        if row < height and column < width:
+            heatmap[row, column] += count
     return heatmap
 
 
@@ -63,14 +84,32 @@ def rollout_metrics(
     components: dict[str, float],
     clip_fire_rate: float,
     respawns: int,
+    stats: list[dict],
 ) -> dict[str, float]:
-    """Flat scalar dict, ready for wandb.log and for a JSON-lines record."""
+    """Flat scalar dict, ready for wandb.log and for a JSON-lines record.
+
+    `stats` is VecPokemonEnv.stats() -- one entry per env. Unique coordinates
+    are counted across the union of all envs, not summed per env: two envs that
+    walked the same route have explored one route, and summing would report
+    twice the exploration that happened."""
+    unique_coords = {key for entry in stats for key in entry["coord_keys"]}
+    unique_maps = {(key >> 16) & 0xFF for key in unique_coords}
+    lengths = [length for entry in stats for length in entry["episode_lengths"]]
+
     metrics = {
         "reward/mean": float(step.reward.mean()),
         "reward/max": float(step.reward.max()),
         "env/clip_fire_rate": float(clip_fire_rate),
         "env/worker_respawns": float(respawns),
         "env/episodes_finished": float(step.done.sum()),
+        "progress/badges_max": float(max(entry["badges"] for entry in stats)),
+        "progress/badges_mean": float(
+            sum(entry["badges"] for entry in stats) / len(stats)
+        ),
+        "progress/event_flags_max": float(max(entry["event_flags"] for entry in stats)),
+        "explore/unique_coords_total": float(len(unique_coords)),
+        "explore/unique_maps": float(len(unique_maps)),
+        "episode/length_mean": float(sum(lengths) / len(lengths)) if lengths else 0.0,
     }
     for name, value in components.items():
         metrics[f"reward/{name}"] = float(value)

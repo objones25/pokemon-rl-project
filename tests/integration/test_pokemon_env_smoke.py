@@ -210,7 +210,9 @@ def test_a_random_agent_drives_four_real_envs_end_to_end(tmp_path) -> None:
     try:
         vec_env.reset()
         step = _drive_random_steps(vec_env, generator, 32)
-        metrics = rollout_metrics(step, vec_env.last_components, vec_env.clip_fire_rate, 0)
+        metrics = rollout_metrics(
+            step, vec_env.last_components, vec_env.clip_fire_rate, 0, vec_env.stats()
+        )
         sheet = contact_sheet(step.frames)
         np.save(tmp_path / "contact_sheet.npy", sheet)
     finally:
