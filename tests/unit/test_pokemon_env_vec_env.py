@@ -123,6 +123,17 @@ def test_last_components_reports_the_mean_reward_breakdown_across_envs(
     )
 
 
+def test_last_step_reports_the_most_recent_vec_step(vec_env) -> None:
+    """`ppo.trainer` reads this after a rollout to build end-of-update
+    telemetry, alongside `last_components`/`clip_fire_rate` above -- it must
+    reflect the most recent `step()`, not the `reset()` before it."""
+    vec_env.reset()
+
+    result = vec_env.step(np.zeros(3, dtype=np.int64))
+
+    assert vec_env.last_step is result
+
+
 def test_state_dict_round_trips_the_per_env_step_counters(vec_env) -> None:
     """Asserts the per-env counters actually moved across, not just that a
     version constant matches -- the version would compare equal against a

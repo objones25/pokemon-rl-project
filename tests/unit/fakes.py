@@ -125,11 +125,9 @@ class FakeVecEnv:
     ordering tests only need to reason about the contracts under test, never
     real env dynamics.
 
-    Later tasks (checkpoint resume, W&B stats, clip-rate telemetry) extend
-    this same class with `state_dict`/`load_state_dict`, `stats()`,
-    `last_step`, and `clip_fire_rate` -- kept to exactly the Protocol's
-    surface plus the internal step counter those additions will read, so
-    nothing here has to be forked."""
+    Task 14 extends this same class with `reset()`, `stats()`, `last_step`,
+    `last_components`, and `clip_fire_rate` -- kept to exactly the Protocol's
+    surface `ppo.trainer` reads, so nothing here has to be forked."""
 
     def __init__(
         self,
@@ -142,10 +140,26 @@ class FakeVecEnv:
         self._aux_dim = aux_dim
         self._done_at_step = done_at_step
         self._reward = reward
-        self._step_count = 0
+        # step_calls doubles as the done_at_step script cursor and the count
+        # a trainer test asserts against -- one field, not two that could
+        # silently drift apart.
+        self.step_calls = 0
+        self.reset_calls = 0
+        self._last_step: VecStep | None = None
+
+    def reset(self) -> VecStep:
+        self.reset_calls += 1
+        self._last_step = VecStep(
+            frames=np.zeros((self.n_envs, 1, SCREEN_HEIGHT, SCREEN_WIDTH), dtype=np.uint8),
+            aux=np.zeros((self.n_envs, self._aux_dim), dtype=np.float32),
+            reward=np.zeros(self.n_envs, dtype=np.float32),
+            done=np.zeros(self.n_envs, dtype=bool),
+            episode_id=np.zeros(self.n_envs, dtype=np.int64),
+        )
+        return self._last_step
 
     def step(self, actions: np.ndarray) -> VecStep:
-        done = np.full(self.n_envs, self._step_count == self._done_at_step, dtype=bool)
+        done = np.full(self.n_envs, self.step_calls == self._done_at_step, dtype=bool)
         step = VecStep(
             frames=np.zeros((self.n_envs, 1, SCREEN_HEIGHT, SCREEN_WIDTH), dtype=np.uint8),
             aux=np.zeros((self.n_envs, self._aux_dim), dtype=np.float32),
@@ -153,20 +167,53 @@ class FakeVecEnv:
             done=done,
             episode_id=np.zeros(self.n_envs, dtype=np.int64),
         )
-        self._step_count += 1
+        self.step_calls += 1
+        self._last_step = step
         return step
+
+    @property
+    def last_step(self) -> VecStep | None:
+        """The most recent VecStep from either `reset()` or `step()`, for
+        end-of-update telemetry."""
+        return self._last_step
+
+    @property
+    def last_components(self) -> dict[str, float]:
+        """No reward components modeled here -- `pokemon_env.telemetry`'s own
+        tests cover the real per-component mean; this fake only needs a dict
+        `rollout_metrics` can merge."""
+        return {}
+
+    @property
+    def clip_fire_rate(self) -> float:
+        return 0.0
+
+    def stats(self) -> list[dict]:
+        """One dict per env, matching `FakeBackend.stats()`'s shape --
+        `rollout_metrics` reads `coord_keys`/`badges`/`event_flags`/
+        `episode_lengths` from every entry."""
+        return [
+            {
+                "coord_keys": [],
+                "badges": 0,
+                "event_flags": 0,
+                "step_count": self.step_calls,
+                "episode_lengths": [],
+            }
+            for _ in range(self.n_envs)
+        ]
 
     def state_dict(self) -> dict:
         """Round-trips the one piece of internal state a checkpoint test can
-        observe drifting: `_step_count`. Real shape (schema_version,
+        observe drifting: `step_calls`. Real shape (schema_version,
         aux_state_version, per-backend state) is `VecPokemonEnv`'s job and is
         exercised against the real class in test_pokemon_env_checkpoint.py --
         this fake only needs to prove `ppo.checkpoint` round-trips whatever
         `vec_env.state_dict()` hands it."""
-        return {"step_count": self._step_count}
+        return {"step_count": self.step_calls}
 
     def load_state_dict(self, state: dict) -> None:
-        self._step_count = state["step_count"]
+        self.step_calls = state["step_count"]
 
 
 class FakeLatentEncoder:

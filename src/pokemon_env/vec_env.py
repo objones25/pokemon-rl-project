@@ -95,6 +95,7 @@ class VecPokemonEnv:
         self._config = config
         self._needs_reset = np.zeros(config.n_envs, dtype=bool)
         self._last_components: dict[str, float] = {}
+        self._last_step: VecStep | None = None
         self._clipped_steps = 0
         self._total_steps = 0
 
@@ -106,6 +107,12 @@ class VecPokemonEnv:
     def last_components(self) -> dict[str, float]:
         """Mean reward per component over the most recent vector step."""
         return dict(self._last_components)
+
+    @property
+    def last_step(self) -> VecStep | None:
+        """The most recent VecStep, for end-of-update telemetry that needs
+        the raw reward/done array alongside the mean components above."""
+        return self._last_step
 
     @property
     def clip_fire_rate(self) -> float:
@@ -144,13 +151,15 @@ class VecPokemonEnv:
             frames[i, 0] = result.frame
             aux[i] = result.aux
 
-        return VecStep(
+        step = VecStep(
             frames=frames,
             aux=aux,
             reward=np.array([r.reward for r in results], dtype=np.float32),
             done=np.array([r.done for r in results], dtype=bool),
             episode_id=np.array([r.episode_id for r in results], dtype=np.int64),
         )
+        self._last_step = step
+        return step
 
     def stats(self) -> list[dict]:
         """One dict per env, in env order. Called once per PPO update."""
