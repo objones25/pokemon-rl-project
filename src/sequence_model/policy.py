@@ -39,6 +39,11 @@ from sequence_model.config import PolicyConfig
 from sequence_model.layers import RMSNorm
 from sequence_model.masks import build_chunk_mask
 from sequence_model.rope import rope_tables
+from sequence_model.telemetry import (
+    attention_distance_mass,
+    attention_logit_max,
+    residual_norm,
+)
 
 
 @dataclass(frozen=True)
@@ -152,3 +157,49 @@ class RecurrentTransformerPolicy(nn.Module):
 
         hidden = self.final_norm(x)[:, burn_in:]
         return ChunkOutput(logits=self.actor(hidden), value=self.critic(hidden).squeeze(-1))
+
+    @torch.no_grad()
+    def diagnostics(
+        self,
+        latent: torch.Tensor,
+        aux_state: torch.Tensor,
+        prev_action: torch.Tensor,
+        prev_reward: torch.Tensor,
+        abs_pos: torch.Tensor,
+        episode_id: torch.Tensor,
+        layer: int = -1,
+    ) -> dict[str, float]:
+        """Leading indicators, computed on a sampled minibatch every N updates.
+
+        Never on the hot path: attention_diagnostics materializes the full
+        attention matrix that SDPA deliberately never forms.
+
+        This lives on the policy rather than in the PPO package because
+        attention_diagnostics' `x` is the post-attn_norm input to one block --
+        not reconstructible from outside without duplicating the stack -- and
+        residual_norm needs the final hidden state, which ChunkOutput does not
+        expose."""
+        x = self.adapter(latent, aux_state, prev_action, prev_reward)
+        cos, sin = rope_tables(abs_pos, self.config.head_dim, self.config.rope_theta)
+        mask = build_chunk_mask(abs_pos, episode_id, self.config.context_len)
+
+        blocks = cast("list[TransformerBlock]", list(self.blocks))
+        tapped = blocks[layer]
+        probabilities: torch.Tensor | None = None
+        logit_max = 0.0
+        for block in blocks:
+            if block is tapped:
+                normed = block.attn_norm(x)
+                q, k, probabilities = block.attention.attention_diagnostics(normed, cos, sin, mask)
+                logit_max = attention_logit_max(q, k, mask)
+            x = block.forward_chunk(x, cos, sin, mask)
+
+        assert probabilities is not None  # `tapped` is drawn from `blocks`, so the loop sets it
+        hidden = self.final_norm(x)
+        metrics = {
+            "attn/logit_max": logit_max,
+            "model/residual_norm": residual_norm(hidden),
+        }
+        for label, mass in attention_distance_mass(probabilities).items():
+            metrics[f"attn/dist_{label}"] = mass
+        return metrics

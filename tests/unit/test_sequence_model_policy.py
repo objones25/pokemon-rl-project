@@ -6,6 +6,7 @@ import torch
 from sequence_model.block import TransformerBlock
 from sequence_model.config import PolicyConfig
 from sequence_model.policy import RecurrentTransformerPolicy
+from sequence_model.telemetry import DISTANCE_BUCKETS
 
 
 @pytest.fixture
@@ -367,3 +368,88 @@ def _run_rollout_with_reset_at(policy, latent, aux, action, reward, cache, reset
         if t == reset_at - 1:
             cache.reset(torch.ones(latent.shape[0], dtype=torch.bool))
     return torch.stack(collected, dim=1)
+
+
+def _tiny_policy_and_chunk_inputs() -> tuple[RecurrentTransformerPolicy, dict]:
+    """Helper, not a test: a CPU policy small enough to materialize the full
+    attention matrix, plus one seeded chunk of inputs."""
+    torch.manual_seed(0)
+    config = PolicyConfig(
+        d_model=32, n_layers=2, n_heads=2, head_dim=16, n_kv_heads=1,
+        d_ff=64, context_len=8, latent_dim=16, aux_state_dim=4,
+    )
+    policy = RecurrentTransformerPolicy(config, latent_mean=torch.zeros(16), latent_std=torch.ones(16))
+    batch, length = 2, 6
+    inputs = {
+        "latent": torch.randn(batch, length, 16),
+        "aux_state": torch.randn(batch, length, 4),
+        "prev_action": torch.zeros(batch, length, dtype=torch.int64),
+        "prev_reward": torch.zeros(batch, length),
+        "abs_pos": torch.arange(length).expand(batch, length).contiguous(),
+        "episode_id": torch.zeros(batch, length, dtype=torch.int64),
+    }
+    return policy, inputs
+
+
+def test_diagnostics_reports_one_mass_entry_per_distance_bucket() -> None:
+    policy, inputs = _tiny_policy_and_chunk_inputs()
+
+    metrics = policy.diagnostics(**inputs)
+
+    assert sum(1 for key in metrics if key.startswith("attn/dist_")) == len(DISTANCE_BUCKETS)
+
+
+def test_diagnostics_attention_mass_sums_to_one() -> None:
+    """NOT a discriminating test on its own: attention_distance_mass divides
+    by its own total, so this holds for almost any input tensor, correct or
+    not. Kept only as a sanity check; see the isolated-query test below for
+    the assertion that actually exercises masking and softmax."""
+    policy, inputs = _tiny_policy_and_chunk_inputs()
+
+    metrics = policy.diagnostics(**inputs)
+    total = sum(value for key, value in metrics.items() if key.startswith("attn/dist_"))
+
+    assert total == pytest.approx(1.0, abs=1e-5)
+
+
+def test_diagnostics_puts_all_mass_in_bucket_zero_when_every_query_is_isolated() -> None:
+    """A distinct episode_id per position, combined with the causal term,
+    means query i shares an episode with no key but itself -- distance 0 is
+    the only reachable bucket for every query in the chunk. This fails if
+    `probabilities` were not post-softmax (mass would not sum to 1 within
+    a row), not masked (other positions would leak into the row), or if the
+    wrong tensor reached attention_distance_mass (shapes would not even
+    line up with DISTANCE_BUCKETS' L x L indexing)."""
+    policy, inputs = _tiny_policy_and_chunk_inputs()
+    length = inputs["latent"].shape[1]
+    batch = inputs["latent"].shape[0]
+    inputs["episode_id"] = torch.arange(length).expand(batch, length).contiguous()
+
+    metrics = policy.diagnostics(**inputs)
+
+    assert metrics["attn/dist_0"] == pytest.approx(1.0, abs=1e-6)
+
+
+def test_diagnostics_residual_norm_matches_the_untouched_rms_norm_scale() -> None:
+    """`> 0.0` would pass for almost any tensor, including the wrong one, so
+    it does not prove diagnostics reads the post-final_norm hidden state.
+    RMSNorm.weight is initialized to all-ones and _init_weights only touches
+    nn.Linear/nn.Embedding, so the per-token L2 norm leaving final_norm is
+    pinned to sqrt(d_model) = sqrt(32) regardless of the input -- an exact
+    value that the pre-norm residual stream would not hit."""
+    policy, inputs = _tiny_policy_and_chunk_inputs()
+
+    metrics = policy.diagnostics(**inputs)
+
+    assert metrics["model/residual_norm"] == pytest.approx(32**0.5, rel=1e-3)
+
+
+def test_diagnostics_does_not_build_a_gradient_graph() -> None:
+    """It runs on a sampled minibatch beside the update; if it kept a graph it
+    would hold the full attention matrix alive across the optimizer step."""
+    policy, inputs = _tiny_policy_and_chunk_inputs()
+    inputs["latent"].requires_grad_(True)
+
+    policy.diagnostics(**inputs)
+
+    assert inputs["latent"].grad is None
