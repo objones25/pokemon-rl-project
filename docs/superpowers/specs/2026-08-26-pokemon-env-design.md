@@ -372,7 +372,7 @@ that the starting state changed underneath it.
 
 | field | type | size |
 |---|---|---|
-| emulator state | `bytes` | ~50 KB |
+| emulator state | `bytes` | **167,677 B** (measured) |
 | `M` per component | float | — |
 | coord set | `int32` tensor, `map*65536 + x*256 + y` | ~80 KB at 20k coords |
 | running explore sum, `N` | float, int | — |
@@ -392,15 +392,24 @@ penalty, which this design drops.
 
 ### This settles the cache-vs-emulator-state question
 
-All 64 emulator states total roughly **3.2 MB**, negligible beside the
-sequence model's 256 MiB KV cache. Once emulator state is saved, the KV cache is
-being restored against the exact game position it remembers — the only condition
-under which saving it was ever coherent. **Save both.**
+**Measured, not estimated:** one PyBoy save state is **167,677 bytes** (~164
+KiB), so all 64 envs total **10.73 MB** — 4.0% of the sequence model's 256 MiB
+KV cache. Once emulator state is saved, the KV cache is being restored against
+the exact game position it remembers, which is the only condition under which
+saving it was ever coherent. **Save both.**
 
-This is conditional on the ~50 KB figure, which is an estimate from Game Boy
-memory sizes (WRAM 8K + VRAM 8K + cart SRAM 32K + HRAM/OAM/CPU), not a
-measurement. **Measuring the real `save_state` size is the first task in the
-implementation plan**, because the entire decision pivots on it.
+The earlier draft of this section estimated ~50 KB per state from Game Boy
+memory sizes (WRAM 8K + VRAM 8K + cart SRAM 32K + HRAM/OAM/CPU) and put the
+total at ~3.2 MB. The real figure is **3.3× that** — PyBoy's serialization
+carries more emulator state than the raw memory regions. The conclusion is
+unchanged because 10.73 MB is still negligible against 256 MiB, but the margin
+is smaller than the estimate implied, and any future change that multiplies
+per-env state (more envs, frame history, a second emulator per env) should be
+re-costed against the measured number rather than the estimate.
+
+Measured by `test_save_state_is_small_enough_to_checkpoint_all_64_envs` in
+`tests/integration/test_pokemon_env_smoke.py`, which holds the 256 KiB bound as
+a regression guard.
 
 ## Failure handling
 
