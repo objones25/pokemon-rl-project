@@ -36,12 +36,24 @@ class AtomicHfClient(HfClient, Protocol):
 
 
 class RealHfClient:
-    """Adapts huggingface_hub.HfApi to the HfClient protocol."""
+    """Adapts huggingface_hub.HfApi to the HfClient protocol.
 
-    def __init__(self, api: HfApi, repo_id: str, repo_type: str = "dataset") -> None:
+    `revision` pins `download_bytes` to a resolved commit (or any git ref
+    `HfApi.hf_hub_download` accepts) -- verified by introspection against the
+    installed `huggingface_hub`: `hf_hub_download`'s `revision` keyword
+    defaults to `None`, so passing it through unconditionally is a no-op for
+    an unpinned client. Uploads are deliberately NOT pinned: they always
+    target the branch head, and a `revision` there would be meaningless (a
+    non-branch ref) or actively harmful (silently committing to a stale
+    branch instead of the current one)."""
+
+    def __init__(
+        self, api: HfApi, repo_id: str, repo_type: str = "dataset", revision: str | None = None
+    ) -> None:
         self._api = api
         self._repo_id = repo_id
         self._repo_type = repo_type
+        self._revision = revision
 
     def upload_bytes(self, data: bytes, path_in_repo: str) -> None:
         self._api.upload_file(
@@ -66,7 +78,10 @@ class RealHfClient:
     def download_bytes(self, path_in_repo: str) -> bytes | None:
         try:
             local_path = self._api.hf_hub_download(
-                repo_id=self._repo_id, filename=path_in_repo, repo_type=self._repo_type
+                repo_id=self._repo_id,
+                filename=path_in_repo,
+                repo_type=self._repo_type,
+                revision=self._revision,
             )
         except EntryNotFoundError:
             return None

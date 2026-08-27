@@ -16,7 +16,7 @@ class _FakeHfApi:
         self._tmp_path = tmp_path
         self.uploaded_calls: list[tuple[str, str, str]] = []
         self.commits: list[dict] = []
-        self.download_calls: list[tuple[str, str, str]] = []
+        self.download_calls: list[tuple[str, str, str, str | None]] = []
 
     def upload_file(self, path_or_fileobj: bytes, path_in_repo: str, repo_id: str, repo_type: str) -> None:
         self.uploaded_calls.append((path_in_repo, repo_id, repo_type))
@@ -38,8 +38,10 @@ class _FakeHfApi:
             assert isinstance(data, bytes)  # every caller in this codebase passes bytes, never a path/file object
             dest.write_bytes(data)
 
-    def hf_hub_download(self, repo_id: str, filename: str, repo_type: str) -> str:
-        self.download_calls.append((repo_id, filename, repo_type))
+    def hf_hub_download(
+        self, repo_id: str, filename: str, repo_type: str, revision: str | None = None
+    ) -> str:
+        self.download_calls.append((repo_id, filename, repo_type, revision))
         dest = self._tmp_path / filename.replace("/", "_")
         if not dest.exists():
             raise EntryNotFoundError("not found")
@@ -106,12 +108,55 @@ def test_download_bytes_forwards_repo_id_and_repo_type(tmp_path) -> None:
 
     client.download_bytes("file.txt")
 
-    assert api.download_calls == [("me/repo", "file.txt", "model")]
+    assert api.download_calls == [("me/repo", "file.txt", "model", None)]
+
+
+def test_download_bytes_forwards_a_pinned_revision_to_hf_hub_download(tmp_path) -> None:
+    """PPOConfig.frozen_encoder_revision is required and pinned precisely so
+    a later push to the encoder repo cannot change features underneath a
+    running agent -- this is the plumbing that pin actually depends on."""
+    api = _FakeHfApi(tmp_path)
+    client = RealHfClient(api, "me/repo", repo_type="model", revision="abc123")  # type: ignore[arg-type]
+    client.upload_bytes(b"hi", "file.txt")
+
+    client.download_bytes("file.txt")
+
+    assert api.download_calls == [("me/repo", "file.txt", "model", "abc123")]
+
+
+def test_download_bytes_passes_none_revision_when_the_client_is_unpinned(tmp_path) -> None:
+    """hf_hub_download's own `revision` keyword defaults to None (verified
+    by introspection against the installed huggingface_hub), so an unpinned
+    RealHfClient must pass None through explicitly rather than omit the
+    keyword -- either behaves the same against the real API, but a caller
+    stubbing hf_hub_download without a default for `revision` would only
+    catch the omitted-keyword case, not a wrong non-None value."""
+    api = _FakeHfApi(tmp_path)
+    client = RealHfClient(api, "me/repo")  # type: ignore[arg-type]
+    client.upload_bytes(b"hi", "file.txt")
+
+    client.download_bytes("file.txt")
+
+    assert api.download_calls == [("me/repo", "file.txt", "dataset", None)]
+
+
+def test_upload_bytes_ignores_the_configured_revision(tmp_path) -> None:
+    """Uploads always target the branch head -- pinning them to the same
+    revision as downloads would be meaningless (a non-branch ref) or
+    actively harmful (silently committing to a stale branch)."""
+    api = _FakeHfApi(tmp_path)
+    client = RealHfClient(api, "me/repo", repo_type="model", revision="abc123")  # type: ignore[arg-type]
+
+    client.upload_bytes(b"hi", "file.txt")
+
+    assert api.uploaded_calls == [("file.txt", "me/repo", "model")]
 
 
 def test_download_bytes_does_not_swallow_unrelated_errors() -> None:
     class _BrokenApi:
-        def hf_hub_download(self, repo_id: str, filename: str, repo_type: str) -> str:
+        def hf_hub_download(
+            self, repo_id: str, filename: str, repo_type: str, revision: str | None = None
+        ) -> str:
             raise RuntimeError("connection reset")
 
     client = RealHfClient(_BrokenApi(), "me/repo")  # type: ignore[arg-type]

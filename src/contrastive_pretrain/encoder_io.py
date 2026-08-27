@@ -171,14 +171,16 @@ def load_frozen_encoder(repo_id: str, revision: str | None = None) -> nn.Module:
         wrong with no error raised.
 
     Raw, unnormalized output -- the affine normalization layer is the
-    caller's job, using that repo's latent_stats.json."""
-    if revision is not None:
-        raise NotImplementedError(
-            "revision pinning is not yet supported — hf_storage.client.HfClient has no revision parameter"
-        )
+    caller's job, using that repo's latent_stats.json.
+
+    `revision` pins the download to a resolved commit so a later push to
+    `repo_id` cannot change the features underneath a running PPO agent --
+    PPOConfig.frozen_encoder_revision requires exactly this. Passed straight
+    through to RealHfClient; omit it only for exploratory/local use where
+    `repo_id`'s branch head is acceptable."""
     from huggingface_hub import HfApi
 
-    client = RealHfClient(HfApi(), repo_id, repo_type="model")
+    client = RealHfClient(HfApi(), repo_id, repo_type="model", revision=revision)
     return _load_frozen_encoder_from_client(client)
 
 

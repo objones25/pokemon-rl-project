@@ -361,8 +361,66 @@ def test_compute_latent_stats_restores_original_training_mode(
     assert encoder.training is was_training
 
 
-def test_load_frozen_encoder_raises_on_revision_parameter() -> None:
-    from contrastive_pretrain.encoder_io import load_frozen_encoder
+class _FakeRealHfClient:
+    """Stands in for hf_storage.client.RealHfClient at load_frozen_encoder's
+    call site -- records exactly what it was constructed with, so these
+    tests never open a real network connection."""
 
-    with pytest.raises(NotImplementedError, match="revision"):
-        load_frozen_encoder("objones25/test-repo", revision="v1")
+    def __init__(self, api: object, repo_id: str, repo_type: str, revision: str | None = None) -> None:
+        self.api = api
+        self.repo_id = repo_id
+        self.repo_type = repo_type
+        self.revision = revision
+
+
+@pytest.mark.parametrize(
+    ("revision_arg", "expected_revision"),
+    [pytest.param("abc123", "abc123", id="pinned"), pytest.param(None, None, id="unpinned")],
+)
+def test_load_frozen_encoder_forwards_the_revision_argument(
+    monkeypatch: pytest.MonkeyPatch, revision_arg: str | None, expected_revision: str | None
+) -> None:
+    """PPOConfig.frozen_encoder_revision is required and pinned so a later
+    push to the encoder repo cannot change features underneath a running
+    agent -- this is the wiring that requirement depends on."""
+    from contrastive_pretrain import encoder_io
+
+    captured: dict = {}
+    monkeypatch.setattr(encoder_io, "RealHfClient", _FakeRealHfClient)
+    monkeypatch.setattr(
+        encoder_io,
+        "_load_frozen_encoder_from_client",
+        lambda client: captured.update(client=client) or nn.Identity(),
+    )
+
+    encoder_io.load_frozen_encoder("objones25/test-repo", revision=revision_arg)
+
+    assert captured["client"].revision == expected_revision
+
+
+def test_load_frozen_encoder_targets_the_model_repo_type(monkeypatch: pytest.MonkeyPatch) -> None:
+    from contrastive_pretrain import encoder_io
+
+    captured: dict = {}
+    monkeypatch.setattr(encoder_io, "RealHfClient", _FakeRealHfClient)
+    monkeypatch.setattr(
+        encoder_io,
+        "_load_frozen_encoder_from_client",
+        lambda client: captured.update(client=client) or nn.Identity(),
+    )
+
+    encoder_io.load_frozen_encoder("objones25/test-repo")
+
+    assert captured["client"].repo_type == "model"
+
+
+def test_load_frozen_encoder_returns_the_loaded_module(monkeypatch: pytest.MonkeyPatch) -> None:
+    from contrastive_pretrain import encoder_io
+
+    sentinel = nn.Identity()
+    monkeypatch.setattr(encoder_io, "RealHfClient", _FakeRealHfClient)
+    monkeypatch.setattr(encoder_io, "_load_frozen_encoder_from_client", lambda client: sentinel)
+
+    result = encoder_io.load_frozen_encoder("objones25/test-repo")
+
+    assert result is sentinel
