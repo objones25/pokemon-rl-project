@@ -164,6 +164,70 @@ def test_output_projections_are_scaled_by_one_over_sqrt_two_n_layers(
     assert observed == pytest.approx(0.01, rel=0.15)
 
 
+def test_step_runs_under_bf16_autocast_with_a_matching_bf16_cache(
+    policy: RecurrentTransformerPolicy,
+) -> None:
+    """The PPO rollout loop passes torch.bfloat16 explicitly for the KV
+    cache, which only works inside a matching autocast context: outside
+    one, _project's q comes out float32 (RMSNorm's fp32 weight promotes
+    it) while cache.write casts K/V to the cache dtype, and SDPA raises a
+    dtype-mismatch RuntimeError. This also gives RMSNorm's float32-mean-
+    square/dtype-round-trip its first non-fp32 test coverage."""
+    cache = policy.new_cache(n_envs=3, device=torch.device("cpu"), dtype=torch.bfloat16)
+
+    with torch.autocast("cpu", dtype=torch.bfloat16):
+        out = policy.step(
+            torch.randn(3, 16), torch.randn(3, 4),
+            torch.full((3,), 7, dtype=torch.long), torch.zeros(3), cache,
+        )
+
+    assert (tuple(out.logits.shape), tuple(out.value.shape)) == ((3, 7), (3,))
+
+
+def test_step_matches_chunk_forward_across_a_cache_reset_episode_boundary(
+    policy: RecurrentTransformerPolicy,
+) -> None:
+    """The rollout-side reset (cache.reset) and the chunk-side episode mask
+    are each tested alone; PPO actually executes their composition. Drives
+    step() across a 6-token rollout with cache.reset() fired after token 2
+    (as the rollout loop would on `done`), then compares against
+    forward_chunk given abs_pos that restarts at 0 and episode_id that
+    increments -- exactly what the rollout would have recorded. Masks.py
+    notes this composition arises "roughly once per 160 chunks", which is
+    exactly the frequency at which a bug here would never be noticed."""
+    torch.manual_seed(6)
+    latent, aux, action, reward = _episode(seq_len=6, n_envs=1)
+    cache = policy.new_cache(n_envs=1, device=torch.device("cpu"))
+
+    stepped = _run_rollout_with_reset_at(policy, latent, aux, action, reward, cache, reset_at=3)
+    chunked = policy.forward_chunk(
+        latent, aux, action, reward,
+        abs_pos=torch.tensor([[0, 1, 2, 0, 1, 2]]),
+        episode_id=torch.tensor([[0, 0, 0, 1, 1, 1]]),
+        burn_in=0,
+    )
+
+    assert (stepped - chunked.logits).abs().max().item() == pytest.approx(0.0, abs=1e-5)
+
+
+def test_step_output_is_not_an_inference_tensor(policy: RecurrentTransformerPolicy) -> None:
+    """step() is deliberately @torch.no_grad(), NOT @torch.inference_mode():
+    rollout outputs become inputs to forward_chunk during the PPO update, and
+    an inference tensor raises "Inference tensors cannot be saved for
+    backward" the moment it enters autograd -- at the first update, on a paid
+    GPU. requires_grad is False either way, so is_inference() is the only
+    check that distinguishes them."""
+    cache = policy.new_cache(n_envs=3, device=torch.device("cpu"))
+
+    out = policy.step(
+        torch.randn(3, 16), torch.randn(3, 4),
+        torch.full((3,), 7, dtype=torch.long), torch.zeros(3), cache,
+    )
+
+    assert out.logits.is_inference() is False
+    assert out.value.is_inference() is False
+
+
 def _episode(seq_len: int, n_envs: int) -> tuple[torch.Tensor, ...]:
     """Helper, not a test: a synthetic (n_envs, seq_len) rollout."""
     return (
@@ -181,4 +245,17 @@ def _run_rollout(policy, latent, aux, action, reward, cache) -> torch.Tensor:
         policy.step(latent[:, t], aux[:, t], action[:, t], reward[:, t], cache).logits
         for t in range(latent.shape[1])
     ]
+    return torch.stack(collected, dim=1)
+
+
+def _run_rollout_with_reset_at(policy, latent, aux, action, reward, cache, reset_at) -> torch.Tensor:
+    """Helper, not a test: like _run_rollout, but fires cache.reset(...) for
+    every env immediately after processing token index `reset_at - 1`, as
+    the rollout loop would on receiving `done=True` for that transition."""
+    collected = []
+    for t in range(latent.shape[1]):
+        out = policy.step(latent[:, t], aux[:, t], action[:, t], reward[:, t], cache)
+        collected.append(out.logits)
+        if t == reset_at - 1:
+            cache.reset(torch.ones(latent.shape[0], dtype=torch.bool))
     return torch.stack(collected, dim=1)

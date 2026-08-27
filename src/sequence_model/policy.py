@@ -92,7 +92,15 @@ class RecurrentTransformerPolicy(nn.Module):
         """`dtype` is the KV cache's storage dtype. The spec's 256 MiB
         figure for 64 envs x 1024 context is bf16 K+V; float32 doubles it
         to 512 MiB. float32 is the default because the CPU tests run
-        there, and the PPO rollout loop passes torch.bfloat16 explicitly."""
+        there, and the PPO rollout loop passes torch.bfloat16 explicitly.
+
+        A non-default dtype requires calling step() inside a matching
+        `torch.autocast(device.type, dtype=dtype)` context. Outside
+        autocast, `_project`'s q comes out float32 (RMSNorm's fp32 weight
+        promotes it) while `cache.write` casts K/V to the cache dtype, and
+        SDPA raises "Expected query, key, and value to have the same
+        dtype". Inside the matching autocast context, q is cast to the
+        autocast dtype too and the mismatch does not occur."""
         return RolloutCache.empty(self.config, n_envs, device, dtype=dtype)
 
     @torch.no_grad()
