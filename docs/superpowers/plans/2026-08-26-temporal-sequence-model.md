@@ -1816,7 +1816,7 @@ class RecurrentTransformerPolicy(nn.Module):
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `uv run pytest tests/unit/test_sequence_model_policy.py -v --no-cov`
-Expected: 10 passed
+Expected: 9 passed
 
 - [ ] **Step 5: Prove the two load-bearing tests can fail**
 
@@ -1889,9 +1889,17 @@ def test_distance_mass_assigns_each_distance_to_its_bucket(
     assert mass[expected_bucket] == pytest.approx(1.0, abs=1e-6)
 
 
-def test_distance_mass_buckets_sum_to_one_for_normalized_weights() -> None:
+def test_distance_mass_buckets_sum_to_one_for_causal_weights() -> None:
+    """Weights must be causal, which is how this function is always called
+    -- build_chunk_mask guarantees q_pos >= k_pos, so distance is never
+    negative. Softmaxing an unmasked score matrix would put mass at
+    negative distances (attending to the future), which no bucket covers
+    and which never occurs in a real call."""
     torch.manual_seed(0)
-    weights = torch.softmax(torch.randn(2, 2, 16, 16), dim=-1)
+    seq_len = 16
+    causal = torch.arange(seq_len).view(-1, 1) >= torch.arange(seq_len).view(1, -1)
+    scores = torch.randn(2, 2, seq_len, seq_len).masked_fill(~causal, float("-inf"))
+    weights = torch.softmax(scores, dim=-1)
 
     mass = attention_distance_mass(weights)
 
@@ -1968,7 +1976,12 @@ import math
 import torch
 
 # (label, inclusive lower bound, exclusive upper bound) over q_index - k_index.
+# Distance 0 is self-attention and gets its own bucket: attention here is
+# always causal, so distance is never negative, and mass piling up at 0 is
+# exactly the "the model is ignoring its context" signal this metric exists
+# to surface. Without a 0 bucket the buckets cannot sum to 1.
 DISTANCE_BUCKETS: tuple[tuple[str, int, int], ...] = (
+    ("0", 0, 1),
     ("1", 1, 2),
     ("2-8", 2, 9),
     ("9-64", 9, 65),
