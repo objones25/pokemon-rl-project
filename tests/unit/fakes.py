@@ -69,6 +69,9 @@ class FakeBackend:
         self._step_count = step_count
 
     def _result(self) -> StepResult:
+        # reset/step/state_dict/load_state_dict/close and this helper exist
+        # only to satisfy EnvBackend's structural Protocol surface -- no test
+        # calls them today; only stats() is exercised.
         return StepResult(
             frame=np.zeros((144, 160), dtype=np.uint8),
             aux=np.zeros(AUX_STATE_DIM, dtype=np.float32),

@@ -181,3 +181,21 @@ def test_load_state_dict_rejects_a_stale_schema_version(vec_env) -> None:
 
     with pytest.raises(ValueError, match="schema_version=99"):
         vec_env.load_state_dict(state)
+
+
+def test_load_state_dict_rejects_a_pre_task_2_checkpoint_missing_episode_lengths(
+    vec_env,
+) -> None:
+    """A schema_version=1 checkpoint predates episode_lengths existing on the
+    session state dict at all. EnvSession.load_state_dict reads
+    state["episode_lengths"] directly, so without this version gate a resume
+    would reach that read and die on a bare KeyError instead of naming the
+    real mismatch."""
+    vec_env.reset()
+    state = vec_env.state_dict()
+    state["schema_version"] = 1
+    for backend_state in state["backends"]:
+        del backend_state["session"]["episode_lengths"]
+
+    with pytest.raises(ValueError, match="schema_version=1"):
+        vec_env.load_state_dict(state)
