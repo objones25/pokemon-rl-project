@@ -46,10 +46,23 @@ def build_aux_state(
     """(32,) float32 in [-1, 1]. See the design spec's slot table."""
     raw = np.zeros(AUX_STATE_DIM, dtype=np.float32)
 
+    # Slots past party_size hold whatever the last Pokemon to occupy them left
+    # behind: Pokemon Red does not clear a slot when one is deposited or
+    # released. Reading all six unconditionally shows the policy a party the
+    # agent does not have -- five phantom Pokemon with levels and HP.
+    # Clamped because RAM holds out-of-range values mid-write, and a
+    # party_size of 255 would otherwise slice past the six real slots.
+    live = min(ram.party_size(mem), ram.PARTY_SLOTS)
+
     raw[0] = ram.party_size(mem) / ram.PARTY_SLOTS
-    raw[1:7] = [level / ram.MAX_LEVEL for level in ram.party_levels(mem)]
+    raw[1:7] = [
+        (level / ram.MAX_LEVEL if i < live else 0.0)
+        for i, level in enumerate(ram.party_levels(mem))
+    ]
+    party_hp = ram.party_hp(mem)
     raw[7:13] = [
-        (current / maximum) if maximum > 0 else 0.0 for current, maximum in ram.party_hp(mem)
+        (current / maximum if i < live and maximum > 0 else 0.0)
+        for i, (current, maximum) in enumerate(party_hp)
     ]
     raw[13] = ram.badge_count(mem) / ram.MAX_BADGES
     raw[14] = ram.event_flag_count(mem) / ram.EVENT_FLAG_COUNT
@@ -61,7 +74,15 @@ def build_aux_state(
     raw[18] = 1.0 if ram.in_battle(mem) else 0.0
     raw[19] = ram.read_money(mem) / ram.MAX_MONEY
     raw[20:26] = [level / ram.MAX_LEVEL for level in ram.opponent_levels(mem)]
-    raw[26] = ram.aggregate_hp_fraction(mem)
+    # Live slots only, and deliberately NOT ram.aggregate_hp_fraction, which
+    # sums all six. A stale full-health Pokemon in a vacated slot would
+    # otherwise mask the live one being nearly dead. That function is left
+    # alone because rewards.py's healing term is built on it -- changing it
+    # here would silently alter reward semantics, which is a separate
+    # decision from fixing what the policy observes.
+    live_hp = party_hp[:live]
+    live_max = sum(maximum for _, maximum in live_hp)
+    raw[26] = (sum(current for current, _ in live_hp) / live_max) if live_max else 0.0
 
     raw[27] = math.log1p(exploration.coords_seen) / math.log1p(_COORD_SATURATION)
     raw[28] = step_count / max_steps

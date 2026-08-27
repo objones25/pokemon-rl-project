@@ -532,11 +532,31 @@ scratch, and these are real:
 - **`EnvConfig.seed` and `EnvConfig.frozen_encoder_repo_id` are unused.** Both
   exist for the PPO trainer, which does not exist yet. If PPO ends up not
   needing them, delete them rather than leaving dead config.
-- **`ram.party_levels` / `ram.party_hp` read all six party slots regardless of
-  `party_size`,** so stale RAM in unused slots can inflate `level_score` and
-  aux slots 1–12. This matches the reference implementation, and
-  `max_historical` means it is paid at most once per run, but it is a genuine
-  source of a plausible-but-wrong number if reward tuning ever looks strange.
+- **~~`ram.party_levels` / `ram.party_hp` inflate `level_score`~~ — FIXED, and
+  the original diagnosis was wrong.** Pokemon Red does not clear a party slot
+  when a Pokemon is deposited or released, so slots past `party_size` keep the
+  previous occupant's level and HP. The first write-up claimed this inflated
+  the level reward. Measured, it does not: a stale slot is a *constant offset*
+  that cancels in a max-historical delta.
+
+  What the measurement did show is a real observation defect — with
+  `party_size = 1` and five stale slots the policy saw six Pokemon it did not
+  have, and slot 26's aggregate HP was diluted across a party that did not
+  exist (a stale full-health Pokemon masking the live one at 30/60). Fixed in
+  `aux_state.build_aux_state`: slots 1–12 are zeroed past `party_size`, slot 26
+  aggregates over live slots only, and `party_size` is clamped to
+  `PARTY_SLOTS` because RAM holds out-of-range values mid-write.
+
+  `ram.aggregate_hp_fraction` is deliberately left summing all six, because
+  `rewards.py`'s healing term is built on it; changing it would alter reward
+  semantics, which is a separate decision from fixing what the policy observes.
+
+  Worth knowing, since it looks like a bug and is not: after a deposit the
+  level reward genuinely goes quiet until the score climbs back above its
+  previous maximum. Masking by `party_size` deepens that (score 104 → 14
+  rather than 104 → 89). That is §4's `max_historical` doing its stated job —
+  *"prevents the agent from exploiting cycles (e.g. repeatedly depositing and
+  withdrawing a Pokemon)"* — not a defect to fix.
 - **`clip_fire_rate` counts reset observations in its denominator,** which
   dilutes it slightly. Deliberate and documented in the tests; read the 0.1%
   threshold above with that in mind.

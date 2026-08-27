@@ -83,3 +83,70 @@ def test_aux_state_version_is_recorded_for_checkpoint_validation() -> None:
     """A policy trained against layout v1 and fed v2 data is silently wrong in
     exactly the way a PolicyConfig mismatch is -- no crash, no shape error."""
     assert AUX_STATE_VERSION == 1
+
+
+def _set_party(emulator, size: int, levels: list[int]) -> None:
+    """Helper, not a test: writes a party of `size` members while leaving
+    higher slots holding whatever `levels` says -- which is how Pokemon Red
+    actually behaves after a deposit, since it does not clear the vacated
+    slot."""
+    emulator.memory[ram.PARTY_SIZE_ADDR] = size
+    for i, level in enumerate(levels):
+        emulator.memory[ram.PARTY_LEVEL_BASE + ram.PARTY_STRIDE * i] = level
+
+
+def test_level_slots_past_the_party_size_are_zero(fake_emulator) -> None:
+    """Pokemon Red does not clear a slot when a Pokemon leaves the party, so
+    after depositing five the struct still holds their levels. Reading all six
+    unconditionally shows the policy a party the agent does not have."""
+    _set_party(fake_emulator, size=1, levels=[20, 20, 20, 20, 20, 20])
+
+    result = _build(fake_emulator)
+
+    assert result[2:7].tolist() == [-1.0, -1.0, -1.0, -1.0, -1.0]
+
+
+def test_the_live_level_slot_still_reports_its_pokemon(fake_emulator) -> None:
+    """The masking must not blank the slots that ARE live: level 20 of 100 is
+    0.2 raw, which centers to -0.6."""
+    _set_party(fake_emulator, size=1, levels=[20, 20, 20, 20, 20, 20])
+
+    result = _build(fake_emulator)
+
+    assert result[1].item() == pytest.approx(-0.6)
+
+
+def test_hp_slots_past_the_party_size_are_zero(fake_emulator) -> None:
+    fake_emulator.memory[ram.PARTY_SIZE_ADDR] = 1
+    fake_emulator.memory[ram.PARTY_HP_BASE + 1] = 30
+    fake_emulator.memory[ram.PARTY_MAX_HP_BASE + 1] = 60
+    fake_emulator.memory[ram.PARTY_HP_BASE + ram.PARTY_STRIDE + 1] = 40
+    fake_emulator.memory[ram.PARTY_MAX_HP_BASE + ram.PARTY_STRIDE + 1] = 40
+
+    result = _build(fake_emulator)
+
+    assert (result[7].item(), result[8].item()) == (pytest.approx(0.0), pytest.approx(-1.0))
+
+
+def test_aggregate_hp_ignores_slots_past_the_party_size(fake_emulator) -> None:
+    """Slot 26. A stale full-health Pokemon in an inactive slot would otherwise
+    mask the live one being nearly dead -- 30/60 = 0.5 diluted to 70/100 = 0.7."""
+    fake_emulator.memory[ram.PARTY_SIZE_ADDR] = 1
+    fake_emulator.memory[ram.PARTY_HP_BASE + 1] = 30
+    fake_emulator.memory[ram.PARTY_MAX_HP_BASE + 1] = 60
+    fake_emulator.memory[ram.PARTY_HP_BASE + ram.PARTY_STRIDE + 1] = 40
+    fake_emulator.memory[ram.PARTY_MAX_HP_BASE + ram.PARTY_STRIDE + 1] = 40
+
+    result = _build(fake_emulator)
+
+    assert result[26].item() == pytest.approx(0.0)
+
+
+def test_a_garbage_party_size_cannot_read_past_the_party_struct(fake_emulator) -> None:
+    """RAM holds out-of-range values mid-write. A party_size of 255 must clamp
+    to the six real slots rather than slicing beyond them."""
+    _set_party(fake_emulator, size=255, levels=[20, 20, 20, 20, 20, 20])
+
+    result = _build(fake_emulator)
+
+    assert result[1:7].tolist() == pytest.approx([-0.6] * 6)
