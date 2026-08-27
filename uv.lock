@@ -1379,6 +1379,7 @@ dependencies = [
     { name = "numpy" },
     { name = "opencv-python-headless" },
     { name = "pillow" },
+    { name = "pyboy" },
     { name = "python-dotenv" },
     { name = "pyyaml" },
     { name = "safetensors" },
@@ -1404,6 +1405,7 @@ requires-dist = [
     { name = "numpy", specifier = ">=2.5.2" },
     { name = "opencv-python-headless", specifier = ">=5.0.0.93" },
     { name = "pillow", specifier = ">=12.3.0" },
+    { name = "pyboy", specifier = ">=2.7.0" },
     { name = "python-dotenv", specifier = ">=1.2.3" },
     { name = "pyyaml", specifier = ">=6.0.3" },
     { name = "safetensors", specifier = ">=0.8.0" },
@@ -1566,6 +1568,37 @@ wheels = [
 ]
 
 [[package]]
+name = "pyboy"
+version = "2.7.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "numpy" },
+    { name = "pysdl2" },
+    { name = "pysdl2-dll" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/7b/90/60ab95f484d1d792488ea30852b0820c0527b0f79fa555c57f214028c7b7/pyboy-2.7.0.tar.gz", hash = "sha256:b97db94c366f5e54af04f94641c6107454821543015716b7182df29684ad9180", size = 171904 }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/05/af/c84b122a051b51d5fa76bffcf30b4585fa3c8efbaedb070c609382d2f4e9/pyboy-2.7.0-cp312-cp312-macosx_10_13_universal2.whl", hash = "sha256:11be1062563c565d53c63485bf9c37080a809cea9faf78330e73dbd452b72d63", size = 11168865 },
+    { url = "https://files.pythonhosted.org/packages/95/99/9b93efaf52eee3db84a09916d9f42a660630ece8c0f5698caebc4eb9388a/pyboy-2.7.0-cp312-cp312-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:8eb63ee10e4c2028b1ca54aa893c6020a0f09282cb34bf8dae90be23693da2e4", size = 5498331 },
+    { url = "https://files.pythonhosted.org/packages/5c/d9/16a6c353b37b573e1c11c1eef0de69fef74bde74f3229afb3111521444af/pyboy-2.7.0-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:b5858a6bbcec32bb47a3e673a5cfefc1b0839cf9e27bbaed7c996656ff73c40f", size = 5944465 },
+    { url = "https://files.pythonhosted.org/packages/23/20/017b1b37316daf76eb56aebc28ef18016a49f8efbb2830e25afe60cc479e/pyboy-2.7.0-cp312-cp312-musllinux_1_2_aarch64.whl", hash = "sha256:1ec35bbe7516b388427b27d47daae4476357b41016292c58506523c43ce8f92f", size = 5507449 },
+    { url = "https://files.pythonhosted.org/packages/50/38/ef59b6a35349610e55ce84e887d7d9dccce08aeed13215351095d8559d89/pyboy-2.7.0-cp312-cp312-musllinux_1_2_x86_64.whl", hash = "sha256:3193781f0d2fcb2237171c5f90ee22a3dd9a19926626edb8b7f78509b2634357", size = 5974144 },
+    { url = "https://files.pythonhosted.org/packages/13/27/5b4de060073b228665254ccee3a6132404ddd3b6679efddcd83292c3ecdb/pyboy-2.7.0-cp312-cp312-win_amd64.whl", hash = "sha256:dfdc0c07a60abe42728f14cf7b0ce3274397fd360568fb9ece01cb7e605b8660", size = 4428190 },
+    { url = "https://files.pythonhosted.org/packages/36/67/76c2255857c228e66ac2046ce1a7a22d1eccd4677a8d4bd7e1ce151a681f/pyboy-2.7.0-cp313-cp313-macosx_10_13_universal2.whl", hash = "sha256:3007adead654bd4b5624d7f324d0ae88d83b782bee149af71c92e94bda3bd9c0", size = 11025024 },
+    { url = "https://files.pythonhosted.org/packages/8f/cd/21129161d2e25dc8b851b3c13375c3388dfc55c6f58f7a19726d0326161e/pyboy-2.7.0-cp313-cp313-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:6a32facb77ca734328d08c00a13da2117084f76d28b077af5979ddb944104322", size = 5467426 },
+    { url = "https://files.pythonhosted.org/packages/d4/1c/084ca1c56ed0ba45cf9ea2493698bf96e70e25881c760d83d15ac7ff9b20/pyboy-2.7.0-cp313-cp313-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:fcf29ae998c27d63f3d6598bccfbab389ef41c4fa535b4ac15711ba9096cf239", size = 5904682 },
+    { url = "https://files.pythonhosted.org/packages/c8/18/d40dc4f84a221c007c47e52f4b85ad358bf0b79da7824c9ab035e820b5c1/pyboy-2.7.0-cp313-cp313-musllinux_1_2_aarch64.whl", hash = "sha256:b117068aeb2641ca12025e6b16e6c22f8cda064d1641a12eee6851df053e8502", size = 5485653 },
+    { url = "https://files.pythonhosted.org/packages/49/01/f499ed55607e10818c599a41b8cb4ad5af1b6e938a80bff7f3fd8ba0e62e/pyboy-2.7.0-cp313-cp313-musllinux_1_2_x86_64.whl", hash = "sha256:b8da22db6094055f200955dd66c87541ddf94997fcea9af14464abef800d88d3", size = 5940329 },
+    { url = "https://files.pythonhosted.org/packages/dd/1f/9bd094c067d5c9221f2959d59c88f5bcfb8d503e1a94007dff0ed2b66cbb/pyboy-2.7.0-cp313-cp313-win_amd64.whl", hash = "sha256:2417a6bee88b05f970131986a3199f912f9dee1b37aa1dd82ca9d0fdeae149d3", size = 4410048 },
+    { url = "https://files.pythonhosted.org/packages/a8/68/33bdc660799ffc81cb67184425776d458004fcdedf91a6555fa320146ce0/pyboy-2.7.0-cp314-cp314-macosx_10_15_universal2.whl", hash = "sha256:2001957ff1aee57ea5e9f5996d04fcb4dd1057f61359806a169bfeb2eca69c12", size = 11029493 },
+    { url = "https://files.pythonhosted.org/packages/ae/d7/adef77aa6ab916032e8dda5ec112daf42cf0c0767067caed5321f9b71069/pyboy-2.7.0-cp314-cp314-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:4fdf189e40750ea7326d5194c0ec46baf3665207ed2fc9f158ee3ef05800d07a", size = 5532489 },
+    { url = "https://files.pythonhosted.org/packages/51/da/ce77683a235cbbf797c8eab25bd6dceabfd2c5109d75e06abbf7b27ff174/pyboy-2.7.0-cp314-cp314-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:8af4b55ad8270b36b00e8d1f9d386eece7f723511872e37ef2dc1d4756d09df7", size = 5927265 },
+    { url = "https://files.pythonhosted.org/packages/a9/90/852232905640ac658dbcc93661fb9e9f5e09e8d919e62d6ac8f3f536ec2a/pyboy-2.7.0-cp314-cp314-musllinux_1_2_aarch64.whl", hash = "sha256:b0bb6bba5cb0433eaef5ff484ee162847489fa1f0f1c28351a93177be2e5769f", size = 5552835 },
+    { url = "https://files.pythonhosted.org/packages/f9/fd/b7b1b9ac7d13a6ec2896434a4bf0b80874b092faf61164b9e2d6df67cfc8/pyboy-2.7.0-cp314-cp314-musllinux_1_2_x86_64.whl", hash = "sha256:f1611f7e0c73b2a2972d1c83b718725ad595589853971df25e35ecfcefff9898", size = 5965984 },
+    { url = "https://files.pythonhosted.org/packages/ab/9b/7ebba7b12b28f617969a084b1f5a842f6099e4c9d7c03901ff975f9c502f/pyboy-2.7.0-cp314-cp314-win_amd64.whl", hash = "sha256:a3817d048407b4a12d596ba967ab1d971a14a51627c97da832ed4c6960a217bb", size = 4545323 },
+]
+
+[[package]]
 name = "pydantic"
 version = "2.13.4"
 source = { registry = "https://pypi.org/simple" }
@@ -1658,6 +1691,31 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/49/2e/ced460408999b33da6b31b0021b0f37d329e202d4169aeb164493778f25b/pygments-2.21.0.tar.gz", hash = "sha256:610ca751c9bc2492b38eb9a38a7fbc93edbbb2d7182edaf34e66ae493dee5c8c", size = 5005329 }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/71/46/17f022dd3e953bf20a04a028a21ec746d942f8d2af30fa0f124fa0e6a684/pygments-2.21.0-py3-none-any.whl", hash = "sha256:2363c69b61c4a97c838da3b130dcd6468f4848992b21a82f2a63ec34377137d9", size = 1250147 },
+]
+
+[[package]]
+name = "pysdl2"
+version = "0.9.17"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/d7/ff/8704d84ad4d25f0a7bf7912504f64575e432e8d57dfba2fe35f5b2db7e04/pysdl2-0.9.17.tar.gz", hash = "sha256:48c6ef01a4eb123db5f7e46e1a1b565675755b07e615f3fe20a623c94735b52b", size = 775955 }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/5d/e2/399ea7900e7510096aeb41439e6f1540bef0bdf7e15cc2d8464e4adb71e8/PySDL2-0.9.17-py3-none-any.whl", hash = "sha256:fe923dbf5c7b27bbc1eb2bf58abfa793f8f13fd7ae8b27b1bc2de49920bcbd41", size = 583137 },
+]
+
+[[package]]
+name = "pysdl2-dll"
+version = "2.32.10"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/28/5b/bd6fb7cce36ec24cacea8f7d8264db819a3a9de89402653690d70a8da659/pysdl2_dll-2.32.10.tar.gz", hash = "sha256:ad83e0e1a0227633495d6b3ec6701ac5a2beac44e6692f52278033bda1313717", size = 16235 }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/0e/43/4abf8109b7c68cb73bd0f09bfd429bfbfe9767fdab952098ec4f8fb4418a/pysdl2_dll-2.32.10-py2.py3-none-macosx_10_11_x86_64.whl", hash = "sha256:cab126a82c2bd2cd79b6cb8da906916884789c9f4f1ae4cf861f26438ce651a4", size = 6629721 },
+    { url = "https://files.pythonhosted.org/packages/5e/cb/356315a7a30dff1d6b155d70c5293043fa683c52aae2eda236bab163081f/pysdl2_dll-2.32.10-py2.py3-none-macosx_11_0_universal2.whl", hash = "sha256:5ccbd89cd2a032f4ac890606dfe5c33874c0e5e909b2e667438ad7d7fc7fcc5d", size = 6629724 },
+    { url = "https://files.pythonhosted.org/packages/c8/3a/0686cdb266f7051e8ed3cfbb38f7e325155beb19bfb9821056debf6dfecb/pysdl2_dll-2.32.10-py2.py3-none-manylinux2014_i686.whl", hash = "sha256:4fad629105d0f138d084a37dcaf33aa47343ba771d1971c27f5cf68ef5428798", size = 4570812 },
+    { url = "https://files.pythonhosted.org/packages/5d/6e/07ec92ba241b2aa941abf478e96c1474f2c5975b61d84303fbcb2ba1dcc9/pysdl2_dll-2.32.10-py2.py3-none-manylinux2014_x86_64.whl", hash = "sha256:12b136c38114ae0f8a85453a879795ba5d61663d98673ba19c36c3008ff00353", size = 4272860 },
+    { url = "https://files.pythonhosted.org/packages/65/fc/8e35a36010e9dce25247991762ba3fc058c2626d323848c5e293447dcb35/pysdl2_dll-2.32.10-py2.py3-none-manylinux_2_28_aarch64.whl", hash = "sha256:248b1c6c6ba1f43e964f2f9bc723ee4ce39892aca840aee6de25da90c46f685d", size = 4478001 },
+    { url = "https://files.pythonhosted.org/packages/2b/1c/91fb667c3968b420de5dd76e840259b44b876b6fc84c5889151633fcc06e/pysdl2_dll-2.32.10-py2.py3-none-manylinux_2_28_x86_64.whl", hash = "sha256:1e6139e3ce832d95d8376b77f4c9288bef34d6b131f844f2a5fcc8873ce8e6da", size = 5218513 },
+    { url = "https://files.pythonhosted.org/packages/19/d3/f50924d47313cadf4b8994d1e8c3befb33031f4115c38570e5a4a8f13956/pysdl2_dll-2.32.10-py2.py3-none-win32.whl", hash = "sha256:881e2362fbe5c8d7129fa66f690380bbd0240d9d2cb1bc5612856be1e58e9261", size = 3437042 },
+    { url = "https://files.pythonhosted.org/packages/91/8e/3a90c664cca4c61c7538a8b1a7fd86c7dc3521465198a844bce21b4a97c1/pysdl2_dll-2.32.10-py2.py3-none-win_amd64.whl", hash = "sha256:65eba83d68c33b22aa5eca6c9a8521cff5044435ecd5b49521068df82674de6a", size = 4064320 },
 ]
 
 [[package]]

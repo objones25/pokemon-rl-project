@@ -1,12 +1,14 @@
-"""Fixtures shared across contrastive_pretrain's test files under tests/unit/.
-Scoped here (not the root tests/conftest.py) because build_encoder is
-specific to contrastive_pretrain -- no other package's tests need it.
+"""Fixtures shared across test files under tests/unit/. Scoped here (not the
+root tests/conftest.py) because these fixtures are specific to individual
+sub-packages -- other sub-packages' tests don't need them.
 """
 
 import pytest
 from torch import nn
 
 from contrastive_pretrain.model import build_encoder
+
+from .fakes import FakeEmulator
 
 
 @pytest.fixture
@@ -20,3 +22,8 @@ def encoder_and_dim() -> tuple[nn.Module, int]:
 @pytest.fixture
 def encoder(encoder_and_dim: tuple[nn.Module, int]) -> nn.Module:
     return encoder_and_dim[0]
+
+
+@pytest.fixture
+def fake_emulator() -> FakeEmulator:
+    return FakeEmulator()

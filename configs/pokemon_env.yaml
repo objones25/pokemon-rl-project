@@ -1,0 +1,12 @@
+# Defaults live in EnvConfig; this file records the values this project runs
+# with. action_freq, max_steps and n_envs match PWhiddy/PokemonRedExperiments
+# v2 and the sequence-model spec's bound interface.
+n_envs: 64
+action_freq: 24
+press_frames: 8
+max_steps: 163840
+badge_weight: 1.0
+heal_weight: 0.5
+explore_weight: 0.3
+event_weight: 0.1
+level_weight: 0.05

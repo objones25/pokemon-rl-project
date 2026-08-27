@@ -1,0 +1,37 @@
+import pytest
+
+from pokemon_env.config import EnvConfig, load_config
+
+
+def test_load_config_reads_yaml_values(tmp_path) -> None:
+    path = tmp_path / "env.yaml"
+    path.write_text("n_envs: 8\naction_freq: 16\npress_frames: 4\n")
+
+    config = load_config(path)
+
+    assert (config.n_envs, config.action_freq, config.press_frames) == (8, 16, 4)
+
+
+def test_load_config_rejects_an_unknown_field(tmp_path) -> None:
+    """A typo'd key would otherwise be silently ignored and the run would use
+    the default, which is indistinguishable from the setting having no effect."""
+    path = tmp_path / "env.yaml"
+    path.write_text("n_env: 8\n")
+
+    with pytest.raises(ValueError, match=r"unknown config field\(s\): \['n_env'\]"):
+        load_config(path)
+
+
+def test_config_rejects_press_frames_that_leave_no_release_window() -> None:
+    """The step is press -> tick(press_frames) -> release -> tick(action_freq -
+    press_frames - 1) -> tick(1). With press_frames = action_freq - 1 the
+    release tick count is 0, so the button is never released and every
+    subsequent action is entered with it still held."""
+    with pytest.raises(ValueError, match="press_frames=23 leaves 0 frames"):
+        EnvConfig(action_freq=24, press_frames=23)
+
+
+def test_config_defaults_match_the_reference_implementation() -> None:
+    config = EnvConfig()
+
+    assert (config.n_envs, config.action_freq, config.max_steps) == (64, 24, 163_840)
