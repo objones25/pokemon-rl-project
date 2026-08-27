@@ -20,7 +20,7 @@ def test_rmsnorm_matches_hand_derivation() -> None:
 
     out = norm(torch.tensor([[2.0, 2.0, 2.0, 2.0]]))
 
-    assert torch.allclose(out, torch.tensor([[1.0, 1.0, 1.0, 1.0]]), atol=1e-6)
+    assert out[0].tolist() == pytest.approx([1.0, 1.0, 1.0, 1.0], abs=1e-6)
 
 
 def test_rmsnorm_applies_eps_inside_the_square_root() -> None:
@@ -32,7 +32,7 @@ def test_rmsnorm_applies_eps_inside_the_square_root() -> None:
 
     out = norm(torch.tensor([[1.0, 1.0, 1.0, 1.0]]))
 
-    assert torch.allclose(out, torch.tensor([[0.5, 0.5, 0.5, 0.5]]), atol=1e-6)
+    assert out[0].tolist() == pytest.approx([0.5, 0.5, 0.5, 0.5], abs=1e-6)
 
 
 def test_rmsnorm_weight_is_a_learnable_parameter() -> None:
