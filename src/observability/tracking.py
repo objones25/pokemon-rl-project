@@ -29,7 +29,7 @@ are expected to enforce that themselves.
 from __future__ import annotations
 
 import logging
-from typing import Protocol
+from typing import Protocol, Self
 
 logger = logging.getLogger(__name__)
 
@@ -37,23 +37,56 @@ logger = logging.getLogger(__name__)
 class ExperimentRunLike(Protocol):
     def log(self, metrics: dict) -> None: ...
     def finish(self) -> None: ...
+    def __enter__(self) -> Self: ...
+    def __exit__(self, exc_type, exc, tb) -> None: ...
 
 
 class WandbRun:
-    def __init__(self, wandb_module, project: str, name: str) -> None:
-        self._run = wandb_module.init(project=project, name=name)
+    def __init__(
+        self,
+        wandb_module,
+        project: str,
+        name: str,
+        config: dict | None = None,
+        step_metrics: dict[str, str] | None = None,
+        run_id: str | None = None,
+    ) -> None:
+        """`run_id` with resume="allow" is what keeps a preempted multi-day run
+        as ONE dashboard run. Without it every pod preemption starts a fresh
+        run and a 48-hour curve arrives as several disconnected fragments.
+
+        `step_metrics` maps a metric glob to its x-axis, declared once via
+        define_metric, so `log` never passes `step=` -- a step below the
+        current one is dropped silently."""
+        kwargs: dict = {"project": project, "name": name, "config": config or {}}
+        if run_id is not None:
+            kwargs["id"] = run_id
+            kwargs["resume"] = "allow"
+        self._run = wandb_module.init(**kwargs)
+        for pattern, axis in (step_metrics or {}).items():
+            self._run.define_metric(pattern, step_metric=axis)
+
+    @property
+    def run_id(self) -> str:
+        return str(self._run.id)
 
     def log(self, metrics: dict) -> None:
         try:
             self._run.log(metrics)
-        except Exception as exc:  # noqa: BLE001 -- must swallow any wandb failure, whatever its type
-            logger.warning("wandb_log_failed", extra={"reason": str(exc)})
+        except Exception:  # must swallow any wandb failure, whatever its type
+            logger.warning("wandb_log_failed", exc_info=True)
 
-    def finish(self) -> None:
+    def finish(self, exit_code: int = 0) -> None:
         try:
-            self._run.finish()
-        except Exception as exc:  # noqa: BLE001 -- must swallow any wandb failure, whatever its type
-            logger.warning("wandb_finish_failed", extra={"reason": str(exc)})
+            self._run.finish(exit_code=exit_code)
+        except Exception:  # must swallow any wandb failure, whatever its type
+            logger.warning("wandb_finish_failed", exc_info=True)
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        self.finish(exit_code=1 if exc_type is not None else 0)
 
 
 class NullExperimentRun:
@@ -63,5 +96,11 @@ class NullExperimentRun:
     def log(self, metrics: dict) -> None:
         pass
 
-    def finish(self) -> None:
+    def finish(self, exit_code: int = 0) -> None:
+        pass
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
         pass

@@ -1,45 +1,53 @@
 import logging
 from concurrent.futures import ThreadPoolExecutor
 
+import pytest
+
 from observability.tracking import NullExperimentRun, WandbRun
 
 
-class FakeRun:
-    """Stands in for the `Run` object wandb.init() returns. Its log/finish
-    are plain instance methods -- no module-level or thread-local state --
-    matching how the real wandb.Run works and why routing through the
-    returned instance (not the wandb module's free functions) avoids the
-    class of bug documented in the module docstring."""
+class FakeWandbRun:
+    """Hand-written fake for the Run object wandb.init() returns."""
 
     def __init__(self) -> None:
-        self.log_calls: list[dict] = []
-        self.finished = False
+        self.logged: list[dict] = []
+        self.defined: list[tuple[str, str]] = []
+        self.finished_with: object = "not-finished"
+        self.id = "fake-run-id"
 
     def log(self, metrics: dict) -> None:
-        self.log_calls.append(metrics)
+        self.logged.append(metrics)
 
-    def finish(self) -> None:
-        self.finished = True
+    def define_metric(self, name: str, step_metric: str) -> None:
+        self.defined.append((name, step_metric))
+
+    def finish(self, exit_code: int = 0) -> None:
+        self.finished_with = exit_code
 
 
 class FakeWandbModule:
     def __init__(self) -> None:
-        self.init_calls: list[dict] = []
-        self.run = FakeRun()
+        self.run = FakeWandbRun()
+        self.init_kwargs: dict = {}
 
-    def init(self, project: str, name: str):
-        self.init_calls.append({"project": project, "name": name})
+    def init(self, **kwargs) -> FakeWandbRun:
+        self.init_kwargs = kwargs
         return self.run
+
+
+class _WandbModuleExposingTopLevelLogAndFinish(FakeWandbModule):
+    """Regression fixture: would incorrectly satisfy a WandbRun that (bug)
+    called log()/finish() on the wandb module itself rather than on the Run
+    object init() returns -- routing through the module is exactly the bug
+    that broke concurrent logging under trackio (see module docstring)."""
 
     def log(self, metrics: dict) -> None:
         raise AssertionError(
             "WandbRun must call log()/finish() on the Run object returned "
-            "by init(), not on the wandb module -- routing through the "
-            "module is exactly the bug that broke concurrent logging under "
-            "trackio (see module docstring)."
+            "by init(), not on the wandb module."
         )
 
-    def finish(self) -> None:
+    def finish(self, exit_code: int = 0) -> None:
         raise AssertionError(
             "WandbRun must call log()/finish() on the Run object returned "
             "by init(), not on the wandb module."
@@ -53,12 +61,12 @@ class _RaisingRun:
     def log(self, metrics: dict) -> None:
         raise RuntimeError("simulated wandb Run.log() failure")
 
-    def finish(self) -> None:
+    def finish(self, exit_code: int = 0) -> None:
         raise RuntimeError("simulated wandb Run.finish() failure")
 
 
 class _RaisingWandbModule:
-    def init(self, project: str, name: str):
+    def init(self, **kwargs) -> _RaisingRun:
         return _RaisingRun()
 
 
@@ -69,9 +77,21 @@ def test_wandb_run_forwards_calls_to_returned_run_object() -> None:
     run.log({"frames_per_sec": 12.5})
     run.finish()
 
-    assert fake.init_calls == [{"project": "pokemon-data-collection", "name": "run-1"}]
-    assert fake.run.log_calls == [{"frames_per_sec": 12.5}]
-    assert fake.run.finished is True
+    assert fake.init_kwargs["project"] == "pokemon-data-collection"
+    assert fake.init_kwargs["name"] == "run-1"
+    assert fake.run.logged == [{"frames_per_sec": 12.5}]
+    assert fake.run.finished_with == 0
+
+
+def test_wandb_run_routes_log_and_finish_through_the_run_object_not_the_module() -> None:
+    fake = _WandbModuleExposingTopLevelLogAndFinish()
+    run = WandbRun(fake, project="p", name="r")
+
+    run.log({"frames_per_sec": 12.5})
+    run.finish()
+
+    assert fake.run.logged == [{"frames_per_sec": 12.5}]
+    assert fake.run.finished_with == 0
 
 
 def test_wandb_run_survives_concurrent_worker_threads() -> None:
@@ -85,7 +105,7 @@ def test_wandb_run_survives_concurrent_worker_threads() -> None:
     with ThreadPoolExecutor(max_workers=8) as executor:
         list(executor.map(lambda i: run.log({"i": i}), range(32)))
 
-    assert len(fake.run.log_calls) == 32
+    assert len(fake.run.logged) == 32
 
 
 def test_wandb_run_log_failure_is_swallowed_not_raised(caplog) -> None:
@@ -114,3 +134,81 @@ def test_null_experiment_run_is_a_no_op() -> None:
 
     assert run.log({"anything": 1}) is None
     assert run.finish() is None
+
+
+def test_the_config_reaches_wandb_init() -> None:
+    module = FakeWandbModule()
+
+    WandbRun(module, project="p", name="n", config={"lr": 0.1})
+
+    assert module.init_kwargs["config"] == {"lr": 0.1}
+
+
+def test_a_run_id_is_passed_with_resume_allow_so_a_preempted_run_continues() -> None:
+    module = FakeWandbModule()
+
+    WandbRun(module, project="p", name="n", run_id="abc")
+
+    assert (module.init_kwargs["id"], module.init_kwargs["resume"]) == ("abc", "allow")
+
+
+def test_run_id_returns_the_underlying_run_objects_id() -> None:
+    module = FakeWandbModule()
+
+    run = WandbRun(module, project="p", name="n")
+
+    assert run.run_id == "fake-run-id"
+
+
+def test_no_resume_arguments_are_sent_when_no_run_id_is_given() -> None:
+    module = FakeWandbModule()
+
+    WandbRun(module, project="p", name="n")
+
+    assert "resume" not in module.init_kwargs
+
+
+def test_step_metrics_are_declared_as_x_axes() -> None:
+    module = FakeWandbModule()
+
+    WandbRun(module, project="p", name="n", step_metrics={"loss/*": "train/update"})
+
+    assert module.run.defined == [("loss/*", "train/update")]
+
+
+def test_log_never_passes_a_step_argument() -> None:
+    """wandb drops a log whose step is below the current one, with no
+    exception. The x-axis is declared instead."""
+    module = FakeWandbModule()
+    run = WandbRun(module, project="p", name="n")
+
+    run.log({"loss": 1.0, "train/update": 3})
+
+    assert module.run.logged == [{"loss": 1.0, "train/update": 3}]
+
+
+def test_leaving_the_context_normally_finishes_with_exit_code_zero() -> None:
+    module = FakeWandbModule()
+
+    with WandbRun(module, project="p", name="n"):
+        pass
+
+    assert module.run.finished_with == 0
+
+
+def test_an_exception_inside_the_context_marks_the_run_failed() -> None:
+    module = FakeWandbModule()
+
+    with pytest.raises(RuntimeError, match="boom"), WandbRun(module, project="p", name="n"):
+        raise RuntimeError("boom")
+
+    assert module.run.finished_with == 1
+
+
+def test_null_experiment_run_is_usable_as_a_context_manager() -> None:
+    """*Deps default to NullExperimentRun, so every call site that wraps the
+    run in a `with` must work without a tracker configured."""
+    with NullExperimentRun() as run:
+        run.log({"a": 1.0})
+
+    assert isinstance(run, NullExperimentRun)

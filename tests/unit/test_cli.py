@@ -68,7 +68,7 @@ class _FakeWandbModule:
     so this test must fake the `wandb` module itself, not just `run_pipeline`,
     or it makes a real call into the wandb library on every test run."""
 
-    def init(self, project: str, name: str) -> None:
+    def init(self, **kwargs) -> None:
         pass
 
     def log(self, metrics: dict) -> None:
