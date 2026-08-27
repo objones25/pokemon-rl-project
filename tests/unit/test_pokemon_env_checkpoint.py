@@ -91,3 +91,17 @@ def test_the_pattern_finds_nothing_when_only_pretraining_checkpoints_exist(tmp_p
     latest = find_latest_checkpoint(tmp_path, pattern=ENV_CHECKPOINT_PATTERN)
 
     assert latest is None
+
+
+def test_restore_rejects_an_envelope_with_a_stale_aux_state_version() -> None:
+    """The envelope carries its own aux_state_version beside the nested copy
+    inside state["env"]. Only the nested one was validated, so this field was
+    written, read by nothing, and looked like protection -- the same pattern
+    that had just been fixed for schema_version one layer down."""
+    vec_env = _vec_env()
+    vec_env.reset()
+    state = build_env_checkpoint_state(update=1, vec_env=vec_env, init_state_hash="abc")
+    state["aux_state_version"] = 99
+
+    with pytest.raises(ValueError, match="envelope has aux_state_version=99"):
+        restore_env_checkpoint(_vec_env(), state, init_state_hash="abc")
