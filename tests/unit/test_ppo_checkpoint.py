@@ -1,0 +1,212 @@
+"""Checkpoint pairing. save_checkpoint is already atomic per file; the failure
+it cannot see is one of the two files landing."""
+
+from __future__ import annotations
+
+import dataclasses
+import json
+from dataclasses import dataclass
+from pathlib import Path
+
+import pytest
+import torch
+
+from ppo.checkpoint import MANIFEST_PATTERN, resume, write_checkpoint
+from ppo.config import PPOConfig
+from ppo.normalizer import ReturnScaler
+from sequence_model.cache import RolloutCache
+from sequence_model.config import PolicyConfig
+from sequence_model.policy import RecurrentTransformerPolicy
+
+from .fakes import FakeVecEnv
+
+_N_ENVS = 2
+
+
+@dataclass
+class _CheckpointHarness:
+    """Bundles everything write_checkpoint/resume need, plus the two
+    keyword-dict builders the tests call so each test only states what it
+    is actually varying (the update number, or a config override)."""
+
+    directory: Path
+    policy: RecurrentTransformerPolicy
+    optimizer: torch.optim.Optimizer
+    cache: RolloutCache
+    vec_env: FakeVecEnv
+    scaler: ReturnScaler
+    policy_config: PolicyConfig
+    config: PPOConfig
+    init_state_hash: str
+
+    def kwargs(self, update: int) -> dict:
+        return {
+            "directory": self.directory,
+            "update": update,
+            "global_step": update * self.config.n_steps,
+            "policy": self.policy,
+            "optimizer": self.optimizer,
+            "scheduler": None,
+            "cache": self.cache,
+            "vec_env": self.vec_env,
+            "scaler": self.scaler,
+            "config": self.config,
+            "init_state_hash": self.init_state_hash,
+            "wandb_run_id": "run-abc123",
+            "git_commit": "deadbeef",
+        }
+
+    def resume_kwargs(self, context_len: int | None = None) -> dict:
+        policy_config = self.policy_config
+        if context_len is not None:
+            policy_config = dataclasses.replace(policy_config, context_len=context_len)
+        return {
+            "directory": self.directory,
+            "policy": self.policy,
+            "optimizer": self.optimizer,
+            "scheduler": None,
+            "vec_env": self.vec_env,
+            "scaler": self.scaler,
+            "policy_config": policy_config,
+            "config": self.config,
+            "init_state_hash": self.init_state_hash,
+        }
+
+
+def _checkpoint_harness(tmp_path: Path) -> _CheckpointHarness:
+    """Helper, not a test: a tiny policy/optimizer/cache/env/scaler wired the
+    way ppo/update.py wires the real ones, small enough to run on CPU in
+    milliseconds."""
+    torch.manual_seed(0)
+    policy_config = PolicyConfig(
+        d_model=32,
+        n_layers=2,
+        n_heads=2,
+        head_dim=16,
+        n_kv_heads=1,
+        d_ff=64,
+        context_len=4,
+        latent_dim=8,
+        aux_state_dim=4,
+    )
+    policy = RecurrentTransformerPolicy(policy_config, torch.zeros(8), torch.ones(8))
+    optimizer = torch.optim.AdamW(policy.parameters(), lr=1e-3)
+    cache = policy.new_cache(_N_ENVS, torch.device("cpu"))
+    vec_env = FakeVecEnv(n_envs=_N_ENVS, aux_dim=policy_config.aux_state_dim, done_at_step=None)
+    return _CheckpointHarness(
+        directory=tmp_path,
+        policy=policy,
+        optimizer=optimizer,
+        cache=cache,
+        vec_env=vec_env,
+        scaler=ReturnScaler(),
+        policy_config=policy_config,
+        config=PPOConfig(frozen_encoder_revision="x", n_steps=4),
+        init_state_hash="deadbeef",
+    )
+
+
+def test_write_checkpoint_returns_a_path_the_manifest_pattern_discovers(tmp_path) -> None:
+    """POLICY_PATTERN/MANIFEST_PATTERN are exported so Task 15's resume loop
+    and retention glob agree with what write_checkpoint actually names files --
+    a hard-coded filename in one place and the pattern in another is exactly
+    the kind of drift that silently stops resume from finding anything."""
+    harness = _checkpoint_harness(tmp_path)
+
+    manifest_path = write_checkpoint(**harness.kwargs(update=1))
+
+    assert manifest_path in set(tmp_path.glob(MANIFEST_PATTERN))
+
+
+def test_resume_reports_no_cache_when_none_was_checkpointed(tmp_path) -> None:
+    """cache is optional in sequence_model.checkpoint's schema -- a
+    checkpoint written before the first rollout, or one that deliberately
+    dropped the cache, must resume with cache=None rather than raising on a
+    missing "cache" state."""
+    harness = _checkpoint_harness(tmp_path)
+    kwargs = harness.kwargs(update=1)
+    kwargs["cache"] = None
+
+    write_checkpoint(**kwargs)
+    result = resume(**harness.resume_kwargs())
+
+    assert result.cache is None
+
+
+def test_the_manifest_names_both_files_and_their_sizes(tmp_path) -> None:
+    harness = _checkpoint_harness(tmp_path)
+
+    write_checkpoint(**harness.kwargs(update=3))
+    manifest = json.loads((tmp_path / "manifest_update3.json").read_text())
+
+    assert set(manifest) >= {"update", "global_step", "policy_file", "env_file", "sizes"}
+
+
+def test_resume_returns_none_when_the_directory_is_empty(tmp_path) -> None:
+    harness = _checkpoint_harness(tmp_path)
+
+    assert resume(**harness.resume_kwargs()) is None
+
+
+def test_resume_skips_a_checkpoint_whose_manifest_was_never_written(tmp_path) -> None:
+    """A crash between the two .pt writes and the manifest write leaves an
+    incoherent pair. Taking the newest .pt file regardless would resume a
+    policy against an env from a different update."""
+    harness = _checkpoint_harness(tmp_path)
+    write_checkpoint(**harness.kwargs(update=1))
+    write_checkpoint(**harness.kwargs(update=2))
+    (tmp_path / "manifest_update2.json").unlink()
+
+    result = resume(**harness.resume_kwargs())
+
+    assert result.update == 1
+
+
+def test_resume_skips_a_checkpoint_whose_env_file_is_truncated(tmp_path) -> None:
+    harness = _checkpoint_harness(tmp_path)
+    write_checkpoint(**harness.kwargs(update=1))
+    write_checkpoint(**harness.kwargs(update=2))
+    (tmp_path / "env_update2.pt").write_bytes(b"short")
+
+    result = resume(**harness.resume_kwargs())
+
+    assert result.update == 1
+
+
+def test_resume_restores_the_return_scaler_state(tmp_path) -> None:
+    harness = _checkpoint_harness(tmp_path)
+    harness.scaler.update(torch.tensor([[-10.0, 10.0]]))
+    write_checkpoint(**harness.kwargs(update=1))
+    harness.scaler.load_state_dict({"count": 0.0, "mean": 0.0, "m2": 0.0})
+
+    resume(**harness.resume_kwargs())
+
+    assert harness.scaler.scale == pytest.approx(10.0, rel=0.05)
+
+
+def test_resume_drops_the_cache_when_the_context_length_changed(tmp_path) -> None:
+    """A curriculum stage that raises context_len cannot reuse the ring
+    buffer. That is reported and the run warms up again, rather than raising."""
+    harness = _checkpoint_harness(tmp_path)
+    write_checkpoint(**harness.kwargs(update=1))
+
+    result = resume(**harness.resume_kwargs(context_len=8))
+
+    assert result.cache is None
+
+
+def test_resume_restores_the_rng_state(tmp_path) -> None:
+    """capture_rng_state()/restore_rng_state() round-trip a dict keyed
+    "cpu"/"cuda", stored under build_policy_checkpoint_state's "rng" key --
+    not "rng_state". Wiring resume() to the wrong key would look fine (no
+    KeyError, restore_rng_state(None) just returns []) while silently never
+    restoring anything."""
+    harness = _checkpoint_harness(tmp_path)
+    torch.manual_seed(123)
+    write_checkpoint(**harness.kwargs(update=1))
+    expected = torch.rand(3)
+    torch.manual_seed(999)  # perturb the generator so a real restore is observable
+
+    resume(**harness.resume_kwargs())
+
+    assert torch.equal(torch.rand(3), expected)

@@ -156,6 +156,18 @@ class FakeVecEnv:
         self._step_count += 1
         return step
 
+    def state_dict(self) -> dict:
+        """Round-trips the one piece of internal state a checkpoint test can
+        observe drifting: `_step_count`. Real shape (schema_version,
+        aux_state_version, per-backend state) is `VecPokemonEnv`'s job and is
+        exercised against the real class in test_pokemon_env_checkpoint.py --
+        this fake only needs to prove `ppo.checkpoint` round-trips whatever
+        `vec_env.state_dict()` hands it."""
+        return {"step_count": self._step_count}
+
+    def load_state_dict(self, state: dict) -> None:
+        self._step_count = state["step_count"]
+
 
 class FakeLatentEncoder:
     """Hand-written fake typed against the `EncoderProtocol` `collect_rollout`
