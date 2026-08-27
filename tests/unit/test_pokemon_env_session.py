@@ -1,7 +1,10 @@
 import pytest
 
+from pokemon_env import ram
 from pokemon_env.config import EnvConfig
 from pokemon_env.session import ACTION_DIM, BUTTONS, EnvSession
+
+from .fakes import FakeEmulator
 
 
 @pytest.fixture
@@ -79,3 +82,50 @@ def test_frame_has_the_encoder_input_shape(session) -> None:
     result = session.reset()
 
     assert (result.frame.shape, result.frame.dtype.name) == ((144, 160), "uint8")
+
+
+def test_stats_reports_the_coordinate_keys_the_accumulator_has_seen() -> None:
+    session = EnvSession(FakeEmulator(), EnvConfig(), init_state=b"")
+    session.reset()
+    session.step(0)
+
+    assert session.stats()["coord_keys"] == [ram.coord_key(0, 0, 0)]
+
+
+def test_stats_reports_the_length_of_a_completed_episode() -> None:
+    session = EnvSession(FakeEmulator(), EnvConfig(max_steps=2), init_state=b"")
+    session.reset()
+    session.step(0)
+    session.step(0)
+    session.reset()
+
+    assert session.stats()["episode_lengths"] == [2]
+
+
+def test_stats_drains_the_episode_length_history_so_lengths_are_not_double_counted() -> None:
+    session = EnvSession(FakeEmulator(), EnvConfig(max_steps=2), init_state=b"")
+    session.reset()
+    session.step(0)
+    session.step(0)
+    session.reset()
+    session.stats()
+
+    assert session.stats()["episode_lengths"] == []
+
+
+def test_state_dict_round_trips_the_episode_length_history() -> None:
+    """The design spec's §11 item 5 is what justifies bumping
+    VEC_ENV_SCHEMA_VERSION in a later task: episode-length history must
+    survive a save/restore cycle through session state_dict, not just live in
+    memory for the current process's lifetime."""
+    session = EnvSession(FakeEmulator(), EnvConfig(max_steps=2), init_state=b"init")
+    session.reset()
+    session.step(0)
+    session.step(0)
+    session.reset()
+    state = session.state_dict()
+
+    restored = EnvSession(FakeEmulator(), EnvConfig(max_steps=2), init_state=b"init")
+    restored.load_state_dict(state)
+
+    assert restored.stats()["episode_lengths"] == [2]

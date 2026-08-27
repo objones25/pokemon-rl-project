@@ -183,6 +183,16 @@ def test_state_dict_round_trips_the_accumulator(fake_emulator, accumulator) -> N
     assert (replayed.reward, restored.coords_seen) == (pytest.approx(0.0), 1)
 
 
+def test_coord_keys_returns_every_visited_coordinate_key(fake_emulator) -> None:
+    accumulator = RewardAccumulator(EnvConfig())
+    accumulator.reset(fake_emulator)
+    _set_coord(fake_emulator, 3, 4, 38)
+
+    accumulator.step(fake_emulator)
+
+    assert accumulator.coord_keys() == [ram.coord_key(3, 4, 38)]
+
+
 def test_a_restored_accumulator_still_pays_for_genuinely_new_ground(
     fake_emulator, accumulator
 ) -> None:

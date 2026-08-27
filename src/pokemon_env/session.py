@@ -14,6 +14,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from pokemon_env import ram
 from pokemon_env.aux_state import ExplorationCounters, build_aux_state
 from pokemon_env.config import EnvConfig
 from pokemon_env.emulator import Emulator
@@ -44,8 +45,13 @@ class EnvSession:
         self._rewards = RewardAccumulator(config)
         self._step_count = 0
         self._episode_id = -1  # first reset() makes it 0
+        self._episode_lengths: list[int] = []
 
     def reset(self) -> StepResult:
+        # Recorded before _step_count is cleared. The first reset has nothing
+        # to record: _episode_id is still -1, meaning no episode has run.
+        if self._episode_id >= 0:
+            self._episode_lengths.append(self._step_count)
         self._emulator.load_state(self._init_state)
         self._rewards.reset(self._emulator)
         self._step_count = 0
@@ -89,12 +95,30 @@ class EnvSession:
             clipped=clipped,
         )
 
+    def stats(self) -> dict:
+        """Telemetry the parent process cannot compute for itself, gathered in
+        one call so PPO makes one round trip per update rather than per step.
+
+        Draining `episode_lengths` is deliberate: the caller aggregates across
+        updates, and returning the full history every call would double-count
+        every episode in every later update."""
+        lengths = self._episode_lengths
+        self._episode_lengths = []
+        return {
+            "coord_keys": self._rewards.coord_keys(),
+            "badges": ram.badge_count(self._emulator),
+            "event_flags": ram.event_flag_count(self._emulator),
+            "step_count": self._step_count,
+            "episode_lengths": lengths,
+        }
+
     def state_dict(self) -> dict:
         return {
             "emulator": self._emulator.save_state(),
             "rewards": self._rewards.state_dict(),
             "step_count": self._step_count,
             "episode_id": self._episode_id,
+            "episode_lengths": self._episode_lengths,
         }
 
     def load_state_dict(self, state: dict) -> None:
@@ -102,6 +126,7 @@ class EnvSession:
         self._rewards.load_state_dict(state["rewards"])
         self._step_count = state["step_count"]
         self._episode_id = state["episode_id"]
+        self._episode_lengths = list(state["episode_lengths"])
 
     def close(self) -> None:
         self._emulator.close()

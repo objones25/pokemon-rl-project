@@ -58,6 +58,16 @@ class RewardAccumulator:
     def maps_visited(self) -> int:
         return len(self._state.seen_maps)
 
+    def coord_keys(self) -> list[int]:
+        """The packed coordinate keys themselves, not just the count.
+
+        Sorted so the value is stable across runs -- the set's iteration
+        order is not, and an unstable order would make the exploration
+        heatmap artifact differ between two runs over identical states.
+        A method rather than a property because it materializes a list
+        that can reach tens of thousands of entries."""
+        return sorted(self._state.seen_coords)
+
     @property
     def steps_since_new_coord(self) -> int:
         return self._state.steps_since_new_coord
