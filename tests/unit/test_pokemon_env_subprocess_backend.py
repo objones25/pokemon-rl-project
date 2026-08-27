@@ -9,6 +9,7 @@ from pokemon_env.subprocess_backend import (
     Command,
     FrameBuffer,
     SubprocessBackend,
+    build_subprocess_vec_env,
     handle_command,
     worker_main,
 )
@@ -118,11 +119,17 @@ class FakeConnection:
         self.responses = list(responses)
         self.poll_results = list(poll_results) if poll_results is not None else []
         self.closed = False
+        # Recorded so a test can assert the configured timeout actually reaches
+        # poll(). The failure this catches is poll(None), which blocks forever:
+        # an unattended run stalls silently while the GPU keeps billing, which
+        # is strictly worse than crashing.
+        self.poll_timeouts: list[float | None] = []
 
     def send(self, obj: object) -> None:
         self.sent.append(obj)
 
     def poll(self, timeout: float | None = None) -> bool:
+        self.poll_timeouts.append(timeout)
         return self.poll_results.pop(0) if self.poll_results else True
 
     def recv(self):
@@ -197,18 +204,22 @@ def test_step_sends_the_step_command_with_its_action(frame_buffer) -> None:
 def test_call_raises_timeout_naming_the_env_index(frame_buffer) -> None:
     """A 24-frame tick takes about 1ms, so a 60s silence is a hang, not
     slowness. The message must name the env so an operator knows which of
-    64 workers died."""
+    64 workers died.
+
+    Driven through state_dict rather than reset: reset and step now recover
+    from a dead worker by respawning, so they deliberately swallow this. The
+    bare _call path is what still surfaces it."""
     backend, _, _ = _backend(frame_buffer, [_ok()], poll_results=[False], index=2)
 
     with pytest.raises(TimeoutError, match="env 2 did not answer"):
-        backend.reset()
+        backend.state_dict()
 
 
 def test_a_worker_error_response_raises_naming_the_env(frame_buffer) -> None:
     backend, _, _ = _backend(frame_buffer, [("error", "ValueError: boom")], index=1)
 
     with pytest.raises(RuntimeError, match="env 1 worker failed"):
-        backend.reset()
+        backend.state_dict()
 
 
 def test_step_respawns_and_forces_done_when_the_worker_times_out(
@@ -268,9 +279,11 @@ def test_close_terminates_a_worker_that_will_not_exit(frame_buffer) -> None:
 
 
 def test_state_dict_returns_the_workers_state(frame_buffer) -> None:
+    """The worker's session state now travels inside an envelope alongside
+    parent-side bookkeeping the worker cannot know about."""
     backend, _, _ = _backend(frame_buffer, [("ok", {"state": {"step_count": 7}})])
 
-    assert backend.state_dict() == {"step_count": 7}
+    assert backend.state_dict()["session"] == {"step_count": 7}
 
 
 def test_to_result_takes_its_frame_from_the_shared_slot(frame_buffer) -> None:
@@ -353,3 +366,109 @@ def test_worker_main_reports_an_exception_back_to_the_parent(frame_buffer) -> No
     )
 
     assert connection.sent[0][0] == "error"
+
+
+def test_call_passes_the_configured_timeout_to_poll(frame_buffer) -> None:
+    """The failure this catches is `poll(None)`, which blocks forever. An
+    unattended run would stall silently while the GPU keeps billing --
+    strictly worse than crashing, because nothing alerts."""
+    backend, connection, _ = _backend(frame_buffer, [_ok()])
+
+    backend.reset()
+
+    assert connection.poll_timeouts == [pytest.approx(60.0)]
+
+
+def test_reset_respawns_instead_of_propagating_a_dead_worker(frame_buffer) -> None:
+    """VecPokemonEnv routes every autoreset through backend.reset(), so a
+    worker that dies on an episode boundary must be recovered here. Before
+    this guard existed the exception escaped VecPokemonEnv.step() and killed
+    the whole run -- exactly what the respawn logic exists to prevent."""
+    backend, _, _ = _backend(frame_buffer, [_ok(), _ok()], poll_results=[False, True])
+
+    result = backend.reset()
+
+    assert (backend.respawns, result.done) == (1, False)
+
+
+def test_reset_recovery_does_not_recurse_when_every_spawn_dies(frame_buffer) -> None:
+    """_restart ends in the bare _reset_once, not reset, so a worker that dies
+    on every spawn raises loudly instead of looping forever. A silent infinite
+    retry is the worse failure: the run neither progresses nor reports."""
+    backend, _, _ = _backend(
+        frame_buffer, [_ok(), _ok()], poll_results=[False, False, False]
+    )
+
+    with pytest.raises(TimeoutError, match="did not answer"):
+        backend.reset()
+
+
+def test_episode_id_keeps_climbing_across_a_respawn(frame_buffer) -> None:
+    """VecStep's contract is monotonic episode_id per env, and the transformer
+    uses it to detect episode boundaries. A respawned worker's EnvSession
+    restarts its own counter at 0, so without the offset an env at episode 3
+    would emit 3 -> 0 and silently merge two distinct episodes."""
+    backend, _, _ = _backend(
+        frame_buffer, [_ok(3), _ok(0), _ok(0)], poll_results=[True, False, True]
+    )
+    before = backend.reset().episode_id
+
+    after = backend.step(0).episode_id
+
+    assert (before, after) == (3, 4)
+
+
+def test_state_dict_carries_the_episode_offset_across_a_resume(frame_buffer) -> None:
+    """The offset lives in the parent, so the worker's checkpointed session
+    cannot supply it. Dropped, a resume would restart the visible episode
+    sequence from the restored session's own counter."""
+    backend, _, _ = _backend(
+        frame_buffer,
+        [_ok(3), _ok(0), ("ok", {"state": {"step_count": 7}})],
+        poll_results=[True, False, True],
+    )
+    backend.reset()
+    backend.step(0)
+
+    state = backend.state_dict()
+
+    assert (state["episode_offset"], state["respawns"]) == (4, 1)
+
+
+def test_unlink_refuses_to_run_from_a_non_owning_process() -> None:
+    """unlink destroys the block for every attached process, so a worker
+    calling it would take all 64 envs' frame slots down at once."""
+    owner = FrameBuffer.create(n_envs=2)
+    attached = FrameBuffer.attach(owner.name, n_envs=2)
+
+    try:
+        with pytest.raises(RuntimeError, match="only be called by the process"):
+            attached.unlink()
+    finally:
+        attached.close()
+        owner.close()
+        owner.unlink()
+
+
+def test_close_releases_the_pipe(frame_buffer) -> None:
+    """Respawns are expected over a multi-day run, so an unclosed connection
+    per respawn eventually exhausts the parent's file-descriptor table."""
+    backend, connection, _ = _backend(frame_buffer, [_ok()])
+
+    backend.close()
+
+    assert connection.closed is True
+
+
+def test_build_subprocess_vec_env_preflights_the_rom(tmp_path) -> None:
+    """Without this check a wrong path spawns 64 processes that each die
+    inside PyBoyEmulator.__init__, and the parent surfaces only a bare
+    EOFError with no hint of the real cause."""
+    init_state = tmp_path / "init.state"
+    init_state.write_bytes(b"x")
+    config = EnvConfig(
+        n_envs=1, rom_path=str(tmp_path / "absent.gb"), init_state_path=str(init_state)
+    )
+
+    with pytest.raises(FileNotFoundError, match="ROM not found"):
+        build_subprocess_vec_env(config)

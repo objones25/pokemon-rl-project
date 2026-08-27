@@ -141,7 +141,7 @@ def test_state_dict_round_trips_the_per_env_step_counters(vec_env) -> None:
     )
     restored.load_state_dict(state)
 
-    assert [b["step_count"] for b in restored.state_dict()["backends"]] == [1, 1, 1]
+    assert [b["session"]["step_count"] for b in restored.state_dict()["backends"]] == [1, 1, 1]
 
 
 def test_load_state_dict_rejects_a_stale_aux_state_version(vec_env) -> None:
@@ -161,4 +161,16 @@ def test_load_state_dict_rejects_a_different_env_count(vec_env) -> None:
     state["backends"] = state["backends"][:2]
 
     with pytest.raises(ValueError, match="cannot be redistributed"):
+        vec_env.load_state_dict(state)
+
+
+def test_load_state_dict_rejects_a_stale_schema_version(vec_env) -> None:
+    """The version was written but never read until now. An unvalidated
+    version field is worse than none -- it reads as protection while a layout
+    change resumes silently against fields that no longer mean the same."""
+    vec_env.reset()
+    state = vec_env.state_dict()
+    state["schema_version"] = 99
+
+    with pytest.raises(ValueError, match="schema_version=99"):
         vec_env.load_state_dict(state)

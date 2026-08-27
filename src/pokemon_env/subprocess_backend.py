@@ -65,7 +65,16 @@ class FrameBuffer:
         self._shm.close()
 
     def unlink(self) -> None:
-        """Parent only. Releases the OS-level block."""
+        """Parent only. Releases the OS-level block.
+
+        Guarded rather than merely documented: unlink destroys the block for
+        every attached process, so a worker calling it would take all 64 envs'
+        frame slots with it."""
+        if not self._owner:
+            raise RuntimeError(
+                "unlink() may only be called by the process that created the block; "
+                "calling it from a worker destroys every env's frame slot"
+            )
         self._shm.unlink()
 
 
@@ -178,6 +187,13 @@ class SubprocessBackend:
         self._frame_slot = frame_slot
         self._spawn_worker = spawn_worker
         self._respawns = 0
+        # A respawned worker gets a fresh EnvSession whose episode_id restarts
+        # at 0, but VecStep's contract is that episode_id is MONOTONIC per env
+        # -- the transformer uses it to detect episode boundaries, and a
+        # repeated id merges two distinct episodes in its attention mask. The
+        # offset keeps the parent-visible sequence climbing across respawns.
+        self._episode_offset = 0
+        self._last_episode_id = -1
         self._spawn()
 
     @property
@@ -206,27 +222,56 @@ class SubprocessBackend:
         """Respawn from init.state, NOT from the last checkpoint's emulator
         state: that state pairs with a checkpoint-time reward baseline and
         coord set, so restoring it against a current-time accumulator would
-        silently re-earn rewards for progress already banked."""
+        silently re-earn rewards for progress already banked.
+
+        Ends in `_reset_once`, deliberately NOT `reset`. `reset` recovers by
+        calling back into here, so recovering twice would recurse forever on a
+        worker that dies on every spawn. An unattended run that spins silently
+        is worse than one that dies with a clear error."""
         self._respawns += 1
+        self._episode_offset = self._last_episode_id + 1
         if self._process.is_alive():
             self._process.terminate()
         self._process.join(timeout=5)
+        self._close_connection()
         self._spawn()
-        return self.reset()
+        return self._reset_once()
+
+    def _close_connection(self) -> None:
+        """Release the old pipe's file descriptors. Respawns are expected over
+        a multi-day run, so leaking one FD pair per respawn eventually
+        exhausts the parent's descriptor table."""
+        try:
+            self._conn.close()
+        except OSError:
+            pass
 
     def _to_result(self, payload: dict) -> StepResult:
+        episode_id = int(payload["episode_id"]) + self._episode_offset
+        self._last_episode_id = max(self._last_episode_id, episode_id)
         return StepResult(
             frame=self._frame_slot,
             aux=payload["aux"],
             reward=payload["reward"],
             done=payload["done"],
-            episode_id=payload["episode_id"],
+            episode_id=episode_id,
             components=payload["components"],
             clipped=payload["clipped"],
         )
 
-    def reset(self) -> StepResult:
+    def _reset_once(self) -> StepResult:
+        """Bare reset with no recovery. Used by `_restart` so recovery cannot
+        recurse."""
         return self._to_result(self._call(Command.RESET))
+
+    def reset(self) -> StepResult:
+        """VecPokemonEnv routes every autoreset through here, so a worker that
+        dies on an episode boundary must be recovered here too -- otherwise it
+        propagates out of VecPokemonEnv.step() and kills the run."""
+        try:
+            return self._reset_once()
+        except (TimeoutError, RuntimeError, EOFError, BrokenPipeError):
+            return self._restart()
 
     def step(self, action: int) -> StepResult:
         try:
@@ -247,10 +292,23 @@ class SubprocessBackend:
         return self._to_result(payload)
 
     def state_dict(self) -> dict:
-        return self._call(Command.STATE_DICT)["state"]
+        """The worker's session state plus the parent-side bookkeeping the
+        worker cannot know about. `episode_offset` in particular must survive:
+        without it, a resume restarts the visible episode sequence from the
+        restored session's own counter and breaks monotonicity across the
+        crash."""
+        return {
+            "session": self._call(Command.STATE_DICT)["state"],
+            "respawns": self._respawns,
+            "episode_offset": self._episode_offset,
+            "last_episode_id": self._last_episode_id,
+        }
 
     def load_state_dict(self, state: dict) -> None:
-        self._call(Command.LOAD_STATE, state)
+        self._respawns = state["respawns"]
+        self._episode_offset = state["episode_offset"]
+        self._last_episode_id = state["last_episode_id"]
+        self._call(Command.LOAD_STATE, state["session"])
 
     def close(self) -> None:
         try:
@@ -260,6 +318,7 @@ class SubprocessBackend:
         self._process.join(timeout=5)
         if self._process.is_alive():
             self._process.terminate()
+        self._close_connection()
 
 
 def build_subprocess_vec_env(config: EnvConfig) -> tuple[VecPokemonEnv, FrameBuffer]:
@@ -267,6 +326,15 @@ def build_subprocess_vec_env(config: EnvConfig) -> tuple[VecPokemonEnv, FrameBuf
     the env's lifetime and call unlink() after close()."""
     from pathlib import Path
 
+    # Preflight the ROM before spawning. Without this, a wrong path spawns 64
+    # processes that each die inside PyBoyEmulator.__init__, and the parent
+    # sees only a bare EOFError with no hint of the real cause.
+    if not Path(config.rom_path).exists():
+        raise FileNotFoundError(
+            f"ROM not found at {config.rom_path!r}. It is gitignored and must be "
+            "supplied locally; every worker would otherwise fail to construct its "
+            "emulator and the parent would report only a broken pipe."
+        )
     init_state = Path(config.init_state_path).read_bytes()
     buffer = FrameBuffer.create(config.n_envs)
     backends = [

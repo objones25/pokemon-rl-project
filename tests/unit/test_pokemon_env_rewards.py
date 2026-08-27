@@ -181,3 +181,25 @@ def test_state_dict_round_trips_the_accumulator(fake_emulator, accumulator) -> N
     replayed = restored.step(fake_emulator)
 
     assert (replayed.reward, restored.coords_seen) == (pytest.approx(0.0), 1)
+
+
+def test_a_restored_accumulator_still_pays_for_genuinely_new_ground(
+    fake_emulator, accumulator
+) -> None:
+    """The test above passes even if explore_sum is dropped on restore: a
+    zeroed explore_sum still leaves the recomputed total BELOW the restored
+    max_total, so the gain is 0 either way and the drop is invisible.
+
+    Stepping onto an unseen coordinate separates them. With explore_sum
+    intact the second discovery earns 0.30/sqrt(2); with it dropped the
+    recomputed total never climbs back above max_total and the reward is 0 --
+    an agent that silently stops being paid for exploring."""
+    _set_coord(fake_emulator, 5, 5, 1)
+    accumulator.step(fake_emulator)
+    restored = RewardAccumulator(EnvConfig())
+    restored.load_state_dict(accumulator.state_dict())
+
+    _set_coord(fake_emulator, 6, 6, 1)
+    discovered = restored.step(fake_emulator)
+
+    assert discovered.reward == pytest.approx(0.30 / math.sqrt(2))

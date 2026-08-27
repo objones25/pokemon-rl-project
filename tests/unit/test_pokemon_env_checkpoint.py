@@ -64,7 +64,7 @@ def test_restore_round_trips_through_the_shared_checkpoint_io(tmp_path) -> None:
     restored = _vec_env()
     restore_env_checkpoint(restored, load_checkpoint(path), init_state_hash="abc")
 
-    assert [b["step_count"] for b in restored.state_dict()["backends"]] == [2, 2]
+    assert [b["session"]["step_count"] for b in restored.state_dict()["backends"]] == [2, 2]
 
 
 def test_the_checkpoint_pattern_does_not_collide_with_the_other_runs(tmp_path) -> None:

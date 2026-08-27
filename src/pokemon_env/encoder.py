@@ -42,6 +42,19 @@ def load_latent_stats(client: HfClient) -> tuple[torch.Tensor, torch.Tensor]:
                 f"{name} has {tensor.numel()} elements, expected {EMBEDDING_DIM}"
             )
 
+    # Finiteness is checked BEFORE the sign check, because `NaN <= 0` is False:
+    # a NaN std sails past the non-positive test, normalizes every latent to
+    # NaN, and reaches the value head at the first update with nothing raised
+    # anywhere along the way.
+    for name, tensor in (("latent_mean", mean), ("latent_std", std)):
+        non_finite = int((~torch.isfinite(tensor)).sum())
+        if non_finite:
+            raise ValueError(
+                f"{name} has {non_finite} non-finite entries (NaN or inf). These pass "
+                "the positivity check silently -- NaN <= 0 is False -- and turn every "
+                "normalized latent into NaN at the first update."
+            )
+
     non_positive = int((std <= 0).sum())
     if non_positive:
         raise ValueError(

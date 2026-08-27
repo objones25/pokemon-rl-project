@@ -134,3 +134,25 @@ def test_encode_does_not_rescale_pixels_to_unit_range() -> None:
     latents = encoder.encode(frames)
 
     assert latents.abs().max().item() > 20.0
+
+
+def test_load_latent_stats_rejects_a_nan_standard_deviation() -> None:
+    """NaN <= 0 is False, so a NaN std sails past the positivity check, turns
+    every normalized latent into NaN, and reaches the value head at the first
+    update with nothing raised anywhere. This function's whole job is to stop
+    exactly that."""
+    std = [1.0] * 2048
+    std[7] = float("nan")
+    client = FakeStatsClient(_stats_payload([0.0] * 2048, std))
+
+    with pytest.raises(ValueError, match="latent_std has 1 non-finite"):
+        load_latent_stats(client)
+
+
+def test_load_latent_stats_rejects_an_infinite_mean() -> None:
+    mean = [0.0] * 2048
+    mean[3] = float("inf")
+    client = FakeStatsClient(_stats_payload(mean, [1.0] * 2048))
+
+    with pytest.raises(ValueError, match="latent_mean has 1 non-finite"):
+        load_latent_stats(client)

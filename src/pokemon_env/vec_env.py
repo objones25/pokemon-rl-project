@@ -49,10 +49,18 @@ class InProcessBackend:
         return self._session.step(action)
 
     def state_dict(self) -> dict:
-        return self._session.state_dict()
+        """Same envelope as SubprocessBackend's, so a checkpoint is portable
+        between the two backends. The parent-side counters are constant here:
+        an in-process backend has no worker to lose and never respawns."""
+        return {
+            "session": self._session.state_dict(),
+            "respawns": 0,
+            "episode_offset": 0,
+            "last_episode_id": -1,
+        }
 
     def load_state_dict(self, state: dict) -> None:
-        self._session.load_state_dict(state)
+        self._session.load_state_dict(state["session"])
 
     def close(self) -> None:
         self._session.close()
@@ -144,6 +152,16 @@ class VecPokemonEnv:
         }
 
     def load_state_dict(self, state: dict) -> None:
+        # Checked, not merely written. An unvalidated version field is worse
+        # than none: it reads as protection while a schema change resumes
+        # silently against a mismatched layout.
+        if state["schema_version"] != VEC_ENV_SCHEMA_VERSION:
+            raise ValueError(
+                f"checkpoint has schema_version={state['schema_version']}, this build "
+                f"is {VEC_ENV_SCHEMA_VERSION}. The vec-env state layout changed, so "
+                "per-env state would be restored into fields that no longer mean the "
+                "same thing."
+            )
         if state["aux_state_version"] != AUX_STATE_VERSION:
             raise ValueError(
                 f"checkpoint has AUX_STATE_VERSION={state['aux_state_version']}, "
