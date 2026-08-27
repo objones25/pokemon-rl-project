@@ -18,7 +18,6 @@ import yaml
 class EnvConfig:
     rom_path: str = "Pokemon Red.gb"
     init_state_path: str = "artifacts/init.state"
-    frozen_encoder_repo_id: str = "objones25/pokemon-contrastive-encoder"
     n_envs: int = 64
     action_freq: int = 24
     press_frames: int = 8
@@ -29,7 +28,6 @@ class EnvConfig:
     explore_weight: float = 0.30
     event_weight: float = 0.10
     level_weight: float = 0.05
-    seed: int = 0
 
     def __post_init__(self) -> None:
         release_frames = self.action_freq - self.press_frames - 1

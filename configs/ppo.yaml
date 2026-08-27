@@ -1,0 +1,25 @@
+# Defaults live in PPOConfig; this file records the values this project runs
+# with. gamma/ent_coef match PWhiddy/PokemonRedExperiments v2; gae_lambda,
+# clip_range, vf_coef and max_grad_norm are stable-baselines3 PPO defaults.
+#
+# checkpoint_every_updates and hub_snapshot_every_updates are provisional:
+# pre-flight gate 2 measures iteration time and replaces them. The binding
+# requirement is at most 20 minutes of work lost.
+n_steps: 1024
+n_epochs: 3
+minibatch_envs: 8
+gamma: 0.997
+gae_lambda: 0.95
+clip_range: 0.2
+ent_coef: 0.01
+vf_coef: 0.5
+max_grad_norm: 0.5
+lr: 0.0003
+warmup_steps: 100
+seed: 0
+frozen_encoder_revision: main
+checkpoint_dir: /workspace/checkpoints
+keep_last_n: 3
+checkpoint_every_updates: 25
+artifact_every_updates: 25
+hub_snapshot_every_updates: 75

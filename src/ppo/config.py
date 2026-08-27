@@ -1,0 +1,89 @@
+"""PPO trainer configuration, loaded from configs/ppo.yaml.
+
+Mirrors pokemon_env.config's dataclass + yaml.safe_load pattern: frozen
+dataclass, unknown-field rejection, validation in __post_init__.
+
+Shape helpers live here rather than as constants because a later
+curriculum stage raises context_len and n_steps together; nothing in the
+trainer may hard-code 1024 or 2048."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, fields
+from pathlib import Path
+
+import yaml
+
+
+@dataclass(frozen=True)
+class PPOConfig:
+    n_steps: int = 1024
+    n_epochs: int = 3
+    minibatch_envs: int = 8
+    gamma: float = 0.997
+    gae_lambda: float = 0.95
+    clip_range: float = 0.2
+    clip_range_vf: float | None = None
+    ent_coef: float = 0.01
+    vf_coef: float = 0.5
+    # SB3's PPO default, deliberately not CLAUDE.md's transformer default of
+    # 1.0 -- that value is for language-model pretraining.
+    max_grad_norm: float = 0.5
+    lr: float = 3e-4
+    warmup_steps: int = 100
+    abort_approx_kl: float = 0.5
+    max_nan_minibatches_per_update: int = 3
+    seed: int = 0
+    frozen_encoder_repo_id: str = "objones25/pokemon-contrastive-encoder"
+    frozen_encoder_revision: str | None = None
+    checkpoint_dir: str = "/workspace/checkpoints"
+    keep_last_n: int = 3
+    checkpoint_every_updates: int = 25
+    artifact_every_updates: int = 25
+    hub_snapshot_every_updates: int = 75
+    diagnostics_layer: int = -1
+
+    def __post_init__(self) -> None:
+        if self.frozen_encoder_revision is None:
+            raise ValueError(
+                "frozen_encoder_revision must be pinned to a resolved commit. An "
+                "unpinned revision lets a mid-run push to the encoder repo change "
+                "the features underneath a running agent, with nothing raised."
+            )
+        if self.n_steps < 1:
+            raise ValueError(f"n_steps={self.n_steps} must be at least 1")
+        if self.n_epochs < 1:
+            raise ValueError(f"n_epochs={self.n_epochs} must be at least 1")
+        if self.minibatch_envs < 1:
+            raise ValueError(f"minibatch_envs={self.minibatch_envs} must be at least 1")
+        if not 0.0 < self.gamma < 1.0:
+            raise ValueError(f"gamma={self.gamma} must lie in (0, 1)")
+
+    def validate_against_n_envs(self, n_envs: int) -> None:
+        """n_envs lives on EnvConfig, so the divisibility check cannot run in
+        __post_init__. The trainer calls this once at startup."""
+        if n_envs % self.minibatch_envs:
+            raise ValueError(
+                f"minibatch_envs={self.minibatch_envs} does not divide n_envs={n_envs}; "
+                "a ragged final minibatch would change the effective batch size of one "
+                "optimizer step per epoch"
+            )
+
+    def burn_in(self, context_len: int) -> int:
+        """The minimum prefix giving every trained position a full context
+        window. Any smaller and the first trained positions see less context
+        than the model was sized for."""
+        return context_len - 1
+
+    def buffer_capacity(self, context_len: int) -> int:
+        """burn-in + trained region + one bootstrap slot for V(s_T)."""
+        return self.burn_in(context_len) + self.n_steps + 1
+
+
+def load_config(path: str | Path) -> PPOConfig:
+    data = yaml.safe_load(Path(path).read_text()) or {}
+    valid_fields = {f.name for f in fields(PPOConfig)}
+    unknown = set(data) - valid_fields
+    if unknown:
+        raise ValueError(f"unknown config field(s): {sorted(unknown)}")
+    return PPOConfig(**data)
