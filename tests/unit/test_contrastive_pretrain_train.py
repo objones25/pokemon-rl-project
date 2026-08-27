@@ -53,8 +53,12 @@ def test_check_finite_loss_raises_on_inf() -> None:
         check_finite_loss(torch.tensor(float("inf")), global_step=1)
 
 
-def test_check_finite_loss_passes_for_finite_value() -> None:
-    check_finite_loss(torch.tensor(0.5), global_step=1)  # must not raise
+def test_check_finite_loss_returns_none_for_a_finite_value() -> None:
+    """The guard's contract is "raise on non-finite, otherwise fall through",
+    so the passing case has no side effect to observe. Asserting the return
+    value is what makes this a test rather than a smoke call -- a comment
+    saying "must not raise" cannot fail."""
+    assert check_finite_loss(torch.tensor(0.5), global_step=1) is None
 
 
 def test_compute_val_loss_averages_over_batches() -> None:

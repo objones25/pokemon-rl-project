@@ -27,6 +27,23 @@ pytestmark = pytest.mark.slow
 _CLIP_ENV_VAR = "POKEMON_RL_TEST_CLIP"
 
 
+def _dedupe_into_batcher(
+    frames: list, deduper: PerceptualHashDeduper, batcher: FrameBatcher
+) -> int:
+    """Helper, not a test: mirrors the pipeline's keep/skip decision over a
+    real frame stream and returns how many survived dedup. Lives at module
+    level so the loop and its branch stay out of the test body."""
+    kept_count = 0
+    for i, frame in enumerate(frames):
+        if deduper.is_duplicate(frame):
+            continue
+        kept_count += 1
+        batcher.add(
+            FrameRecord(image=frame, video_id="smoke-test", timestamp_s=i / 2.0, game="red")
+        )
+    return kept_count
+
+
 @pytest.mark.skipif(not shutil.which("ffmpeg"), reason="ffmpeg not installed")
 @pytest.mark.skipif(_CLIP_ENV_VAR not in os.environ, reason=f"set {_CLIP_ENV_VAR} to run this")
 def test_real_extraction_chain_produces_a_local_parquet_shard(tmp_path: Path) -> None:
@@ -44,14 +61,7 @@ def test_real_extraction_chain_produces_a_local_parquet_shard(tmp_path: Path) ->
     deduper = PerceptualHashDeduper()
     batcher = FrameBatcher(batch_size=1000)
 
-    kept_count = 0
-    for i, frame in enumerate(frames):
-        if deduper.is_duplicate(frame):
-            continue
-        kept_count += 1
-        batcher.add(
-            FrameRecord(image=frame, video_id="smoke-test", timestamp_s=i / 2.0, game="red")
-        )
+    kept_count = _dedupe_into_batcher(frames, deduper, batcher)
 
     batch = batcher.flush()
     assert batch is not None
