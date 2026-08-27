@@ -60,7 +60,7 @@ time. The encoder is frozen before PPO ever runs.
 | 2. Contrastive pretraining | `src/contrastive_pretrain/` | Built. Trains on RunPod GPU; exports a frozen encoder to the Hub. |
 | 3. Sequence model | `src/sequence_model/` | Built. Policy, KV-cached rollout step, chunked training forward, checkpoint schema. |
 | 4. Pokemon Red environment | `src/pokemon_env/` | Built. 64 subprocess emulators, RAM observations, reward, checkpoint/resume. |
-| 5. PPO trainer | — | Not started. It is the piece that connects 3 and 4. |
+| 5. PPO trainer | — | Specced, not built. It is the piece that connects 3 and 4. |
 
 Test suite as of this writing: **495 passing, 93.12% branch coverage** (the
 floor in `pyproject.toml` is 93%), plus 12 opt-in `slow` tests that need a real
@@ -270,6 +270,7 @@ specs are the reasoning; the plans are the task breakdown they were built from.
 | Resize cache | `docs/superpowers/specs/2026-08-25-contrastive-pretrain-resize-cache-design.md` |
 | Sequence model | `docs/superpowers/specs/2026-08-26-temporal-sequence-model-design.md` |
 | Pokemon Red env | `docs/superpowers/specs/2026-08-26-pokemon-env-design.md` |
+| PPO trainer | `docs/superpowers/specs/2026-08-27-ppo-trainer-design.md` |
 
 `Pokemon_RL_Architecture_Plan.pdf` is the document all of them trace back to.
 `docs/2026-08-26-slow-test-suite-blocked.md` is a worked example of how this

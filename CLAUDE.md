@@ -9,7 +9,9 @@ Sub-projects are designed and planned independently (`docs/superpowers/specs/`,
 then `docs/superpowers/plans/`) in the order: data collection -> CNN
 pretraining -> sequence model -> environment -> PPO trainer. Each gets its own
 spec and implementation plan before code is written. **PPO is the only stage
-not yet built.**
+not yet built** — its spec (`docs/superpowers/specs/2026-08-27-ppo-trainer-design.md`)
+is written and answers the sequence-model and env handoffs; the implementation
+plan and `src/ppo/` are the next work.
 
 ## Attribution — do not remove
 
