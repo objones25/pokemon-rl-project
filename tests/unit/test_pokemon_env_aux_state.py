@@ -67,10 +67,16 @@ def test_in_battle_slot_is_plus_one_when_in_battle(fake_emulator) -> None:
 
 
 def test_episode_progress_slot_tracks_step_count(fake_emulator) -> None:
-    """Half-way through the episode: 0.5 raw -> 0.0 centered."""
-    result = _build(fake_emulator, step_count=81_920)
+    """Quarter-way through the episode: 0.25 raw -> -0.5 centered.
 
-    assert result[28].item() == pytest.approx(0.0)
+    Deliberately not the half-way point: at step_count/max_steps == 0.5, the
+    correct "fraction elapsed" formula and a reversed "fraction remaining"
+    bug (1 - x) both center to 0.0 -- a fixed point that can't tell the two
+    formulas apart. The quarter point gives -0.5 for the correct formula and
+    +0.5 for the reversed one, so the test actually discriminates."""
+    result = _build(fake_emulator, step_count=40_960)
+
+    assert result[28].item() == pytest.approx(-0.5)
 
 
 def test_aux_state_version_is_recorded_for_checkpoint_validation() -> None:
