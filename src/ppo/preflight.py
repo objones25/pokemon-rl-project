@@ -71,7 +71,7 @@ def sdpa_backend_report(
         "shapes": {
             "query": list(params.query.shape),
             "key": list(params.key.shape),
-            "enable_gqa": True,
+            "enable_gqa": params.enable_gqa,
         },
     }
     logger.info("sdpa_backend_report", extra=report)
@@ -98,7 +98,10 @@ def throughput_report(
             started = time.monotonic()
             for _ in range(steps):
                 vec_env.step(actions)
-            elapsed = time.monotonic() - started
+            # Guarded, not a `steps >= 1` precondition: elapsed can still read
+            # 0.0 with steps >= 1 on a coarse clock or a fast enough env, and
+            # a zero denominator must not raise mid-gate.
+            elapsed = max(time.monotonic() - started, 1e-9)
         finally:
             vec_env.close()
             buffer.close()

@@ -3,10 +3,58 @@ they ask the right question with the right shapes."""
 
 from __future__ import annotations
 
+import numpy as np
+import pytest
 import torch
 
-from ppo.preflight import sdpa_backend_report, sdpa_params_for
+from ppo.preflight import sdpa_backend_report, sdpa_params_for, throughput_report
 from sequence_model.config import PolicyConfig
+
+
+class _RecordingVecEnv:
+    """Fake `build_env`-supplied vec env. Appends to a list shared with its
+    paired `_RecordingFrameBuffer` so a test can assert call order across
+    both objects, not just within one. `fail_after` scripts a `step()`
+    exception `N` calls in, to exercise the `finally` cleanup path."""
+
+    def __init__(self, calls: list[str], n_envs: int, fail_after: int | None = None) -> None:
+        self._calls = calls
+        self._n_envs = n_envs
+        self._fail_after = fail_after
+        self._step_calls = 0
+
+    def reset(self) -> None:
+        self._calls.append("env.reset")
+
+    def step(self, actions: np.ndarray) -> None:
+        if self._fail_after is not None and self._step_calls >= self._fail_after:
+            raise RuntimeError("pyboy worker crashed")
+        self._step_calls += 1
+        self._calls.append("env.step")
+
+    def close(self) -> None:
+        self._calls.append("env.close")
+
+
+class _RecordingFrameBuffer:
+    """Fake `build_env`-supplied frame buffer, sharing `calls` with its
+    paired `_RecordingVecEnv`."""
+
+    def __init__(self, calls: list[str]) -> None:
+        self._calls = calls
+
+    def close(self) -> None:
+        self._calls.append("buffer.close")
+
+    def unlink(self) -> None:
+        self._calls.append("buffer.unlink")
+
+
+def _recording_build_env(calls: list[str], fail_after: int | None = None):
+    def build(n_envs: int) -> tuple[_RecordingVecEnv, _RecordingFrameBuffer]:
+        return _RecordingVecEnv(calls, n_envs, fail_after), _RecordingFrameBuffer(calls)
+
+    return build
 
 
 def _policy_config() -> PolicyConfig:
@@ -56,7 +104,12 @@ def test_the_report_names_every_candidate_backend() -> None:
     """A key-set-only assertion would also pass if the report hardcoded
     placeholder booleans or symmetric shapes instead of the real measurement --
     it wouldn't catch either bug. Pin the full content instead, including the
-    asymmetric query/key widths that are this gate's entire point."""
+    asymmetric query/key widths that are this gate's entire point.
+
+    The (False, False) pin is empirically verified against torch 2.13 on
+    CPU: both can_use_flash_attention and can_use_efficient_attention
+    currently require a CUDA tensor. A future torch adding CPU support to
+    either backend would need this test revisited."""
     report = sdpa_backend_report(
         _policy_config(), minibatch_envs=4, seq_len=16, device=torch.device("cpu")
     )
@@ -66,3 +119,32 @@ def test_the_report_names_every_candidate_backend() -> None:
         "efficient": False,
         "shapes": {"query": [4, 8, 16, 16], "key": [4, 2, 16, 16], "enable_gqa": True},
     }
+
+
+def test_throughput_report_closes_the_env_then_closes_then_unlinks_the_buffer() -> None:
+    """The cleanup order is a binding constraint (close-then-unlink, or a
+    failed gate leaks shared memory) and needs no real env to verify --
+    build_env is injected exactly so this is fake-able."""
+    calls: list[str] = []
+
+    throughput_report(_recording_build_env(calls), n_envs_candidates=[4], steps=2)
+
+    assert calls == [
+        "env.reset",
+        "env.step",
+        "env.step",
+        "env.close",
+        "buffer.close",
+        "buffer.unlink",
+    ]
+
+
+def test_throughput_report_still_cleans_up_when_a_step_raises() -> None:
+    """A crashed worker mid-rollout must not skip cleanup, or the gate leaks
+    the shared-memory frame buffer on every failed run."""
+    calls: list[str] = []
+
+    with pytest.raises(RuntimeError, match="pyboy worker crashed"):
+        throughput_report(_recording_build_env(calls, fail_after=0), n_envs_candidates=[4], steps=2)
+
+    assert calls == ["env.reset", "env.close", "buffer.close", "buffer.unlink"]
