@@ -3,16 +3,40 @@ Separate from contrastive_pretrain.encoder_io, which handles the
 weights-only frozen artifact pushed to the HF Hub -- these are the two
 tiers described in the design spec, split by cost/purpose, not just by
 file.
+
+This module owns the *schema* -- what a contrastive-pretraining checkpoint
+contains. The file I/O underneath it (atomic write, discovery, retention)
+is shared with the other sub-projects in checkpointing.io and re-exported
+here so existing call sites keep one import.
+
+Pruning is safe for this run specifically because the *best* encoder is not
+kept only on the network volume: run_training pushes it to the Hub via
+push_frozen_encoder whenever val loss improves. These files are resume
+state, not the artifact -- so keeping a short tail is enough. See
+ContrastivePretrainConfig.checkpoint_keep_last_n for the volume arithmetic.
 """
 
 from __future__ import annotations
 
-from pathlib import Path
-
-import torch
 from torch import nn
 from torch.optim import Optimizer
 from torch.optim.lr_scheduler import LRScheduler
+
+from checkpointing.io import (
+    find_latest_checkpoint,
+    load_checkpoint,
+    prune_checkpoints,
+    save_checkpoint,
+)
+
+__all__ = [
+    "build_checkpoint_state",
+    "find_latest_checkpoint",
+    "load_checkpoint",
+    "prune_checkpoints",
+    "restore_optimizer_and_scheduler",
+    "save_checkpoint",
+]
 
 
 def build_checkpoint_state(
@@ -60,53 +84,6 @@ def build_checkpoint_state(
         "best_val_loss": best_val_loss,
         "local_cache_dir": local_cache_dir,
     }
-
-
-def save_checkpoint(path: str | Path, state: dict) -> None:
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = path.with_suffix(path.suffix + ".tmp")
-    torch.save(state, tmp_path)
-    tmp_path.replace(path)  # atomic on POSIX -- no half-written checkpoint on a mid-save crash
-
-
-def load_checkpoint(path: str | Path) -> dict:
-    return torch.load(Path(path), weights_only=True)
-
-
-def find_latest_checkpoint(checkpoint_dir: str | Path) -> Path | None:
-    checkpoint_dir = Path(checkpoint_dir)
-    if not checkpoint_dir.exists():
-        return None
-    candidates = sorted(checkpoint_dir.glob("checkpoint_step*.pt"))
-    return candidates[-1] if candidates else None
-
-
-def prune_checkpoints(checkpoint_dir: str | Path, keep_last_n: int) -> list[Path]:
-    """Deletes all but the `keep_last_n` newest checkpoints, returning the
-    paths removed (oldest first). Newest is by the same zero-padded-step
-    filename sort `find_latest_checkpoint` uses, so the resume point is
-    always among the survivors.
-
-    Retention is safe here specifically because the *best* encoder is not
-    kept only on this volume: run_training pushes it to the Hub via
-    push_frozen_encoder whenever val loss improves. These files are resume
-    state, not the artifact -- so keeping a short tail is enough.
-
-    Sized against a real constraint, not taste: a checkpoint is ~336MB
-    (ResNet-50 encoder + projector + AdamW moments, measured), and an
-    unpruned 100-epoch run writes ~138 of them -- ~46GB on a 50GB network
-    volume that must also hold the resize cache."""
-    if keep_last_n < 1:
-        raise ValueError(f"keep_last_n must be at least 1, got {keep_last_n}")
-    checkpoint_dir = Path(checkpoint_dir)
-    if not checkpoint_dir.exists():
-        return []
-    candidates = sorted(checkpoint_dir.glob("checkpoint_step*.pt"))
-    stale = candidates[:-keep_last_n]
-    for path in stale:
-        path.unlink(missing_ok=True)
-    return stale
 
 
 def restore_optimizer_and_scheduler(optimizer: Optimizer, scheduler: LRScheduler, state: dict) -> None:
