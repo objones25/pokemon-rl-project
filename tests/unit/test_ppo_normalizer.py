@@ -9,11 +9,11 @@ from ppo.normalizer import ReturnScaler
 
 
 def test_scale_starts_at_one_so_the_first_update_is_unscaled() -> None:
-    assert ReturnScaler(gamma=0.99).scale == pytest.approx(1.0)
+    assert ReturnScaler().scale == pytest.approx(1.0)
 
 
 def test_scale_approaches_the_standard_deviation_of_the_returns_it_has_seen() -> None:
-    scaler = ReturnScaler(gamma=0.99)
+    scaler = ReturnScaler()
     returns = torch.tensor([[-10.0, 10.0, -10.0, 10.0]])
 
     scaler.update(returns)
@@ -29,16 +29,26 @@ def test_the_scaler_never_shifts_the_mean_so_advantage_signs_survive() -> None:
     below the mean does discriminate: dividing by scale alone keeps it
     positive, while subtracting the (much larger) mean first flips it
     negative."""
-    scaler = ReturnScaler(gamma=0.99)
+    scaler = ReturnScaler()
     scaler.update(torch.tensor([[100.0, 102.0, 104.0]]))
 
     assert scaler.normalize(torch.tensor([5.0]))[0].item() > 0.0
 
 
+def test_updating_with_an_empty_batch_leaves_scale_unchanged() -> None:
+    scaler = ReturnScaler()
+    scaler.update(torch.tensor([[-10.0, 10.0, -10.0, 10.0]]))
+    scale_before_the_empty_update = scaler.scale
+
+    scaler.update(torch.empty(0))
+
+    assert scaler.scale == pytest.approx(scale_before_the_empty_update)
+
+
 def test_state_round_trips_through_a_checkpoint() -> None:
-    scaler = ReturnScaler(gamma=0.99)
+    scaler = ReturnScaler()
     scaler.update(torch.tensor([[-10.0, 10.0]]))
-    restored = ReturnScaler(gamma=0.99)
+    restored = ReturnScaler()
 
     restored.load_state_dict(scaler.state_dict())
 

@@ -17,8 +17,7 @@ EPSILON = 1e-8
 
 
 class ReturnScaler:
-    def __init__(self, gamma: float) -> None:
-        self._gamma = gamma
+    def __init__(self) -> None:
         self._count = 0.0
         self._mean = 0.0
         self._m2 = 0.0
