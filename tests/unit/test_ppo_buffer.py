@@ -11,7 +11,7 @@ from ppo.config import PPOConfig
 from sequence_model.config import PolicyConfig
 
 
-def _tiny_buffer() -> RolloutBuffer:
+def _tiny_buffer(n_envs: int = 2) -> RolloutBuffer:
     """Helper, not a test: context_len 4 -> burn_in 3, n_steps 4, capacity 8."""
     return RolloutBuffer(
         config=PPOConfig(frozen_encoder_revision="x", n_steps=4),
@@ -19,7 +19,7 @@ def _tiny_buffer() -> RolloutBuffer:
             d_model=32, n_layers=2, n_heads=2, head_dim=16, n_kv_heads=1,
             d_ff=64, context_len=4, latent_dim=8, aux_state_dim=4,
         ),
-        n_envs=2,
+        n_envs=n_envs,
         device=torch.device("cpu"),
     )
 
@@ -80,3 +80,51 @@ def test_shift_sets_the_write_cursor_to_the_first_trained_slot_plus_one() -> Non
     buffer.shift()
 
     assert buffer.write_cursor == 4
+
+
+def test_chunk_returns_rows_in_the_requested_env_order_not_storage_order() -> None:
+    """A subset-and-reorder request against 3 envs. If chunk() ever forgot to
+    index by env_indices, this is the smallest case that would notice: with
+    n_envs == len(env_indices) in identity order (the other tests), an
+    unindexed return is indistinguishable from a correctly indexed one."""
+    buffer = _tiny_buffer(n_envs=3)
+    latents = torch.stack([torch.full((8,), float(env)) for env in range(3)])
+    buffer.write(slot=0, latent=latents, aux=torch.zeros(3, 4), action=torch.zeros(3, dtype=torch.int64),
+                 prev_action=torch.zeros(3, dtype=torch.int64), prev_reward=torch.zeros(3),
+                 reward=torch.zeros(3), done=torch.zeros(3, dtype=torch.bool),
+                 episode_id=torch.zeros(3, dtype=torch.int64), abs_pos=torch.zeros(3, dtype=torch.int64),
+                 logprob=torch.zeros(3), value=torch.zeros(3))
+
+    chunk = buffer.chunk(torch.tensor([2, 0]))
+
+    assert chunk.latent[:, 0, 0].tolist() == pytest.approx([2.0, 0.0])
+
+
+def test_written_latents_are_rounded_to_fp16_precision_not_stored_as_fp32() -> None:
+    """0.1 is not exactly representable in fp16 or fp32, but the two roundings
+    differ by ~2e-5 -- far outside pytest.approx's default tolerance -- so this
+    is the smallest write that would notice fp32 storage silently replacing
+    the fp16 budget the module exists for."""
+    buffer = _tiny_buffer()
+    latent = torch.full((2, 8), 0.1, dtype=torch.float32)
+    buffer.write(slot=0, latent=latent, aux=torch.zeros(2, 4), action=torch.zeros(2, dtype=torch.int64),
+                 prev_action=torch.zeros(2, dtype=torch.int64), prev_reward=torch.zeros(2),
+                 reward=torch.zeros(2), done=torch.zeros(2, dtype=torch.bool),
+                 episode_id=torch.zeros(2, dtype=torch.int64), abs_pos=torch.zeros(2, dtype=torch.int64),
+                 logprob=torch.zeros(2), value=torch.zeros(2))
+
+    stored = buffer.chunk(torch.tensor([0, 1])).latent[0, 0, 0].item()
+
+    assert stored == pytest.approx(torch.tensor(0.1, dtype=torch.float16).item())
+
+
+def test_the_latent_storage_tensor_itself_is_fp16() -> None:
+    """write()'s explicit .to(float16) cast means a value is fp16-rounded
+    before it ever reaches the storage tensor, so the precision test above
+    cannot notice the storage tensor's own dtype silently widening back to
+    fp32 -- that mutation still rounds correctly and reads back correctly,
+    it just doubles the 537 MB the module docstring budgets for. This test
+    pins the storage dtype directly, which is the only way to catch that."""
+    buffer = _tiny_buffer()
+
+    assert buffer._latent.dtype == torch.float16
