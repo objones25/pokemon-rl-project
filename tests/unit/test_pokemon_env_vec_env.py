@@ -1,6 +1,7 @@
 import numpy as np
 import pytest
 
+from pokemon_env import ram
 from pokemon_env.config import EnvConfig
 from pokemon_env.session import EnvSession
 from pokemon_env.vec_env import InProcessBackend, VecPokemonEnv
@@ -13,6 +14,25 @@ def vec_env() -> VecPokemonEnv:
     config = EnvConfig(n_envs=3, max_steps=2)
     backends = [
         InProcessBackend(EnvSession(FakeEmulator(), config, init_state=b"init"))
+        for _ in range(3)
+    ]
+    return VecPokemonEnv(backends, config)
+
+
+def _two_badge_emulator() -> FakeEmulator:
+    """A FakeEmulator whose badge byte has popcount 2, so badge_weight (1.00)
+    * 2 = 2.00 comfortably exceeds the reward accumulator's 1.0 clip cap --
+    the static default FakeEmulator() never produces a clipped step at all."""
+    memory = bytearray(0x10000)
+    memory[ram.BADGES_ADDR] = 0b11
+    return FakeEmulator(memory=memory)
+
+
+@pytest.fixture
+def two_badge_vec_env() -> VecPokemonEnv:
+    config = EnvConfig(n_envs=3, max_steps=2)
+    backends = [
+        InProcessBackend(EnvSession(_two_badge_emulator(), config, init_state=b"init"))
         for _ in range(3)
     ]
     return VecPokemonEnv(backends, config)
@@ -78,6 +98,29 @@ def test_clip_fire_rate_reports_the_fraction_of_clipped_steps(vec_env) -> None:
     vec_env.step(np.zeros(3, dtype=np.int64))
 
     assert vec_env.clip_fire_rate == pytest.approx(0.0)
+
+
+def test_clip_fire_rate_counts_steps_whose_reward_was_clipped(two_badge_vec_env) -> None:
+    """2 badges * badge_weight 1.00 = 2.00, past the reward clip's 1.0 cap, so
+    every env's first step is clipped. reset() also counts toward the
+    denominator -- 3 clipped observations out of 6 total collected."""
+    two_badge_vec_env.reset()
+
+    two_badge_vec_env.step(np.zeros(3, dtype=np.int64))
+
+    assert two_badge_vec_env.clip_fire_rate == pytest.approx(0.5)
+
+
+def test_last_components_reports_the_mean_reward_breakdown_across_envs(
+    two_badge_vec_env,
+) -> None:
+    two_badge_vec_env.reset()
+
+    two_badge_vec_env.step(np.zeros(3, dtype=np.int64))
+
+    assert two_badge_vec_env.last_components == pytest.approx(
+        {"badges": 2.0, "events": 0.0, "explore": 0.3, "heal": 0.0, "levels": 0.0}
+    )
 
 
 def test_state_dict_round_trips_the_per_env_step_counters(vec_env) -> None:
