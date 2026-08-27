@@ -68,7 +68,8 @@ def generate_init_state(emulator: Emulator, script: tuple[ButtonPress, ...]) -> 
 
 
 def state_hash(state: bytes) -> str:
-    """Recorded in checkpoints so a resume detects that init.state changed
-    underneath it. A different starting state invalidates every reward
+    """Will be recorded in checkpoints (wired in by Task 12, not yet a
+    caller of this function) so a resume can detect that init.state changed
+    underneath it. A different starting state would invalidate every reward
     baseline the checkpoint holds."""
     return hashlib.sha256(state).hexdigest()

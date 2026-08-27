@@ -73,18 +73,37 @@ def test_screen_frame_returns_a_copy_not_a_live_view() -> None:
 
 
 @_needs_rom
-def test_generated_init_state_leaves_the_player_in_the_overworld() -> None:
-    """The script's frame counts are guesses until this runs. If the agent is
-    still in a menu, every one of 64 envs starts every episode in that menu.
-    party_size 0 and a non-zero map id is the post-intro, pre-starter state."""
+def test_generated_init_state_starts_in_the_bedroom_before_the_starter() -> None:
+    """The script's frame counts are guesses until this runs. `map_id != 0`
+    alone is too weak a guard: every interior (Red's house, Oak's lab) has a
+    non-zero map id too, so that assertion would pass even if the script
+    stalled on a menu partway through the intro -- it only ever caught "still
+    on the title screen" or "landed in a battle", not "stalled in a menu on
+    the right map", which is the actual failure this test exists to catch.
+
+    Instead this asserts the exact measured post-intro state: coordinates
+    (3, 6) in map 38 (Red's bedroom), party_size 0 (before picking a
+    starter), and money 3000 -- Pokemon Red's canonical starting amount.
+    money == 3000 together with a clean (all-zero) event_flags state is what
+    actually pins "clean start" rather than "somewhere mid-intro" -- a save
+    generated from a script that stalled mid-menu would still often land on
+    map 38 by coincidence, but would not have the canonical money value or a
+    zero event-flag state.
+
+    This test is deliberately ROM-revision sensitive: a different ROM
+    (a different release, a hacked ROM, Blue instead of Red) would produce a
+    different starting position, and that SHOULD fail loudly here rather than
+    silently changing what all 64 environments load every reset."""
     from pokemon_env import ram
     from pokemon_env.init_state import INTRO_SCRIPT, generate_init_state
 
     emulator = PyBoyEmulator(str(_ROM))
     state = generate_init_state(emulator, INTRO_SCRIPT)
     emulator.load_state(state)
-    map_id = emulator.read_memory(ram.MAP_ID_ADDR)
+    coords = ram.game_coords(emulator)
+    party_size = ram.party_size(emulator)
+    money = ram.read_money(emulator)
     in_battle = ram.in_battle(emulator)
     emulator.close()
 
-    assert (map_id != 0, in_battle) == (True, False)
+    assert (coords, party_size, money, in_battle) == ((3, 6, 38), 0, 3000, False)
