@@ -166,6 +166,50 @@ def test_the_heatmap_counts_a_repeated_coordinate_once_per_occurrence() -> None:
     assert int(heatmap.max()) == 2
 
 
+def test_two_distinct_maps_render_in_separate_tiles() -> None:
+    """Map 1 and map 2 each contribute one unique coordinate, so the ranking's
+    count-descending-then-map-id-ascending tiebreak puts map 1 at rank
+    position 0 (tile origin (0, 0)) and map 2 at position 1. With the default
+    256-wide image, maps_per_row = 256 // MAP_TILE(64) = 4, so position 1's
+    origin is (row=0, column=64) -- one tile across, not one tile down.
+    Position 0 is 0 under both '//' and '%', so only map 2's pixel, at
+    column 64 + 5 = 69 rather than row 64 + 5 = 69, can catch those two
+    operators being swapped in the origin computation."""
+    heatmap = exploration_heatmap([ram.coord_key(5, 5, 1), ram.coord_key(5, 5, 2)])
+
+    assert int(heatmap[5, 5]) == 1
+    assert int(heatmap[5, 69]) == 1
+    assert int((heatmap > 0).sum()) == 2
+
+
+def _coord_keys_for_thirteen_maps_with_descending_unique_counts() -> list[int]:
+    """Helper, not a test: 13 distinct maps (ids 0..12), where map id N owns
+    (13 - N) unique coordinates -- map 0 the most, map 12 (the 13th distinct
+    map) the fewest. Ranking by unique-coordinate count then puts map 12 in
+    last place, one below MAPS_SHOWN=12."""
+    return [
+        ram.coord_key(x, 0, map_id)
+        for map_id in range(13)
+        for x in range(13 - map_id)
+    ]
+
+
+def test_a_map_ranked_below_the_top_twelve_is_dropped_from_the_heatmap() -> None:
+    """Map 0 has the most unique coordinates (13), so it ranks first, at tile
+    origin (0, 0); its first coordinate (x=0, y=0) renders at heatmap[0, 0].
+    Map 12 has the fewest (1) and ranks last (position 12) -- one past
+    MAPS_SHOWN=12, so it is dropped entirely. Were it kept, position 12 would
+    land at origin_row=(12 // 4) * 64 = 192, origin_column=(12 % 4) * 64 = 0
+    (maps_per_row=4 at the default 256-wide image); no map that survives the
+    top-12 cut (positions 0..11, origin_row in {0, 64, 128}) ever reaches
+    row 192, so that whole tile-sized region staying zero is specific
+    evidence map 12 was cut, not incidental non-overlap."""
+    heatmap = exploration_heatmap(_coord_keys_for_thirteen_maps_with_descending_unique_counts())
+
+    assert int(heatmap[0, 0]) == 1
+    assert int(heatmap[192:256, 0:64].sum()) == 0
+
+
 def test_rollout_metrics_reports_badges_from_the_env_stats() -> None:
     step = _vec_step(n_envs=2)
     stats = [

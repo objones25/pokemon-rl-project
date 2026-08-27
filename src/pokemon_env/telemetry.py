@@ -91,7 +91,11 @@ def rollout_metrics(
     `stats` is VecPokemonEnv.stats() -- one entry per env. Unique coordinates
     are counted across the union of all envs, not summed per env: two envs that
     walked the same route have explored one route, and summing would report
-    twice the exploration that happened."""
+    twice the exploration that happened.
+
+    Assumes `stats` is non-empty: `max(...)`/`sum(...) / len(stats)` below
+    would raise on an empty list. EnvConfig validates n_envs >= 1, and `stats`
+    has one entry per env, so this holds for every real caller."""
     unique_coords = {key for entry in stats for key in entry["coord_keys"]}
     unique_maps = {(key >> 16) & 0xFF for key in unique_coords}
     lengths = [length for entry in stats for length in entry["episode_lengths"]]
