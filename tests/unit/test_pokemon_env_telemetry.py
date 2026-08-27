@@ -1,0 +1,130 @@
+import numpy as np
+import pytest
+
+from pokemon_env import ram
+from pokemon_env.telemetry import contact_sheet, exploration_heatmap, rollout_metrics
+from pokemon_env.vec_env import VecStep
+
+
+def _vec_step(n_envs: int, reward: float = 0.0) -> VecStep:
+    """Helper, not a test."""
+    return VecStep(
+        frames=np.zeros((n_envs, 1, 144, 160), dtype=np.uint8),
+        aux=np.zeros((n_envs, 32), dtype=np.float32),
+        reward=np.full(n_envs, reward, dtype=np.float32),
+        done=np.zeros(n_envs, dtype=bool),
+        episode_id=np.zeros(n_envs, dtype=np.int64),
+    )
+
+
+def _vec_step_with_rewards(rewards: np.ndarray) -> VecStep:
+    """Helper, not a test. Lets a test give each env a different reward so
+    mean/max/sum are distinguishable."""
+    n_envs = rewards.shape[0]
+    return VecStep(
+        frames=np.zeros((n_envs, 1, 144, 160), dtype=np.uint8),
+        aux=np.zeros((n_envs, 32), dtype=np.float32),
+        reward=rewards.astype(np.float32),
+        done=np.zeros(n_envs, dtype=bool),
+        episode_id=np.zeros(n_envs, dtype=np.int64),
+    )
+
+
+def test_contact_sheet_tiles_64_frames_into_an_8_by_8_grid() -> None:
+    frames = np.zeros((64, 1, 144, 160), dtype=np.uint8)
+
+    sheet = contact_sheet(frames)
+
+    assert sheet.shape == (8 * 144, 8 * 160)
+
+
+def test_contact_sheet_places_each_frame_at_its_row_major_grid_position() -> None:
+    """A transposed tiling (row/column swapped) would put env 1 and env 3 at
+    different pixel offsets than row-major placement does, which makes the
+    sheet useless for spotting which env is stuck. With only env 0 marked, a
+    3x3 grid still puts it top-left under either row-major or transposed
+    indexing, so this checks env 1 and env 3 too -- their positions only
+    agree with row-major placement."""
+    frames = np.zeros((6, 1, 144, 160), dtype=np.uint8)
+    frames[0] = 50
+    frames[1] = 100
+    frames[3] = 200
+
+    sheet = contact_sheet(frames)
+
+    assert int(sheet[0, 0]) == 50
+    assert int(sheet[0, 160]) == 100
+    assert int(sheet[144, 0]) == 200
+
+
+def test_contact_sheet_pads_a_non_square_batch() -> None:
+    frames = np.zeros((3, 1, 144, 160), dtype=np.uint8)
+
+    sheet = contact_sheet(frames)
+
+    assert sheet.shape == (2 * 144, 2 * 160)
+
+
+def test_exploration_heatmap_marks_a_visited_coordinate() -> None:
+    """Asserting only heatmap.sum() > 0 would pass for any unpacking of the
+    coord_key bits, including x and y swapped. Pin down the exact cell that
+    map=3, x=10, y=20 must land on given this module's own map-grid layout,
+    so a wrong shift/mask order fails this test instead of passing it."""
+    heatmap = exploration_heatmap([ram.coord_key(x=10, y=20, map_id=3)], height=64, width=64)
+
+    assert int(heatmap[4, 58]) == 1
+    assert int(heatmap.sum()) == 1
+
+
+def test_exploration_heatmap_is_empty_with_no_coordinates() -> None:
+    heatmap = exploration_heatmap([], height=64, width=64)
+
+    assert int(heatmap.sum()) == 0
+
+
+def test_rollout_metrics_flattens_components_with_a_prefix() -> None:
+    """W&B panels group on the prefix, so an unprefixed 'explore' would sit
+    beside unrelated scalars."""
+    metrics = rollout_metrics(
+        _vec_step(4, reward=0.25),
+        components={"explore": 0.3, "badges": 0.0},
+        clip_fire_rate=0.0,
+        respawns=0,
+    )
+
+    assert metrics["reward/explore"] == pytest.approx(0.3)
+
+
+def test_rollout_metrics_reports_mean_reward() -> None:
+    """With every env at the same reward, mean, max, and sum would all
+    trivially agree (mean == max, and a mean-vs-sum swap could hide behind a
+    later normalization). Differing per-env rewards make mean the only
+    statistic that lands on this exact value."""
+    metrics = rollout_metrics(
+        _vec_step_with_rewards(np.array([0.1, 0.2, 0.3, 0.4])),
+        components={},
+        clip_fire_rate=0.0,
+        respawns=0,
+    )
+
+    assert metrics["reward/mean"] == pytest.approx(0.25)
+
+
+def test_rollout_metrics_surfaces_the_clip_fire_rate() -> None:
+    """Above roughly 0.1% the weights are miscalibrated and achievement
+    ordering is being flattened."""
+    metrics = rollout_metrics(
+        _vec_step(4), components={}, clip_fire_rate=0.02, respawns=0
+    )
+
+    assert metrics["env/clip_fire_rate"] == pytest.approx(0.02)
+
+
+def test_rollout_metrics_surfaces_worker_respawns() -> None:
+    """A rising respawn rate is a leading indicator of memory pressure or a
+    bad state, long before it shows in reward."""
+    metrics = rollout_metrics(
+        _vec_step(4), components={}, clip_fire_rate=0.0, respawns=3
+    )
+
+    assert metrics["env/worker_respawns"] == pytest.approx(3.0)
