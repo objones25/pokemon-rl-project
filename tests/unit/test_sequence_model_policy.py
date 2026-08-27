@@ -5,7 +5,9 @@ import torch
 
 from sequence_model.block import TransformerBlock
 from sequence_model.config import PolicyConfig
+from sequence_model.masks import build_chunk_mask
 from sequence_model.policy import RecurrentTransformerPolicy
+from sequence_model.rope import rope_tables
 from sequence_model.telemetry import DISTANCE_BUCKETS
 
 
@@ -428,6 +430,39 @@ def test_diagnostics_puts_all_mass_in_bucket_zero_when_every_query_is_isolated()
     metrics = policy.diagnostics(**inputs)
 
     assert metrics["attn/dist_0"] == pytest.approx(1.0, abs=1e-6)
+
+
+def test_diagnostics_logit_max_matches_the_isolated_diagonal_score() -> None:
+    """Independently derived, not read off diagnostics' own output. With the
+    same isolated-diagonal fixture as the distance-mass test above (a
+    distinct episode_id per position), every query attends only to itself,
+    so the max unmasked scaled logit is exactly the largest self dot
+    product q_i . k_i / sqrt(head_dim) over every (batch, head, position) --
+    computed here directly from block1's own q/k, recomputed by hand rather
+    than through attention_logit_max, at the default tap (layer=-1, the
+    last of the tiny config's two blocks). This fails if the q/k arguments
+    were swapped, the wrong block's mask was used, or the wrong tap's q/k
+    were read."""
+    policy, inputs = _tiny_policy_and_chunk_inputs()
+    length = inputs["latent"].shape[1]
+    batch = inputs["latent"].shape[0]
+    inputs["episode_id"] = torch.arange(length).expand(batch, length).contiguous()
+    block0 = cast(TransformerBlock, policy.blocks[0])
+    block1 = cast(TransformerBlock, policy.blocks[-1])
+    x0 = policy.adapter(
+        inputs["latent"], inputs["aux_state"], inputs["prev_action"], inputs["prev_reward"]
+    )
+    cos, sin = rope_tables(inputs["abs_pos"], policy.config.head_dim, policy.config.rope_theta)
+    mask = build_chunk_mask(inputs["abs_pos"], inputs["episode_id"], policy.config.context_len)
+    x1 = block0.forward_chunk(x0, cos, sin, mask)
+    q, k, _ = block1.attention.attention_diagnostics(block1.attn_norm(x1), cos, sin, mask)
+    k_expanded = k.repeat_interleave(q.shape[1] // k.shape[1], dim=1)
+    diagonal_scores = (q * k_expanded).sum(dim=-1) / (policy.config.head_dim**0.5)
+    expected = diagonal_scores.max().item()
+
+    metrics = policy.diagnostics(**inputs)
+
+    assert metrics["attn/logit_max"] == pytest.approx(expected, rel=1e-5)
 
 
 def test_diagnostics_residual_norm_matches_the_untouched_rms_norm_scale() -> None:
