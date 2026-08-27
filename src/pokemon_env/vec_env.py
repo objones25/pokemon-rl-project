@@ -13,6 +13,7 @@ SubprocessBackend (subprocess_backend.py, what production uses)."""
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -76,7 +77,7 @@ class VecStep:
 
 
 class VecPokemonEnv:
-    def __init__(self, backends: list[EnvBackend], config: EnvConfig) -> None:
+    def __init__(self, backends: Sequence[EnvBackend], config: EnvConfig) -> None:
         if len(backends) != config.n_envs:
             raise ValueError(
                 f"got {len(backends)} backends for n_envs={config.n_envs}; "

@@ -14,9 +14,8 @@ from __future__ import annotations
 import multiprocessing as mp
 from collections.abc import Callable
 from enum import StrEnum
-from multiprocessing.connection import Connection
-from multiprocessing.process import BaseProcess
 from multiprocessing.shared_memory import SharedMemory
+from typing import Any, Protocol
 
 import numpy as np
 
@@ -24,6 +23,31 @@ from pokemon_env.config import EnvConfig
 from pokemon_env.emulator import SCREEN_HEIGHT, SCREEN_WIDTH, Emulator, PyBoyEmulator
 from pokemon_env.session import EnvSession, StepResult
 from pokemon_env.vec_env import VecPokemonEnv
+
+
+class WorkerConnection(Protocol):
+    """The pipe end this module actually uses, as a Protocol rather than
+    `multiprocessing.connection.Connection`.
+
+    Typing against the concrete class made the injected `spawn_worker`
+    untypable: a hand-written fake cannot be a `Connection`, so every test
+    that scripts one was a type error even though the injection point exists
+    precisely so tests can supply a fake. `Connection` satisfies this
+    structurally, so production is unaffected."""
+
+    def send(self, obj: Any) -> None: ...
+    def poll(self, timeout: float | None = ...) -> bool: ...
+    def recv(self) -> Any: ...
+    def close(self) -> None: ...
+
+
+class WorkerProcess(Protocol):
+    """Likewise for the process handle: only these three methods are used, and
+    `BaseProcess` satisfies them structurally."""
+
+    def is_alive(self) -> bool: ...
+    def terminate(self) -> None: ...
+    def join(self, timeout: float | None = ...) -> None: ...
 
 
 class Command(StrEnum):
@@ -112,7 +136,7 @@ def handle_command(
 
 
 def worker_main(
-    conn: Connection,
+    conn: WorkerConnection,
     shm_name: str,
     index: int,
     config: EnvConfig,
@@ -139,7 +163,7 @@ def worker_main(
 
 
 SpawnWorker = Callable[
-    [str, int, EnvConfig, str, bytes], tuple[Connection, BaseProcess]
+    [str, int, EnvConfig, str, bytes], tuple[WorkerConnection, WorkerProcess]
 ]
 
 
@@ -149,7 +173,7 @@ def spawn_real_worker(
     config: EnvConfig,
     rom_path: str,
     init_state: bytes,
-) -> tuple[Connection, BaseProcess]:
+) -> tuple[WorkerConnection, WorkerProcess]:
     """The production spawn. Module-level so `spawn` can pickle it by
     reference, and injectable so SubprocessBackend's timeout, error-routing
     and respawn logic can be tested without a real process or a ROM."""

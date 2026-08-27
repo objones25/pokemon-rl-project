@@ -69,7 +69,17 @@ class LatentEncoder:
     """Batched frozen-CNN inference: (N, 1, 144, 160) uint8 -> (N, 2048)."""
 
     def __init__(self, encoder: nn.Module, device: torch.device) -> None:
-        self._encoder = encoder.to(device).to(memory_format=torch.channels_last).eval()
+        # `to(memory_format=...)` is a documented nn.Module call form -- it is
+        # the fourth signature listed in Module.to's own docstring -- but the
+        # type stubs declare no @overload for it, so a checker rejects the call.
+        # Verified working on torch 2.13: a Conv2d(4, 8, 3) weight reports
+        # channels_last-contiguous False before and True after. Ignoring the
+        # stub gap rather than reshaping working code to satisfy it.
+        self._encoder = (
+            encoder.to(device)
+            .to(memory_format=torch.channels_last)  # type: ignore[call-overload]
+            .eval()
+        )
         self._device = device
 
     @torch.no_grad()

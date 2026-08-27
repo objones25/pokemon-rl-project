@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 
 from pokemon_env.emulator import PyBoyEmulator
+from pokemon_env.vec_env import VecStep
 
 pytestmark = pytest.mark.slow
 
@@ -129,14 +130,21 @@ def _seeded_action_generator(seed: int):
     return np.random.default_rng(seed)
 
 
-def _drive_random_steps(vec_env, generator, steps: int):
+def _drive_random_steps(vec_env, generator, steps: int) -> VecStep:
     """Helper, not a test: drives `steps` random actions and returns the last
     VecStep. Lives at module level so no loop sits in a test body. Each call
     to `generator.integers(0, 7, size=vec_env.n_envs)` draws one independent
     action per env -- not the same action broadcast to all of them -- which
-    is what lets the four envs' game states genuinely diverge."""
-    step = None
-    for _ in range(steps):
+    is what lets the four envs' game states genuinely diverge.
+
+    The first step runs outside the loop so the return type is VecStep rather
+    than `VecStep | None`. Seeding it with None instead would push an Optional
+    into every caller, and a caller that silently accepted None would assert
+    nothing at all."""
+    if steps < 1:
+        raise ValueError(f"steps={steps} must be at least 1 to return a VecStep")
+    step = vec_env.step(generator.integers(0, 7, size=vec_env.n_envs))
+    for _ in range(steps - 1):
         step = vec_env.step(generator.integers(0, 7, size=vec_env.n_envs))
     return step
 
