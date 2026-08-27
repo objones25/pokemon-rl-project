@@ -134,8 +134,18 @@ def _load_run_id(checkpoint_dir: Path) -> str | None:
 
 
 def _persist_run_id(checkpoint_dir: Path, run_id: str) -> None:
+    """Atomic write (tmp file + `Path.replace`, the same pattern
+    `checkpointing.io.save_checkpoint` uses -- `replace` is atomic on POSIX,
+    so a crash mid-write never leaves a truncated/corrupt run-id file that
+    would fragment the W&B curve on the next resume). `save_checkpoint`
+    itself isn't reused here: it `torch.save`-pickles its `state: dict`
+    argument, which would turn this plain-text, human-`cat`-able sidecar
+    file into an unreadable blob under the same `.txt` name."""
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
-    _run_id_path(checkpoint_dir).write_text(run_id)
+    path = _run_id_path(checkpoint_dir)
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    tmp_path.write_text(run_id)
+    tmp_path.replace(path)
 
 
 def _clear_checkpoint_state(checkpoint_dir: Path) -> None:
@@ -184,7 +194,20 @@ def _run_train(args: argparse.Namespace) -> None:
     encoder_module = load_frozen_encoder(
         ppo_config.frozen_encoder_repo_id, ppo_config.frozen_encoder_revision
     )
-    hf_client = RealHfClient(HfApi(), ppo_config.frozen_encoder_repo_id, repo_type="model")
+    # Pinned to the SAME revision as the weights above: AtomicHfClient's own
+    # docstring treats weights, config, and latent stats as one
+    # atomically-committed bundle. An unpinned client here would fetch
+    # latent_stats.json from the branch head while the weights stayed
+    # pinned, so a mid-run push to the repo could silently swap the running
+    # agent's input normalization underneath it. (load_frozen_encoder builds
+    # its own internal HfApi() and has no parameter to share this one with --
+    # not deduplicated across that boundary without widening its signature.)
+    hf_client = RealHfClient(
+        HfApi(),
+        ppo_config.frozen_encoder_repo_id,
+        repo_type="model",
+        revision=ppo_config.frozen_encoder_revision,
+    )
     latent_mean, latent_std = load_latent_stats(hf_client)
     encoder = LatentEncoder(encoder_module, device)
 

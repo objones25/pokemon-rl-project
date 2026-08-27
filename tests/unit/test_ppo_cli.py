@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -40,7 +41,9 @@ def test_the_preflight_subcommand_takes_the_env_counts_to_measure() -> None:
 
 
 def test_an_unknown_subcommand_is_rejected() -> None:
-    with pytest.raises(SystemExit):
+    # argparse's own usage-error exit code -- SystemExit(2), never a message
+    # string (that text goes to stderr via parser.error(), not sys.exit()).
+    with pytest.raises(SystemExit, match=r"^2$"):
         build_parser().parse_args(["nonsense"])
 
 
@@ -208,6 +211,26 @@ class _FakeVecEnv:
         self.closed = True
 
 
+def _recording_real_hf_client_factory(calls: list[dict]):
+    """Builds a `RealHfClient` double matching its real `__init__(self, api,
+    repo_id, repo_type="dataset", revision=None)` signature exactly, that
+    records every call into `calls` -- so a test can assert `revision`
+    actually reached this call site. The prior double,
+    `lambda *a, **k: "fake-hf-client"`, discarded every argument and so
+    could not have caught the CLI passing no revision at all here."""
+
+    class _RecordingRealHfClient:
+        def __init__(
+            self, api: object, repo_id: str, repo_type: str = "dataset",
+            revision: str | None = None,
+        ) -> None:
+            calls.append(
+                {"api": api, "repo_id": repo_id, "repo_type": repo_type, "revision": revision}
+            )
+
+    return _RecordingRealHfClient
+
+
 def _write_ppo_config(tmp_path: Path, checkpoint_dir: Path) -> Path:
     path = tmp_path / "ppo.yaml"
     path.write_text(f"frozen_encoder_revision: x\ncheckpoint_dir: {checkpoint_dir}\n")
@@ -238,6 +261,7 @@ class _CliTrainHarness:
     vec_env: _FakeVecEnv
     frame_buffer: _FakeFrameBuffer
     checkpoint_dir: Path
+    hf_client_calls: list[dict]
 
 
 def _invoke_train(
@@ -260,6 +284,7 @@ def _invoke_train(
     fake_wandb = _FakeWandbModule()
     vec_env = _FakeVecEnv()
     frame_buffer = _FakeFrameBuffer()
+    hf_client_calls: list[dict] = []
 
     monkeypatch.setattr("ppo.cli.load_dotenv", lambda: None)
     monkeypatch.setattr("ppo.cli.get_token", lambda: "fake-token")
@@ -268,7 +293,9 @@ def _invoke_train(
     monkeypatch.setattr(
         "ppo.cli.load_frozen_encoder", lambda repo_id, revision: torch.nn.Linear(2, 2)
     )
-    monkeypatch.setattr("ppo.cli.RealHfClient", lambda *a, **k: "fake-hf-client")
+    monkeypatch.setattr(
+        "ppo.cli.RealHfClient", _recording_real_hf_client_factory(hf_client_calls)
+    )
     monkeypatch.setattr("ppo.cli.HfApi", lambda: "fake-hf-api")
     monkeypatch.setattr(
         "ppo.cli.load_latent_stats", lambda client: (torch.zeros(8), torch.ones(8))
@@ -292,18 +319,42 @@ def _invoke_train(
         *(extra_args or []),
     ]
     if run_training_raises is not None:
-        with pytest.raises(type(run_training_raises)):
+        with pytest.raises(type(run_training_raises), match=re.escape(str(run_training_raises))):
             main(args)
     else:
         main(args)
 
-    return _CliTrainHarness(captured, fake_wandb, vec_env, frame_buffer, checkpoint_dir)
+    return _CliTrainHarness(
+        captured, fake_wandb, vec_env, frame_buffer, checkpoint_dir, hf_client_calls
+    )
 
 
 def test_train_command_builds_deps_from_the_loaded_policy_config(tmp_path, monkeypatch) -> None:
     harness = _invoke_train(tmp_path, monkeypatch)
 
     assert harness.captured["deps"].policy_config.d_model == 32
+
+
+def test_train_command_pins_the_latent_stats_client_to_the_configured_revision(
+    tmp_path, monkeypatch
+) -> None:
+    """AtomicHfClient's own docstring treats weights, config, and latent
+    stats as one atomically-committed bundle -- an unpinned client here
+    would fetch latent_stats.json from the branch head while the weights
+    stayed pinned to frozen_encoder_revision, letting a mid-run push to the
+    repo silently swap the running agent's input normalization."""
+    harness = _invoke_train(tmp_path, monkeypatch)
+
+    expected_revision = harness.captured["deps"].config.frozen_encoder_revision
+    assert harness.hf_client_calls[-1]["revision"] == expected_revision
+
+
+def test_train_command_uses_the_model_repo_type_for_the_latent_stats_client(
+    tmp_path, monkeypatch
+) -> None:
+    harness = _invoke_train(tmp_path, monkeypatch)
+
+    assert harness.hf_client_calls[-1]["repo_type"] == "model"
 
 
 def test_train_command_persists_a_new_wandb_run_id_when_none_exists_yet(tmp_path, monkeypatch) -> None:
