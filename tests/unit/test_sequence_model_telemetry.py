@@ -36,9 +36,17 @@ def test_distance_mass_assigns_each_distance_to_its_bucket(
     assert mass[expected_bucket] == pytest.approx(1.0, abs=1e-6)
 
 
-def test_distance_mass_buckets_sum_to_one_for_normalized_weights() -> None:
+def test_distance_mass_buckets_sum_to_one_for_causal_weights() -> None:
+    """Weights must be causal, which is how this function is always called
+    -- build_chunk_mask guarantees q_pos >= k_pos, so distance is never
+    negative. Softmaxing an unmasked score matrix would put mass at
+    negative distances (attending to the future), which no bucket covers
+    and which never occurs in a real call."""
     torch.manual_seed(0)
-    weights = torch.softmax(torch.randn(2, 2, 16, 16), dim=-1)
+    seq_len = 16
+    causal = torch.arange(seq_len).view(-1, 1) >= torch.arange(seq_len).view(1, -1)
+    scores = torch.randn(2, 2, seq_len, seq_len).masked_fill(~causal, float("-inf"))
+    weights = torch.softmax(scores, dim=-1)
 
     mass = attention_distance_mass(weights)
 

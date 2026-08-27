@@ -27,8 +27,12 @@ import math
 import torch
 
 # (label, inclusive lower bound, exclusive upper bound) over q_index - k_index.
+# Distance 0 is self-attention and gets its own bucket: attention here is
+# always causal, so distance is never negative, and mass piling up at 0 is
+# exactly the "the model is ignoring its context" signal this metric exists
+# to surface. Without a 0 bucket the buckets cannot sum to 1.
 DISTANCE_BUCKETS: tuple[tuple[str, int, int], ...] = (
-    ("past+self", -1024, 1),
+    ("0", 0, 1),
     ("1", 1, 2),
     ("2-8", 2, 9),
     ("9-64", 9, 65),
