@@ -25,7 +25,7 @@ Copied from the spec and `CLAUDE.md`. Every task's requirements include these.
 - **Package management is `uv` only.** `uv add <pkg>`, `uv run <cmd>`. Never bare `pip` or `venv`.
 - **Branch coverage floor is 93%** and is ratcheted upward, never lowered. No `omit`, no `# pragma: no cover`.
 - `uv run python scripts/audit_tests.py tests/` (pytest-expert skill) must stay **at or below the 11-finding pre-existing baseline**.
-- `audit_observability.py src/` must reach **9 findings** (down from 12) by the end of Task 5, and never rise.
+- `audit_observability.py src/` must reach **7 findings** (down from 12) by the end of Task 5, and never rise. Task 3 resolves the three `subprocess_backend.py` entries (12 → 9); Task 5 resolves the two `tracking.py` entries (9 → 7). The residual 7 are all pre-existing `data_collection` findings and are out of scope.
 - `uv run ruff check` must be clean.
 - **Prove every new test can fail.** Break the code it covers, confirm red, revert, and name the verified test in the task report. A test that passes against broken code is decorative and does not count.
 - **CUDA on RunPod is the optimization target.** MPS/CPU paths exist only so tests run locally; never degrade the CUDA path for the dev machine.
@@ -635,7 +635,7 @@ Add the audit's explicit allow marker so they stop reading as oversights:
 - [ ] **Step 9: Run the observability audit**
 
 Run: `uv run python ~/.claude/skills/observability-expert/scripts/audit_observability.py src/`
-Expected: 10 findings (`LOG004:5, LOG006:2, LOG007:3` — the three
+Expected: 9 findings (`LOG004:5, LOG006:3, LOG007:1` — the three
 `subprocess_backend` entries are resolved; `tracking.py`'s two remain until
 Task 5).
 
@@ -1071,13 +1071,17 @@ red. Revert.
 - [ ] **Step 7: Run the observability audit**
 
 Run: `uv run python ~/.claude/skills/observability-expert/scripts/audit_observability.py src/`
-Expected: **9 findings** (`LOG004:5, LOG007:4` — wait, the two `tracking.py`
-LOG006 entries are now resolved and the three `subprocess_backend` LOG007
-entries were resolved in Task 3, so the remainder is `LOG004:5` in
-`data_collection/curation.py` plus `LOG007:4` minus the three marked ones).
-The exact expected line is `9 finding(s) [LOG004:5, LOG007:4]` reduced to the
-`data_collection` findings only; record the literal output in the task report
-and confirm it is 9.
+Expected: **`7 finding(s) [LOG004:5, LOG006:1, LOG007:1]`**.
+
+Task 3 resolved the three `subprocess_backend.py` LOG007 entries, taking the
+baseline 12 down to 9. This task resolves the two `tracking.py` LOG006
+entries, taking 9 down to 7. Everything remaining is pre-existing and lives in
+`data_collection`, which is out of scope: five `LOG004` prints in
+`curation.py`, one `LOG006` at `pipeline.py:230`, and one `LOG007` at
+`extract.py:166`.
+
+Record the literal output in the task report. If the number differs,
+investigate and report what you found rather than adjusting the expectation.
 
 - [ ] **Step 8: Commit**
 
@@ -3679,7 +3683,7 @@ uv run python ~/.claude/skills/observability-expert/scripts/audit_observability.
 
 Expected: suite green with branch coverage at or above 93%; ruff clean;
 `audit_tests.py` at or below the 11-finding baseline; `audit_observability.py`
-at 9 findings. Report each number.
+at 7 findings. Report each number.
 
 - [ ] **Step 10: Commit**
 
