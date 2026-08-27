@@ -541,7 +541,92 @@ handful of real updates end to end, and a real checkpoint/resume round trip.
   report. A green suite over tests that pass equally against correct and broken
   code is the failure this project has already paid for once.
 
-## 11. Open questions
+## 11. Required changes to the merged sub-projects
+
+Every edit PPO needs outside `src/ppo/`, enumerated so the implementation plan
+can sequence them and no integration surprise arrives mid-build. Verified
+against the code, not inferred from the specs.
+
+### `src/sequence_model/` — one additive change
+
+**`policy.py`: add `RecurrentTransformerPolicy.diagnostics(...)`**, a
+`@torch.no_grad()` method taking the same arguments as `forward_chunk` plus a
+`layer` index, returning `attn/logit_max`, the `attention_distance_mass`
+buckets, and `model/residual_norm`.
+
+It is needed because the pieces exist but are unreachable from outside:
+`GroupedQueryAttention.attention_diagnostics(x, cos, sin, mask)` already
+returns `(q, k, probabilities)` — exactly what `attention_logit_max` and
+`attention_distance_mass` consume — but its `x` is the *post-`attn_norm`* input
+to one block's attention, and `cos`/`sin`/`mask` are built inside
+`forward_chunk`. None of that is reconstructible from outside without
+duplicating the stack. Separately, `residual_norm(hidden)` needs the
+`(B, L, d_model)` final hidden state, and `ChunkOutput` exposes only `logits`
+and `value`.
+
+Run on a sampled minibatch every `artifact_every_updates`, never on the hot
+path — it materializes the full attention matrix that SDPA deliberately never
+forms.
+
+**No change to `checkpoint.py`.** §9's "report in words rather than raise" on a
+`context_len` change is **PPO-side behaviour**: PPO compares the checkpoint's
+saved `context_len` against the live config *before* calling `rebuild_cache`,
+and skips the cache when they differ. Catching `rebuild_cache`'s `ValueError`
+for control flow would be fragile — it raises for several distinct reasons.
+
+No change to `cache.py`, `attention.py`, `masks.py`, `adapter.py`, `block.py`,
+`config.py`, or `telemetry.py`.
+
+### `src/pokemon_env/` — seven changes
+
+1. **`rewards.py`** — add `RewardAccumulator.coord_keys() -> list[int]`. The
+   seen-coordinate set already lives in `_State` and is already serialized by
+   `state_dict`; only a read accessor is missing.
+2. **`session.py`** — track completed-episode lengths (append `_step_count` on
+   `reset`) and add `EnvSession.stats() -> dict` returning coord keys,
+   `badge_count`, `event_flag_count`, `step_count`, and the drained episode
+   lengths.
+3. **`subprocess_backend.py`** — add `Command.STATS`, its `handle_command`
+   branch, and `SubprocessBackend.stats()`; add `logger.exception(...)` before
+   the worker forwards an error to the parent, so the traceback stops dying in
+   the worker; add `# obs: allow LOG007` markers to the two genuinely benign
+   shutdown `except` blocks (lines 270 and 340).
+4. **`vec_env.py`** — `EnvBackend` Protocol gains `stats()`, `InProcessBackend`
+   implements it, and `VecPokemonEnv.stats()` aggregates across backends.
+   **This is a Protocol change**: every test fake implementing `EnvBackend`
+   must gain the method or the suite stops type-checking.
+5. **`vec_env.py`** — bump `VEC_ENV_SCHEMA_VERSION` from 1 to 2, because the
+   session's `state_dict` gains the episode-length history and
+   `load_state_dict` reads its keys directly. No PPO checkpoints exist yet, so
+   nothing is stranded; the bump is what keeps the existing guard honest.
+6. **`config.py`** — delete `EnvConfig.seed` and
+   `EnvConfig.frozen_encoder_repo_id` (§3). `configs/pokemon_env.yaml` sets
+   neither, verified, so no config file changes and `load_config`'s
+   unknown-field rejection is not tripped.
+7. **`telemetry.py`** — `exploration_heatmap` keeps its
+   `(coord_keys, height, width)` signature and its correct unpacking; only the
+   *projection* changes, from a 16×16 folded cell per map to true `(x, y)`
+   within per-map tiles across the top 12 maps by unique-coordinate count.
+   `rollout_metrics` gains a `stats` parameter and emits the ~4 missing
+   scalars.
+
+### `src/observability/` — one change
+
+**`tracking.py`** — `WandbRun` gains `config`, `step_metrics`, a stable run id
+with `resume="allow"`, `__enter__`/`__exit__`, and `exc_info=True` on its two
+failure warnings (§7).
+
+Every addition is a keyword argument with a default, and `ExperimentRunLike`'s
+new context-manager methods are implemented on `NullExperimentRun` too, so
+`data_collection` and `contrastive_pretrain` call sites keep working unchanged.
+That backward compatibility is a test, not an intention.
+
+### `pyproject.toml`
+
+Add `src/ppo` to `[tool.hatch.build.targets.wheel].packages` and
+`pokemon-ppo = "ppo.cli:main"` to `[project.scripts]`.
+
+## 12. Open questions
 
 Deliberately not decided here, because each needs a run to answer:
 
