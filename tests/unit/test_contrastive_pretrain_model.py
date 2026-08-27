@@ -1,3 +1,5 @@
+from typing import cast
+
 import pytest
 import torch
 from torch import nn
@@ -65,7 +67,7 @@ def test_build_projector_output_shape() -> None:
 @pytest.mark.slow
 def test_build_encoder_with_pretrained_true_loads_the_real_imagenet_weights() -> None:
     """Closes the gap the run_training smoke test cannot: a randomly-
-    initialised ResNet-50 trains to a perfectly finite loss, so an inverted
+    initialized ResNet-50 trains to a perfectly finite loss, so an inverted
     `pretrained` flag would silently ship a from-scratch backbone and every
     other test would stay green. Compares conv1 against the reference
     torchvision model rather than checking a statistic, so it is an exact
@@ -75,4 +77,9 @@ def test_build_encoder_with_pretrained_true_loads_the_real_imagenet_weights() ->
     encoder, _ = build_encoder(pretrained=True)
     reference = resnet50(weights=ResNet50_Weights.IMAGENET1K_V2)
 
-    assert torch.equal(encoder.backbone.conv1.weight, reference.conv1.weight)
+    # build_encoder is annotated as returning nn.Module, so encoder.backbone
+    # resolves through nn.Module.__getattr__ as Tensor | Module. cast() names
+    # the concrete class it always returns; no runtime effect.
+    backbone = cast(GrayscaleResNetEncoder, encoder).backbone
+
+    assert torch.equal(backbone.conv1.weight, reference.conv1.weight)

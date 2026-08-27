@@ -1,6 +1,9 @@
+from typing import cast
+
 import pytest
 import torch
 
+from sequence_model.block import TransformerBlock
 from sequence_model.config import PolicyConfig
 from sequence_model.policy import RecurrentTransformerPolicy
 
@@ -159,7 +162,11 @@ def test_output_projections_are_scaled_by_one_over_sqrt_two_n_layers(
     torch.manual_seed(0)
     policy = RecurrentTransformerPolicy(tiny_config, torch.zeros(16), torch.ones(16))
 
-    observed = policy.blocks[0].attention.o_proj.weight.std().item()
+    # nn.ModuleList.__getitem__ is typed as returning Module, so the chain
+    # below reads as Tensor | Module. cast() returns its argument unchanged.
+    first_block = cast(TransformerBlock, policy.blocks[0])
+
+    observed = first_block.attention.o_proj.weight.std().item()
 
     assert observed == pytest.approx(0.01, rel=0.15)
 

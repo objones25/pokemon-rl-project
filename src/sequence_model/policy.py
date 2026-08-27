@@ -25,7 +25,9 @@ equal one. The cost is 0.07 s/epoch against an 8.0 s rollout."""
 from __future__ import annotations
 
 import math
+from collections.abc import Iterable
 from dataclasses import dataclass
+from typing import cast
 
 import torch
 from torch import nn
@@ -67,18 +69,22 @@ class RecurrentTransformerPolicy(nn.Module):
     def _init_weights(self) -> None:
         """N(0, 0.02) everywhere, then residual output projections scaled
         by 1/sqrt(2 * n_layers) to keep the residual stream's variance
-        flat with depth. The heads are initialised last so the generic
+        flat with depth. The heads are initialized last so the generic
         pass cannot clobber them: the actor's near-zero gain makes the
         initial policy close to uniform, which is standard PPO practice
         and stops the first update from chasing an arbitrary preference."""
         for module in self.modules():
-            if isinstance(module, nn.Linear):
-                nn.init.normal_(module.weight, mean=0.0, std=0.02)
-            elif isinstance(module, nn.Embedding):
+            if isinstance(module, nn.Linear | nn.Embedding):
                 nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
         residual_scale = 1.0 / math.sqrt(2 * self.config.n_layers)
-        for block in self.blocks:
+        # nn.ModuleList is not generic, so iterating it yields `Module` and
+        # every block.attention / block.forward_step reads as `Tensor | Module`
+        # to a type checker. cast() restores the element type the ModuleList
+        # construction already guarantees and returns its argument unchanged at
+        # runtime -- the ModuleList itself is iterated, nothing is copied, so
+        # the rollout hot path is untouched.
+        for block in cast("Iterable[TransformerBlock]", self.blocks):
             with torch.no_grad():
                 block.attention.o_proj.weight.mul_(residual_scale)
                 block.mlp.down_proj.weight.mul_(residual_scale)
@@ -119,7 +125,7 @@ class RecurrentTransformerPolicy(nn.Module):
         cos, sin = rope_tables(
             cache.abs_pos.unsqueeze(1), self.config.head_dim, self.config.rope_theta
         )
-        for layer, block in enumerate(self.blocks):
+        for layer, block in enumerate(cast("Iterable[TransformerBlock]", self.blocks)):
             x = block.forward_step(x, cos, sin, cache, layer)
         cache.advance()
 
@@ -141,7 +147,7 @@ class RecurrentTransformerPolicy(nn.Module):
         x = self.adapter(latent, aux_state, prev_action, prev_reward)
         cos, sin = rope_tables(abs_pos, self.config.head_dim, self.config.rope_theta)
         mask = build_chunk_mask(abs_pos, episode_id, self.config.context_len)
-        for block in self.blocks:
+        for block in cast("Iterable[TransformerBlock]", self.blocks):
             x = block.forward_chunk(x, cos, sin, mask)
 
         hidden = self.final_norm(x)[:, burn_in:]

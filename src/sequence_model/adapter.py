@@ -59,6 +59,13 @@ class InputAdapter(nn.Module):
         )
         self.proj = nn.Linear(fused_dim, config.d_model, bias=False)
 
+    # nn.Module.__getattr__ is typed as returning `Tensor | Module`, so a
+    # registered buffer reads as possibly-a-Module at every use site. These
+    # bare annotations are the documented way to type buffers: no assignment,
+    # no runtime effect, and register_buffer still owns the actual values.
+    latent_mean: torch.Tensor
+    latent_std: torch.Tensor
+
     def normalize_latent(self, latent: torch.Tensor) -> torch.Tensor:
         return (latent - self.latent_mean) / (self.latent_std + 1e-6)
 
