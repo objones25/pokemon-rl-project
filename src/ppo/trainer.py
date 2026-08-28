@@ -38,6 +38,7 @@ import time
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING, Protocol
 
 import numpy as np
 import torch
@@ -50,12 +51,79 @@ from ppo import checkpoint as ppo_checkpoint
 from ppo.buffer import RolloutBuffer
 from ppo.config import PPOConfig
 from ppo.normalizer import ReturnScaler
-from ppo.rollout import RolloutState, collect_rollout
+from ppo.rollout import (
+    CacheProtocol,
+    EncoderProtocol,
+    PolicyProtocol,
+    RolloutState,
+    VecEnvProtocol,
+    collect_rollout,
+)
 from ppo.telemetry import update_metrics
 from ppo.update import run_update
 from sequence_model.config import PolicyConfig
 
+if TYPE_CHECKING:
+    from pokemon_env.vec_env import VecStep
+
 logger = logging.getLogger(__name__)
+
+
+class TrainerVecEnv(VecEnvProtocol, Protocol):
+    """What run_training needs beyond collect_rollout's narrower surface.
+
+    Declared here rather than widening `VecEnvProtocol`, whose documented job
+    is "what collect_rollout needs" -- a rollout that could suddenly reach
+    `stats()` or `last_components` would be a different, larger contract."""
+
+    @property
+    def last_step(self) -> VecStep | None: ...
+
+    @property
+    def last_components(self) -> dict[str, float]: ...
+
+    @property
+    def clip_fire_rate(self) -> float: ...
+
+    def reset(self) -> VecStep: ...
+
+    def stats(self) -> list[dict]: ...
+
+
+class TrainerPolicy(PolicyProtocol, Protocol):
+    """What run_training needs beyond the single `step` collect_rollout uses."""
+
+    def new_cache(
+        self, n_envs: int, device: torch.device, dtype: torch.dtype = ...
+    ) -> CacheProtocol: ...
+
+    def diagnostics(
+        self,
+        latent: torch.Tensor,
+        aux_state: torch.Tensor,
+        prev_action: torch.Tensor,
+        prev_reward: torch.Tensor,
+        abs_pos: torch.Tensor,
+        episode_id: torch.Tensor,
+        layer: int = ...,
+    ) -> dict[str, float]: ...
+
+    def eval(self) -> TrainerPolicy: ...
+
+    def train(self, mode: bool = ...) -> TrainerPolicy: ...
+
+
+class OptimizerProtocol(Protocol):
+    """Structural, not `torch.optim.Optimizer`, so a test double that wraps a
+    real optimizer to count steps still satisfies it."""
+
+    param_groups: list[dict]
+
+    def zero_grad(self, set_to_none: bool = ...) -> None: ...
+
+    def step(self) -> None: ...
+
+    def state_dict(self) -> dict: ...
 
 # W&B summary keys, and the per-update metric each one takes its running best
 # from. Set explicitly rather than left as last-value: on a 48-hour run the
@@ -72,10 +140,10 @@ class PPODeps:
     config: PPOConfig
     env_config: EnvConfig
     policy_config: PolicyConfig
-    vec_env: object
-    encoder: object
-    policy: object
-    optimizer: object
+    vec_env: TrainerVecEnv
+    encoder: EncoderProtocol
+    policy: TrainerPolicy
+    optimizer: OptimizerProtocol
     scheduler: object | None
     device: torch.device
     autocast_dtype: torch.dtype
@@ -188,8 +256,15 @@ def _run_training(deps: PPODeps, config: PPOConfig, max_updates: int | None) -> 
             raise
 
         elapsed = time.monotonic() - started
+        # collect_rollout just advanced the env n_steps times, so last_step
+        # cannot be None here. Asserted rather than widening rollout_metrics
+        # to accept an Optional it would only ever have to reject.
+        last_step = deps.vec_env.last_step
+        assert last_step is not None, (
+            "vec_env.last_step is None after collect_rollout advanced the env"
+        )
         env_metrics = rollout_metrics(
-            deps.vec_env.last_step, deps.vec_env.last_components,
+            last_step, deps.vec_env.last_components,
             deps.vec_env.clip_fire_rate, _respawns(deps.vec_env), deps.vec_env.stats(),
         )
         metrics: dict = update_metrics(
@@ -282,12 +357,17 @@ def _artifacts(vec_env, update: int) -> dict:
     in wandb.Image, and WandbRun.log swallows every exception by design, so a
     missing wrapper would fail silently rather than raise."""
     coord_keys = [key for entry in vec_env.stats() for key in entry["coord_keys"]]
+    # Only called on the artifact cadence, always after a completed rollout.
+    last_step = vec_env.last_step
+    assert last_step is not None, (
+        "vec_env.last_step is None when rendering artifacts"
+    )
     return {
         "explore/heatmap": wandb.Image(
             _visit_counts_as_image(exploration_heatmap(coord_keys)), caption=f"update {update}"
         ),
         "env/contact_sheet": wandb.Image(
-            contact_sheet(vec_env.last_step.frames), caption=f"update {update}"
+            contact_sheet(last_step.frames), caption=f"update {update}"
         ),
     }
 

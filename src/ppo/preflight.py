@@ -23,8 +23,11 @@ import time
 from collections.abc import Callable
 
 import torch
-from torch.backends.cuda import SDPAParams
-from torch.nn.attention import can_use_efficient_attention, can_use_flash_attention
+from torch.backends.cuda import (
+    SDPAParams,
+    can_use_efficient_attention,
+    can_use_flash_attention,
+)
 
 from sequence_model.config import PolicyConfig
 
