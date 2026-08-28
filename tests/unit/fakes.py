@@ -13,7 +13,7 @@ import torch
 
 from pokemon_env.aux_state import AUX_STATE_DIM
 from pokemon_env.emulator import SCREEN_HEIGHT, SCREEN_WIDTH
-from pokemon_env.session import StepResult
+from pokemon_env.session import ACTION_DIM, StepResult
 from pokemon_env.vec_env import VecStep
 from ppo.buffer import RolloutBuffer
 from ppo.config import PPOConfig
@@ -128,7 +128,15 @@ class FakeVecEnv:
 
     Task 14 extends this same class with `reset()`, `stats()`, `last_step`,
     `last_components`, and `clip_fire_rate` -- kept to exactly the Protocol's
-    surface `ppo.trainer` reads, so nothing here has to be forked."""
+    surface `ppo.trainer` reads, so nothing here has to be forked.
+
+    Also mirrors two real behaviours a rollout-ordering test can otherwise
+    miss entirely: `VecPokemonEnv`'s own next-step autoreset (an env pending
+    reset never looks at its action value) and `EnvSession.step`'s action-
+    range validation (every other env raises on an action outside
+    `[0, ACTION_DIM)`, exactly like the real emulator-backed session). Without
+    both, a fake that accepts any action silently passes tests a real env
+    would crash on."""
 
     def __init__(
         self,
@@ -155,9 +163,14 @@ class FakeVecEnv:
         self.step_calls = 0
         self.reset_calls = 0
         self._last_step: VecStep | None = None
+        # Mirrors VecPokemonEnv._needs_reset: which envs the NEXT step() call
+        # must route through an implicit reset rather than validating.
+        self._needs_reset = np.zeros(n_envs, dtype=bool)
+        self.actions_seen: list[np.ndarray] = []
 
     def reset(self) -> VecStep:
         self.reset_calls += 1
+        self._needs_reset[:] = False
         self._last_step = VecStep(
             frames=np.zeros((self.n_envs, 1, SCREEN_HEIGHT, SCREEN_WIDTH), dtype=np.uint8),
             aux=np.zeros((self.n_envs, self._aux_dim), dtype=np.float32),
@@ -168,6 +181,10 @@ class FakeVecEnv:
         return self._last_step
 
     def step(self, actions: np.ndarray) -> VecStep:
+        self.actions_seen.append(actions.copy())
+        for action, pending_reset in zip(actions, self._needs_reset, strict=True):
+            if not pending_reset and not (0 <= action < ACTION_DIM):
+                raise ValueError(f"action={action} is outside [0, {ACTION_DIM})")
         done = np.full(self.n_envs, self.step_calls == self._done_at_step, dtype=bool)
         reward = (
             actions.astype(np.float32) + 1.0
@@ -181,6 +198,7 @@ class FakeVecEnv:
             done=done,
             episode_id=np.zeros(self.n_envs, dtype=np.int64),
         )
+        self._needs_reset = done.copy()
         self.step_calls += 1
         self._last_step = step
         return step
@@ -365,11 +383,19 @@ def _rollout_harness(
     reward: float = 0.0,
     reward_from_action: bool = False,
     action_script: tuple[int, ...] | None = None,
+    start_at_episode_start: bool = False,
 ) -> _RolloutHarness:
     """One fixed 2-env scenario shared by `test_ppo_rollout.py`: a `done`
     flag scripted at `done_at_step` (or never, if None), a tiny buffer/cache
     sized so 3 written slots land at `[burn_in, burn_in + 3)`, and a
-    `.kwargs()` builder."""
+    `.kwargs()` builder.
+
+    `start_at_episode_start` scripts the state every cold start and resume
+    actually constructs -- `RolloutState.prev_action` initialized to
+    `episode_start_action` -- rather than the default `0` every other test in
+    this file uses. The default `0` is a real action, so it can never see the
+    bug where that sentinel reaches `vec_env.step()` on the very first
+    iteration."""
     device = torch.device("cpu")
     n_envs = 2
     policy_config = PolicyConfig(
@@ -379,6 +405,9 @@ def _rollout_harness(
     ppo_config = PPOConfig(frozen_encoder_revision=PINNED_ENCODER_REVISION, n_steps=3)
     buffer = RolloutBuffer(ppo_config, policy_config, n_envs, device)
     buffer.write_cursor = buffer.burn_in
+    initial_action = (
+        policy_config.episode_start_action if start_at_episode_start else 0
+    )
 
     return _RolloutHarness(
         vec_env=FakeVecEnv(
@@ -397,7 +426,7 @@ def _rollout_harness(
         ),
         buffer=buffer,
         state=RolloutState(
-            prev_action=torch.zeros(n_envs, dtype=torch.int64),
+            prev_action=torch.full((n_envs,), initial_action, dtype=torch.int64),
             prev_reward=torch.zeros(n_envs),
         ),
         generator=torch.Generator().manual_seed(0),

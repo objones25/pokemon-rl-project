@@ -13,7 +13,21 @@ produces correctly-shaped tensors when wrong:
   3. prev_action becomes episode_start_action and prev_reward becomes 0.0
      after a done, because autoreset is next-step: the action taken at the
      terminal step is meaningless as context for the fresh episode that
-     arrives at t+1."""
+     arrives at t+1.
+
+episode_start_action is one past the real action range -- it is an embedding
+index for the policy's context input, never a legal env action. It reaches
+vec_env.step() as `state.prev_action` in two situations, and only one of them
+is safe: (a) immediately after a done, when VecPokemonEnv routes that env
+through backend.reset() and never looks at the action value at all, and
+(b) on a fresh RolloutState's first iteration (every cold start and every
+resume constructs one with prev_action=episode_start_action), when the env is
+NOT pending a reset and the value goes straight into EnvSession.step(), which
+raises. The real backend then treats that exception as a worker failure and
+respawns from init.state -- silently discarding whatever game position a
+resume just restored. `_env_action` substitutes a real action for the literal
+step() call in both cases; the context handed to policy.step stays
+`state.prev_action`, sentinel and all, exactly as before."""
 
 from __future__ import annotations
 
@@ -85,7 +99,12 @@ def collect_rollout(
 ) -> RolloutState:
     """Advances the env `n_steps` times, writing one buffer slot per step."""
     for _ in range(n_steps):
-        step = vec_env.step(state.prev_action.detach().cpu().numpy().astype(np.int64))
+        env_action = torch.where(
+            state.prev_action == episode_start_action,
+            torch.zeros_like(state.prev_action),
+            state.prev_action,
+        )
+        step = vec_env.step(env_action.detach().cpu().numpy().astype(np.int64))
 
         latent = encoder.encode(step.frames)
         aux = torch.from_numpy(step.aux).to(device)

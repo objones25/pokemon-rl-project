@@ -96,3 +96,21 @@ def test_the_rollout_writes_exactly_n_steps_slots() -> None:
     collect_rollout(**harness.kwargs(n_steps=3))
 
     assert harness.buffer.write_cursor - start == 3
+
+
+def test_a_fresh_rollout_state_never_sends_episode_start_action_to_the_env() -> None:
+    """Every cold start and every resume constructs RolloutState with
+    prev_action=episode_start_action -- an embedding index one past the real
+    action range, never a legal env action. VecPokemonEnv only bypasses
+    action validation for an env pending reset; a brand-new RolloutState is
+    not pending one, so the sentinel would reach vec_env.step() unfiltered
+    and FakeVecEnv (mirroring EnvSession.step) raises exactly like the real
+    backend does. Real production symptom: SubprocessBackend treats that
+    raise as a worker failure and respawns from init.state, silently
+    discarding whatever game position a resume just restored."""
+    harness = _rollout_harness(done_at_step=None, start_at_episode_start=True)
+
+    collect_rollout(**harness.kwargs(n_steps=3))
+
+    first_call_actions = harness.vec_env.actions_seen[0]
+    assert (first_call_actions != harness.episode_start_action).all()
