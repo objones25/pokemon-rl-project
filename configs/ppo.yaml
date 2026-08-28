@@ -23,7 +23,19 @@ seed: 0
 # record only the branch name -- leaving a resume unable to detect the drift.
 # Re-resolve with HfApi().repo_info(repo_id, repo_type="model").sha after any
 # deliberate encoder re-export.
-frozen_encoder_revision: f588c0005ebf4c5552828bc1705e063b54c2ce90
+#
+# Re-published 2026-08-28: the prior commit's latent_stats.json (computed
+# over just the first 2000 frames of 2 validation videos, in stream order)
+# reported 9 of 2048 latent dims as exactly zero-variance, which
+# load_latent_stats refuses to divide by. Recomputing over 36,040 frames
+# spread evenly across all 7 source videos' full timelines showed 7 of those
+# 9 are real, extremely rare feature detectors (firing on 0.003%-0.5% of
+# frames) that the narrow original sample never triggered -- not dead units,
+# and no CNN retrain was needed. Only dims 1773 and 1994 remained exactly
+# (mean=0, std=0) across the full broad sample; those two were floored to
+# std=1.0, which is exact for a genuinely constant channel. Same model
+# weights as the prior commit -- only latent_stats.json changed.
+frozen_encoder_revision: 9db5cb99991fd976501fca533e976ecad815b321
 checkpoint_dir: /workspace/checkpoints
 keep_last_n: 3
 checkpoint_every_updates: 25

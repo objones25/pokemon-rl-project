@@ -72,7 +72,7 @@ def test_the_shipped_ppo_config_pins_the_encoder_to_a_resolved_commit() -> None:
     the rest of the design depends on was defeated by the config file itself."""
     config = load_config(_REPO_ROOT / "configs" / "ppo.yaml")
 
-    assert config.frozen_encoder_revision == "f588c0005ebf4c5552828bc1705e063b54c2ce90"
+    assert config.frozen_encoder_revision == "9db5cb99991fd976501fca533e976ecad815b321"
 
 
 def test_config_rejects_an_n_envs_not_divisible_by_minibatch_envs() -> None:
