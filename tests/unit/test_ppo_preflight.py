@@ -97,6 +97,10 @@ def test_the_mask_is_a_bool_tensor_broadcastable_over_heads() -> None:
         _policy_config(), minibatch_envs=4, seq_len=16, device=torch.device("cpu")
     )
 
+    # SDPAParams.attn_mask is Tensor | None -- None is a legal SDPA call, just
+    # not the one this model makes, and that distinction is what the gate exists
+    # to measure.
+    assert params.attn_mask is not None
     assert (params.attn_mask.dtype, params.attn_mask.shape) == (torch.bool, (4, 1, 16, 16))
 
 

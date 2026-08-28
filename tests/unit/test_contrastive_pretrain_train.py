@@ -1,3 +1,5 @@
+from typing import Self
+
 import pytest
 import torch
 from torch import nn
@@ -702,14 +704,29 @@ def test_run_training_skips_publish_when_val_loss_does_not_improve(
 
 
 class _SpyWandbRun:
+    """Hand-written ExperimentRunLike. Carries the Protocol's full surface --
+    summary and the context-manager pair -- even though this test only reads
+    `logged`, because a fake that silently stops satisfying its Protocol is a
+    fake that stops catching interface drift."""
+
     def __init__(self) -> None:
         self.logged: list[dict] = []
+        self.summarized: list[dict] = []
 
     def log(self, metrics: dict) -> None:
         self.logged.append(metrics)
 
+    def summary(self, metrics: dict) -> None:
+        self.summarized.append(metrics)
+
     def finish(self) -> None:
         pass
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        self.finish()
 
 
 def test_run_training_logs_contact_sheet_exactly_once_per_epoch(

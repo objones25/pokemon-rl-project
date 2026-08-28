@@ -144,6 +144,7 @@ def test_resume_reports_no_cache_when_none_was_checkpointed(tmp_path) -> None:
     write_checkpoint(**kwargs)
     result = resume(**harness.resume_kwargs())
 
+    assert result is not None
     assert result.cache is None
 
 
@@ -173,6 +174,7 @@ def test_resume_skips_a_checkpoint_whose_manifest_was_never_written(tmp_path) ->
 
     result = resume(**harness.resume_kwargs())
 
+    assert result is not None
     assert result.update == 1
 
 
@@ -184,6 +186,7 @@ def test_resume_skips_a_checkpoint_whose_env_file_is_truncated(tmp_path) -> None
 
     result = resume(**harness.resume_kwargs())
 
+    assert result is not None
     assert result.update == 1
 
 
@@ -206,6 +209,7 @@ def test_resume_drops_the_cache_when_the_context_length_changed(tmp_path) -> Non
 
     result = resume(**harness.resume_kwargs(context_len=8))
 
+    assert result is not None
     assert result.cache is None
 
 
@@ -241,6 +245,7 @@ def test_resume_selects_update_eleven_over_nine_and_ten(tmp_path) -> None:
 
     result = resume(**harness.resume_kwargs())
 
+    assert result is not None
     assert result.update == 11
 
 
@@ -268,6 +273,7 @@ def test_resume_accepts_a_checkpoint_written_against_the_same_encoder_revision(
 
     result = resume(**harness.resume_kwargs(frozen_encoder_revision=PINNED_ENCODER_REVISION))
 
+    assert result is not None
     assert result.update == 1
 
 
