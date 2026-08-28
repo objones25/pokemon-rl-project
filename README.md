@@ -1,6 +1,6 @@
 # Pokemon RL
 
-A vision-based reinforcement learning agent for Pokemon Red, built in four
+A vision-based reinforcement learning agent for Pokemon Red, built in five
 independent stages. The end state is a policy that plays the game from pixels:
 a frozen contrastive-pretrained CNN turns each Game Boy frame into a latent
 vector, a decoder-only transformer reads the sequence of those latents, and PPO
@@ -45,7 +45,7 @@ specs under `docs/superpowers/specs/`.
                                              actor head + critic head)
                                                       │
                                                       v
-                                              [5] PPO trainer  (not built)
+                                              [5] PPO trainer
 ```
 
 Stage 2 learns a visual representation from *human* play (YouTube longplays),
@@ -60,10 +60,10 @@ time. The encoder is frozen before PPO ever runs.
 | 2. Contrastive pretraining | `src/contrastive_pretrain/` | Built. Trains on RunPod GPU; exports a frozen encoder to the Hub. |
 | 3. Sequence model | `src/sequence_model/` | Built. Policy, KV-cached rollout step, chunked training forward, checkpoint schema. |
 | 4. Pokemon Red environment | `src/pokemon_env/` | Built. 64 subprocess emulators, RAM observations, reward, checkpoint/resume. |
-| 5. PPO trainer | — | Specced, not built. It is the piece that connects 3 and 4. |
+| 5. PPO trainer | `src/ppo/` | Built. Connects 3 and 4. Four pre-flight gates stand between it and the first paid run. |
 
-Test suite as of this writing: **495 passing, 93.12% branch coverage** (the
-floor in `pyproject.toml` is 93%), plus 12 opt-in `slow` tests that need a real
+Test suite as of this writing: **697 passing, 94.70% branch coverage** (the
+floor in `pyproject.toml` is 93%), plus 14 opt-in `slow` tests that need a real
 ROM, real ffmpeg, or real Hub credentials.
 
 ## Repository layout
@@ -72,6 +72,7 @@ ROM, real ffmpeg, or real Hub credentials.
 configs/                       run configuration, one YAML per sub-project
   contrastive_pretrain.yaml    training hyperparameters and pod paths
   pokemon_env.yaml             env sizing and reward weights
+  ppo.yaml                     PPO hyperparameters, cadences, encoder pin
   sequence_model.yaml          transformer architecture
   video_sources.yaml           the approved-video registry (written by `curate`)
 docs/
@@ -84,6 +85,7 @@ src/
   hf_storage/                  HfClient Protocol + real implementation, retry
   observability/               JSON logging, W&B wrapper, contact-sheet previews
   pokemon_env/                 PyBoy wrapper, RAM readers, reward, vectorization
+  ppo/                         rollout, GAE, losses, update, checkpointing, CLI
   sequence_model/              RoPE/GQA transformer policy, KV cache, telemetry
 tests/
   unit/                        fast, no network / ffmpeg / GPU / ROM
@@ -240,6 +242,49 @@ run resumes at the exact game position it stopped at.
 `generate_init_state()` returns the bytes, but no command writes them to disk
 yet — the only caller today is the integration test. Until that command exists,
 `artifacts/init.state` has to be produced by hand from those pieces.
+
+## Stage 5 — the PPO trainer
+
+Drives the stage-4 environment with the stage-3 policy. One update is 64 envs ×
+1024 steps = 65,536 transitions, split into 8 env-minibatches over 3 epochs for
+24 optimizer steps. A minibatch is a *subset of envs at full length*, never a
+slice of time: each trained step is preceded by a 1023-step burn-in prefix —
+earlier observations recomputed so the transformer sees a full context window —
+and cutting the time axis would sever it.
+
+```bash
+uv run pokemon-ppo preflight --n-envs 16 32 64 --steps 100   # one run per count
+uv run pokemon-ppo train           # resumes from the newest complete pair
+uv run pokemon-ppo train --fresh   # discard it, start a new W&B run
+```
+
+Both subcommands read `configs/ppo.yaml`, `configs/pokemon_env.yaml` and
+`configs/sequence_model.yaml`; `--ppo-config` / `--env-config` /
+`--policy-config` override each path.
+
+Two design decisions carry most of the correctness weight. **`π_old` and
+`V_old` are recomputed** by a `no_grad` pass at the start of every update rather
+than reusing the values recorded during rollout, because the KV cache is carried
+across update boundaries and the rollout path is therefore slightly stale;
+`max|ratio − 1|` at the first minibatch of the first epoch is then exactly 0,
+and the trainer asserts it rather than logging it, aborting the run if it ever
+differs. **The policy and environment checkpoints are committed together by a
+manifest written last**, because `save_checkpoint` is atomic per file but cannot
+see the failure where only one of the two lands — a policy restored against an
+emulator at a different game position is worse than starting fresh. Resume
+therefore scans manifests newest-first and takes the first whose two files both
+exist at their recorded sizes, skipping any half-written pair.
+
+Checkpoints go to the RunPod network volume, not the Hub: writing one every ~20
+minutes for 48 hours would walk back into the Hub's hourly commit limit this
+project has already hit once.
+
+**Not yet run for real.** `docs/superpowers/specs/2026-08-27-ppo-trainer-design.md`
+§8 names four gates before the first
+paid run — the SDPA backend measurement, rollout throughput at 16/32/64 envs, a
+memory probe, and a 50-update live smoke run. `preflight` implements the first
+two. The `-m slow` acceptance tests exist but have never executed against a real
+ROM, and that spec's §12 records the rest of what was deliberately left undone.
 
 ## Testing
 
