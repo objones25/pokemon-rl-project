@@ -1,6 +1,7 @@
 # PPO Trainer Design (Sub-project B)
 
-Status: approved design, not yet implemented.
+Status: implemented and merged. `src/ppo/` exists; §8's gates are what remain
+before the first paid run. See §12 for the gaps carried out of implementation.
 Date: 2026-08-27.
 
 Consumes the two merged sub-projects:
