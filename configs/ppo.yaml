@@ -17,7 +17,13 @@ max_grad_norm: 0.5
 lr: 0.0003
 warmup_steps: 100
 seed: 0
-frozen_encoder_revision: main
+# The resolved commit of objones25/pokemon-contrastive-encoder, not `main`:
+# a branch head resolves at download time, so a push to that repo would change
+# the features underneath a running agent, and the checkpoint manifest would
+# record only the branch name -- leaving a resume unable to detect the drift.
+# Re-resolve with HfApi().repo_info(repo_id, repo_type="model").sha after any
+# deliberate encoder re-export.
+frozen_encoder_revision: f588c0005ebf4c5552828bc1705e063b54c2ce90
 checkpoint_dir: /workspace/checkpoints
 keep_last_n: 3
 checkpoint_every_updates: 25

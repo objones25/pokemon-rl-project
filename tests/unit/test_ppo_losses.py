@@ -7,10 +7,11 @@ import torch
 
 from ppo.config import PPOConfig
 from ppo.losses import ppo_losses
+from tests.conftest import PINNED_ENCODER_REVISION
 
 
 def _config() -> PPOConfig:
-    return PPOConfig(frozen_encoder_revision="x", ent_coef=0.0, vf_coef=0.0)
+    return PPOConfig(frozen_encoder_revision=PINNED_ENCODER_REVISION, ent_coef=0.0, vf_coef=0.0)
 
 
 def test_the_ratio_is_exactly_one_when_logprob_old_came_from_these_logits() -> None:
@@ -74,7 +75,7 @@ def test_the_clip_fraction_counts_the_positions_where_clipping_bound() -> None:
 
 
 def test_the_value_loss_is_the_mean_squared_error_against_the_target() -> None:
-    config = PPOConfig(frozen_encoder_revision="x", ent_coef=0.0, vf_coef=1.0)
+    config = PPOConfig(frozen_encoder_revision=PINNED_ENCODER_REVISION, ent_coef=0.0, vf_coef=1.0)
     logits = torch.zeros(1, 2, 2)
     action = torch.zeros(1, 2, dtype=torch.int64)
     logprob_old = torch.log_softmax(logits, dim=-1)[..., 0]
@@ -87,8 +88,35 @@ def test_the_value_loss_is_the_mean_squared_error_against_the_target() -> None:
     assert output.value.item() == pytest.approx(9.0)
 
 
+def test_the_total_adds_the_scaled_value_loss_and_subtracts_the_scaled_entropy() -> None:
+    """The one composition nothing else in this suite pins: every other test
+    zeroes a coefficient or reads an unscaled component, and test_ppo_update
+    only checks `total` for finiteness. Flipping `- ent_coef * entropy` to `+`
+    turns the entropy bonus into a penalty that drives the policy
+    deterministic -- the classic silent PPO bug -- and passes all of them.
+
+    Uniform 2-way logits with logprob_old taken from those same logits give
+    ratio 1, so with advantage 2.0 the policy loss is exactly -2.0; value 0
+    against target 3.0 gives 9.0; entropy is ln 2. At vf_coef=0.5 and
+    ent_coef=0.01 that is -2.0 + 4.5 - 0.006931472 = 2.493068528. The sign
+    flip lands on 2.506931472 instead."""
+    config = PPOConfig(
+        frozen_encoder_revision=PINNED_ENCODER_REVISION, vf_coef=0.5, ent_coef=0.01
+    )
+    logits = torch.zeros(1, 1, 2)
+    action = torch.zeros(1, 1, dtype=torch.int64)
+    logprob_old = torch.log_softmax(logits, dim=-1)[..., 0]
+
+    output = ppo_losses(
+        logits, torch.zeros(1, 1), action, logprob_old,
+        advantage=torch.full((1, 1), 2.0), value_target=torch.full((1, 1), 3.0), config=config,
+    )
+
+    assert output.total.item() == pytest.approx(2.493068528, abs=1e-7)
+
+
 def test_the_entropy_of_a_uniform_two_way_logit_is_log_two() -> None:
-    config = PPOConfig(frozen_encoder_revision="x", ent_coef=1.0, vf_coef=0.0)
+    config = PPOConfig(frozen_encoder_revision=PINNED_ENCODER_REVISION, ent_coef=1.0, vf_coef=0.0)
     logits = torch.zeros(1, 1, 2)
     action = torch.zeros(1, 1, dtype=torch.int64)
     logprob_old = torch.log_softmax(logits, dim=-1)[..., 0]

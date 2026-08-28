@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Self
 
+import numpy as np
 import pytest
 import torch
 
@@ -13,10 +15,11 @@ from pokemon_env.config import EnvConfig
 from ppo import checkpoint as ppo_checkpoint
 from ppo.config import PPOConfig
 from ppo.normalizer import ReturnScaler
-from ppo.trainer import PPODeps, run_training
+from ppo.trainer import PPODeps, _record_best, _visit_counts_as_image, run_training
 from ppo.update import UpdateStats, run_update
 from sequence_model.config import PolicyConfig
 from sequence_model.policy import RecurrentTransformerPolicy
+from tests.conftest import PINNED_ENCODER_REVISION
 
 from .fakes import FakeLatentEncoder, FakeVecEnv
 
@@ -29,15 +32,20 @@ _N_STEPS = 2
 
 class FakeExperimentRun:
     """Hand-written fake typed against ExperimentRunLike. Records every
-    logged dict and every (exit_code) `finish()` was called with, so tests
-    can assert both without a Mock's auto-passing attributes."""
+    logged dict, every summary dict, and every (exit_code) `finish()` was
+    called with, so tests can assert all three without a Mock's auto-passing
+    attributes."""
 
     def __init__(self) -> None:
         self.logged: list[dict] = []
+        self.summaries: list[dict] = []
         self.finished_with: list[int] = []
 
     def log(self, metrics: dict) -> None:
         self.logged.append(metrics)
+
+    def summary(self, metrics: dict) -> None:
+        self.summaries.append(dict(metrics))
 
     def finish(self, exit_code: int = 0) -> None:
         self.finished_with.append(exit_code)
@@ -84,6 +92,7 @@ def _trainer_harness(
     tmp_path: Path,
     *,
     checkpoint_every_updates: int = 25,
+    artifact_every_updates: int = 25,
     forced_approx_kl: float | None = None,
     forced_epoch1_dev: float | None = None,
 ) -> _TrainerHarness:
@@ -98,12 +107,13 @@ def _trainer_harness(
     )
     env_config = EnvConfig(n_envs=_N_ENVS)
     config = PPOConfig(
-        frozen_encoder_revision="x",
+        frozen_encoder_revision=PINNED_ENCODER_REVISION,
         n_steps=_N_STEPS,
         n_epochs=1,
         minibatch_envs=_MINIBATCH_ENVS,
         checkpoint_dir=str(tmp_path),
         checkpoint_every_updates=checkpoint_every_updates,
+        artifact_every_updates=artifact_every_updates,
     )
     policy = RecurrentTransformerPolicy(policy_config, torch.zeros(8), torch.ones(8))
     optimizer = torch.optim.AdamW(policy.parameters(), lr=1e-3)
@@ -234,10 +244,14 @@ def test_resuming_without_a_restored_cache_redoes_the_full_warmup(tmp_path) -> N
     assert resumed_harness.vec_env.step_calls == resumed_harness.burn_in + 1 + resumed_harness.n_steps
 
 
-def test_resuming_with_a_restored_cache_skips_the_burn_in_rebuild(tmp_path) -> None:
-    """A restored cache already carries burn_in worth of real context, so
-    redoing the burn_in-length rebuild would waste that many real (paid) env
-    steps every single preemption. Only the one-step buffer seed is needed."""
+def test_resuming_with_a_restored_cache_still_rebuilds_the_burn_in_prefix(tmp_path) -> None:
+    """The buffer is not checkpointed, so a resume's [0, burn_in) slots are
+    zero -- including their abs_pos and episode_id, which makes
+    build_chunk_mask's window AND same-episode terms mask the prefix out
+    entirely. Skipping the rebuild would train the first post-resume update on
+    ~n_steps positions with near-zero context, while the behaviour policy that
+    chose those actions had the restored cache's full context: pi_old would be
+    recomputed under a different context than pi_behaviour."""
     seed_harness = _trainer_harness(tmp_path)
     cache = seed_harness.deps.policy.new_cache(_N_ENVS, torch.device("cpu"), dtype=torch.bfloat16)
     _write_seed_checkpoint(seed_harness, cache=cache)
@@ -245,7 +259,32 @@ def test_resuming_with_a_restored_cache_skips_the_burn_in_rebuild(tmp_path) -> N
 
     run_training(resumed_harness.deps, max_updates=1)
 
-    assert resumed_harness.vec_env.step_calls == 1 + resumed_harness.n_steps
+    assert (
+        resumed_harness.vec_env.step_calls
+        == resumed_harness.burn_in + 1 + resumed_harness.n_steps
+    )
+
+
+def test_the_burn_in_prefix_a_resume_rebuilds_carries_real_absolute_positions(tmp_path) -> None:
+    """The consequence the step count alone cannot show: with the prefix
+    rebuilt, no trained position sees a zeroed abs_pos/episode_id slot, so
+    build_chunk_mask's window admits the full context the behaviour policy
+    had."""
+    seed_harness = _trainer_harness(tmp_path)
+    cache = seed_harness.deps.policy.new_cache(_N_ENVS, torch.device("cpu"), dtype=torch.bfloat16)
+    _write_seed_checkpoint(seed_harness, cache=cache)
+    resumed_harness = _trainer_harness(tmp_path)
+    captured: dict = {}
+
+    def _capturing_run_update(policy, optimizer, scheduler, buffer, *rest):
+        captured["abs_pos"] = buffer.field("abs_pos", torch.tensor([0]))[0].tolist()
+        return run_update(policy, optimizer, scheduler, buffer, *rest)
+
+    resumed_harness.deps.run_update = _capturing_run_update
+
+    run_training(resumed_harness.deps, max_updates=1)
+
+    assert captured["abs_pos"] == [0, 1, 2, 3, 4, 5]
 
 
 def test_resuming_with_a_restored_cache_does_not_reset_the_vec_env(tmp_path) -> None:
@@ -283,3 +322,141 @@ def test_resuming_with_a_restored_cache_still_fills_the_buffer_before_the_update
     run_training(resumed_harness.deps, max_updates=1)
 
     assert captured["write_cursor"] == captured["capacity"]
+
+
+def test_the_leading_indicator_diagnostics_are_merged_into_the_logged_metrics(tmp_path) -> None:
+    """RecurrentTransformerPolicy.diagnostics() exists solely for PPO, and the
+    sequence-model spec is explicit that attention logit magnitude and residual
+    norm move BEFORE loss and grad norm do. Unlogged, the run's earliest
+    warning of divergence never reaches the dashboard."""
+    harness = _trainer_harness(tmp_path)
+
+    run_training(harness.deps, max_updates=1)
+    logged = harness.wandb_run.logged[0]
+
+    assert sorted(k for k in logged if k.startswith(("attn/", "model/"))) == [
+        "attn/dist_0",
+        "attn/dist_1",
+        "attn/dist_2-8",
+        "attn/dist_257-1024",
+        "attn/dist_65-256",
+        "attn/dist_9-64",
+        "attn/logit_max",
+        "model/residual_norm",
+    ]
+
+
+def test_the_two_visual_artifacts_are_logged_on_the_artifact_cadence(tmp_path) -> None:
+    """The exploration heatmap and the frame contact sheet: the two images
+    that tell a human whether all 64 agents are stuck in the same menu,
+    without reading a log line."""
+    harness = _trainer_harness(tmp_path)
+
+    run_training(harness.deps, max_updates=1)
+    logged = harness.wandb_run.logged[0]
+
+    assert [type(logged["explore/heatmap"]).__name__, type(logged["env/contact_sheet"]).__name__] == [
+        "Image",
+        "Image",
+    ]
+
+
+def test_no_artifact_is_logged_on_an_update_off_the_artifact_cadence(tmp_path) -> None:
+    """Rendering both images and a full attention matrix every update would
+    cost far more than the diagnostics are worth; the cadence is the point."""
+    harness = _trainer_harness(tmp_path, artifact_every_updates=2)
+
+    run_training(harness.deps, max_updates=2)
+
+    assert "explore/heatmap" not in harness.wandb_run.logged[1]
+
+
+def test_the_running_bests_are_written_to_the_wandb_summary(tmp_path) -> None:
+    """Set explicitly rather than left as last-value: W&B's summary column
+    otherwise shows whatever the final update logged, which on a 48-hour run
+    is the least interesting number in the history."""
+    harness = _trainer_harness(tmp_path)
+
+    run_training(harness.deps, max_updates=1)
+
+    assert harness.wandb_run.summaries == [
+        {"best/badges": 0.0, "best/unique_coords": 0.0, "best/reward_mean": 0.0}
+    ]
+
+
+def test_record_best_keeps_the_maximum_seen_rather_than_the_latest() -> None:
+    """The pure part of the summary, where "best" is actually decided. Folding
+    a WORSE second update in must not lower any of the three."""
+    best: dict[str, float] = {}
+
+    _record_best(
+        best,
+        {"progress/badges_max": 3.0, "explore/unique_coords_total": 40.0, "reward/mean": 0.5},
+    )
+    _record_best(
+        best,
+        {"progress/badges_max": 1.0, "explore/unique_coords_total": 90.0, "reward/mean": 0.25},
+    )
+
+    assert best == {"best/badges": 3.0, "best/unique_coords": 90.0, "best/reward_mean": 0.5}
+
+
+def test_the_run_start_is_logged_with_the_three_config_dataclasses(tmp_path, caplog) -> None:
+    """The JSON-lines record that says what this run actually was. Without it,
+    a log file recovered from a preempted pod cannot be matched to the
+    hyperparameters that produced it."""
+    harness = _trainer_harness(tmp_path)
+
+    with caplog.at_level(logging.INFO, logger="ppo.trainer"):
+        run_training(harness.deps, max_updates=1)
+    started = [r for r in caplog.records if r.message == "run_started"]
+
+    assert [sorted(k for k in vars(started[0]) if k.endswith("_config")) for _ in started] == [
+        ["env_config", "policy_config", "ppo_config"]
+    ]
+
+
+def test_an_abort_logs_an_error_carrying_the_traceback(tmp_path, caplog) -> None:
+    """An unattended run that dies at hour 30 leaves only its log. Without
+    exc_info the record says a run stopped, not which invariant broke."""
+    harness = _trainer_harness(tmp_path, forced_approx_kl=1.0)
+
+    with caplog.at_level(logging.ERROR, logger="ppo.trainer"), pytest.raises(RuntimeError):
+        run_training(harness.deps, max_updates=1)
+    aborted = [r for r in caplog.records if r.message == "training_aborted"]
+
+    assert [r.exc_info[0] for r in aborted] == [RuntimeError]
+
+
+def test_the_epoch_one_ratio_abort_also_logs_an_error_carrying_the_traceback(
+    tmp_path, caplog
+) -> None:
+    """The other abort path -- an AssertionError, not a RuntimeError -- must
+    reach the same handler, or the one failure the whole design turns on is
+    the one that leaves no diagnosis behind."""
+    harness = _trainer_harness(tmp_path, forced_epoch1_dev=0.01)
+
+    with caplog.at_level(logging.ERROR, logger="ppo.trainer"), pytest.raises(AssertionError):
+        run_training(harness.deps, max_updates=1)
+    aborted = [r for r in caplog.records if r.message == "training_aborted"]
+
+    assert [r.exc_info[0] for r in aborted] == [AssertionError]
+
+
+def test_visit_counts_are_peak_normalized_so_a_single_visit_is_visible() -> None:
+    """A plain uint32 -> uint8 cast renders a tile visited once as value 1,
+    indistinguishable from black -- the heatmap would look empty exactly when
+    exploration is only starting, which is when it is most worth looking at."""
+    counts = np.array([[0, 1], [2, 4]], dtype=np.uint32)
+
+    image = _visit_counts_as_image(counts)
+
+    assert image.tolist() == [[0, 63], [127, 255]]
+
+
+def test_an_all_zero_visit_map_stays_all_zero_rather_than_dividing_by_its_peak() -> None:
+    counts = np.zeros((2, 2), dtype=np.uint32)
+
+    image = _visit_counts_as_image(counts)
+
+    assert image.tolist() == [[0, 0], [0, 0]]

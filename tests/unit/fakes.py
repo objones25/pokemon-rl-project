@@ -21,6 +21,7 @@ from ppo.rollout import RolloutState
 from sequence_model.cache import RolloutCache
 from sequence_model.config import PolicyConfig
 from sequence_model.policy import StepOutput
+from tests.conftest import PINNED_ENCODER_REVISION
 
 
 class FakeEmulator:
@@ -135,11 +136,19 @@ class FakeVecEnv:
         aux_dim: int,
         done_at_step: int | None,
         reward: float = 0.0,
+        reward_from_action: bool = False,
     ) -> None:
         self.n_envs = n_envs
         self._aux_dim = aux_dim
         self._done_at_step = done_at_step
         self._reward = reward
+        # A constant reward makes the buffer's reward slot indistinguishable
+        # from every other reward slot, so no test could see which action a
+        # stored reward actually pays for. With reward_from_action, step()
+        # returns `action + 1` for the action it was just handed -- injective
+        # over the 7-way action space, so the alignment is readable off the
+        # buffer directly.
+        self._reward_from_action = reward_from_action
         # step_calls doubles as the done_at_step script cursor and the count
         # a trainer test asserts against -- one field, not two that could
         # silently drift apart.
@@ -160,10 +169,15 @@ class FakeVecEnv:
 
     def step(self, actions: np.ndarray) -> VecStep:
         done = np.full(self.n_envs, self.step_calls == self._done_at_step, dtype=bool)
+        reward = (
+            actions.astype(np.float32) + 1.0
+            if self._reward_from_action
+            else np.full(self.n_envs, self._reward, dtype=np.float32)
+        )
         step = VecStep(
             frames=np.zeros((self.n_envs, 1, SCREEN_HEIGHT, SCREEN_WIDTH), dtype=np.uint8),
             aux=np.zeros((self.n_envs, self._aux_dim), dtype=np.float32),
-            reward=np.full(self.n_envs, self._reward, dtype=np.float32),
+            reward=reward,
             done=done,
             episode_id=np.zeros(self.n_envs, dtype=np.int64),
         )
@@ -271,12 +285,28 @@ class RecordingPolicy:
     against -- and advances the cache the way the real `policy.step` does,
     since the abs_pos-snapshot-before-advance ordering is itself under test.
     Returns uniform logits (all-zero, so softmax is uniform) and zero
-    values."""
+    values -- unless `action_script` is given, in which case call `i` returns
+    logits that put all of the probability mass on `action_script[i]`, so the
+    action landing in each buffer slot is a known constant rather than a draw
+    from a seeded generator. That is what lets a reward-alignment test assert
+    exact numbers instead of a relation between two tensors."""
 
-    def __init__(self, action_dim: int) -> None:
+    def __init__(self, action_dim: int, action_script: tuple[int, ...] | None = None) -> None:
         self._action_dim = action_dim
+        self._action_script = action_script
         self.prev_actions_seen: list[torch.Tensor] = []
         self.prev_rewards_seen: list[torch.Tensor] = []
+
+    def _logits(self, n_envs: int, call_index: int) -> torch.Tensor:
+        if self._action_script is None:
+            return torch.zeros(n_envs, self._action_dim)
+        # -1e4 rather than -inf: softmax of (0, -1e4) is exactly (1.0, 0.0) in
+        # float32, and multinomial then samples the scripted index with
+        # certainty, while -inf would make log_softmax produce a NaN gradient
+        # path if this fake is ever reused under autograd.
+        logits = torch.full((n_envs, self._action_dim), -1e4)
+        logits[:, self._action_script[call_index]] = 0.0
+        return logits
 
     def step(
         self,
@@ -286,12 +316,13 @@ class RecordingPolicy:
         prev_reward: torch.Tensor,
         cache: RecordingCache,
     ) -> StepOutput:
+        call_index = len(self.prev_actions_seen)
         self.prev_actions_seen.append(prev_action.clone())
         self.prev_rewards_seen.append(prev_reward.clone())
         cache.advance()
         n_envs = latent.shape[0]
         return StepOutput(
-            logits=torch.zeros(n_envs, self._action_dim),
+            logits=self._logits(n_envs, call_index),
             value=torch.zeros(n_envs),
         )
 
@@ -329,7 +360,12 @@ class _RolloutHarness:
         }
 
 
-def _rollout_harness(done_at_step: int | None, reward: float = 0.0) -> _RolloutHarness:
+def _rollout_harness(
+    done_at_step: int | None,
+    reward: float = 0.0,
+    reward_from_action: bool = False,
+    action_script: tuple[int, ...] | None = None,
+) -> _RolloutHarness:
     """One fixed 2-env scenario shared by `test_ppo_rollout.py`: a `done`
     flag scripted at `done_at_step` (or never, if None), a tiny buffer/cache
     sized so 3 written slots land at `[burn_in, burn_in + 3)`, and a
@@ -340,7 +376,7 @@ def _rollout_harness(done_at_step: int | None, reward: float = 0.0) -> _RolloutH
         d_model=32, n_layers=2, n_heads=2, head_dim=16, n_kv_heads=1,
         d_ff=64, context_len=4, latent_dim=8, aux_state_dim=4,
     )
-    ppo_config = PPOConfig(frozen_encoder_revision="x", n_steps=3)
+    ppo_config = PPOConfig(frozen_encoder_revision=PINNED_ENCODER_REVISION, n_steps=3)
     buffer = RolloutBuffer(ppo_config, policy_config, n_envs, device)
     buffer.write_cursor = buffer.burn_in
 
@@ -350,9 +386,12 @@ def _rollout_harness(done_at_step: int | None, reward: float = 0.0) -> _RolloutH
             aux_dim=policy_config.aux_state_dim,
             done_at_step=done_at_step,
             reward=reward,
+            reward_from_action=reward_from_action,
         ),
         encoder=FakeLatentEncoder(latent_dim=policy_config.latent_dim, device=device),
-        policy=RecordingPolicy(action_dim=policy_config.action_dim),
+        policy=RecordingPolicy(
+            action_dim=policy_config.action_dim, action_script=action_script
+        ),
         cache=RecordingCache(
             RolloutCache.empty(policy_config, n_envs, device, dtype=torch.bfloat16)
         ),

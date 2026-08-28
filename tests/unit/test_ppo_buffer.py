@@ -9,12 +9,13 @@ import torch
 from ppo.buffer import RolloutBuffer
 from ppo.config import PPOConfig
 from sequence_model.config import PolicyConfig
+from tests.conftest import PINNED_ENCODER_REVISION
 
 
 def _tiny_buffer(n_envs: int = 2) -> RolloutBuffer:
     """Helper, not a test: context_len 4 -> burn_in 3, n_steps 4, capacity 8."""
     return RolloutBuffer(
-        config=PPOConfig(frozen_encoder_revision="x", n_steps=4),
+        config=PPOConfig(frozen_encoder_revision=PINNED_ENCODER_REVISION, n_steps=4),
         policy_config=PolicyConfig(
             d_model=32, n_layers=2, n_heads=2, head_dim=16, n_kv_heads=1,
             d_ff=64, context_len=4, latent_dim=8, aux_state_dim=4,
@@ -116,6 +117,39 @@ def test_written_latents_are_rounded_to_fp16_precision_not_stored_as_fp32() -> N
     stored = buffer.chunk(torch.tensor([0, 1])).latent[0, 0, 0].item()
 
     assert stored == pytest.approx(torch.tensor(0.1, dtype=torch.float16).item())
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["prev_action", "prev_reward", "abs_pos", "episode_id", "action", "reward", "done",
+     "rollout_logprob", "rollout_value"],
+)
+def test_field_returns_exactly_what_the_chunks_matching_attribute_holds(name: str) -> None:
+    """field() exists so a caller wanting one scalar column does not pay for a
+    whole ChunkInputs -- whose fp32 latent copy is ~134 MB at production
+    shapes. It must therefore agree with chunk() exactly, including the env
+    reorder, or the two views of the buffer disagree."""
+    buffer = _tiny_buffer(n_envs=3)
+    latents = torch.stack([torch.full((8,), float(env)) for env in range(3)])
+    buffer.write(slot=0, latent=latents, aux=torch.zeros(3, 4),
+                 action=torch.tensor([1, 2, 3]), prev_action=torch.tensor([4, 5, 6]),
+                 prev_reward=torch.tensor([0.5, 1.5, 2.5]), reward=torch.tensor([7.0, 8.0, 9.0]),
+                 done=torch.tensor([True, False, True]), episode_id=torch.tensor([10, 11, 12]),
+                 abs_pos=torch.tensor([13, 14, 15]), logprob=torch.tensor([-1.0, -2.0, -3.0]),
+                 value=torch.tensor([0.25, 0.5, 0.75]))
+    env_indices = torch.tensor([2, 0])
+
+    field = buffer.field(name, env_indices)
+
+    assert torch.equal(field, getattr(buffer.chunk(env_indices), name))
+
+
+def test_field_does_not_build_the_fp32_latent_copy_a_chunk_would() -> None:
+    """The whole point of field(): chunk().latent upcasts the fp16 store to
+    fp32. If field went through chunk(), latent would come back fp32 here."""
+    buffer = _tiny_buffer()
+
+    assert buffer.field("latent", torch.tensor([0, 1])).dtype == torch.float16
 
 
 def test_the_latent_storage_tensor_itself_is_fp16() -> None:

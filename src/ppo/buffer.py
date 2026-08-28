@@ -131,6 +131,28 @@ class RolloutBuffer:
             rollout_value=self._value[env_indices],
         )
 
+    def field(self, name: str, env_indices: torch.Tensor) -> torch.Tensor:
+        """One ChunkInputs field for a subset of envs, without building the
+        whole chunk. `chunk()` copies the fp16 latents up to fp32 -- 134 MB at
+        production shapes -- which is pure waste for a caller that only wants
+        `reward` or `episode_id`.
+
+        Values come back in their STORED dtype, so `latent` is fp16 here where
+        `chunk().latent` is fp32."""
+        return {
+            "latent": self._latent,
+            "aux_state": self._aux,
+            "prev_action": self._prev_action,
+            "prev_reward": self._prev_reward,
+            "abs_pos": self._abs_pos,
+            "episode_id": self._episode_id,
+            "action": self._action,
+            "reward": self._reward,
+            "done": self._done,
+            "rollout_logprob": self._logprob,
+            "rollout_value": self._value,
+        }[name][env_indices]
+
     def _tensors(self) -> tuple[torch.Tensor, ...]:
         return (
             self._latent, self._aux, self._action, self._prev_action,

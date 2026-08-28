@@ -36,6 +36,7 @@ logger = logging.getLogger(__name__)
 
 class ExperimentRunLike(Protocol):
     def log(self, metrics: dict) -> None: ...
+    def summary(self, metrics: dict) -> None: ...
     def finish(self) -> None: ...
     def __enter__(self) -> Self: ...
     def __exit__(self, exc_type, exc, tb) -> None: ...
@@ -76,6 +77,15 @@ class WandbRun:
         except Exception:  # must swallow any wandb failure, whatever its type
             logger.warning("wandb_log_failed", exc_info=True)
 
+    def summary(self, metrics: dict) -> None:
+        """Run-level bests, written explicitly. Without this the dashboard's
+        summary column holds whatever the LAST update happened to log, which
+        for a 48-hour run is the least interesting value in the history."""
+        try:
+            self._run.summary.update(metrics)
+        except Exception:  # must swallow any wandb failure, whatever its type
+            logger.warning("wandb_summary_failed", exc_info=True)
+
     def finish(self, exit_code: int = 0) -> None:
         try:
             self._run.finish(exit_code=exit_code)
@@ -94,6 +104,9 @@ class NullExperimentRun:
     callers never need to special-case "no experiment tracker configured"."""
 
     def log(self, metrics: dict) -> None:
+        pass
+
+    def summary(self, metrics: dict) -> None:
         pass
 
     def finish(self, exit_code: int = 0) -> None:

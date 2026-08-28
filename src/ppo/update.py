@@ -16,6 +16,7 @@ changed, so max|ratio - 1| is exactly 0."""
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 
 import torch
@@ -26,6 +27,8 @@ from ppo.gae import compute_gae
 from ppo.losses import ppo_losses
 from ppo.normalizer import ReturnScaler
 from sequence_model.config import PolicyConfig
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -85,9 +88,26 @@ def run_update(
     )
 
     episode_id = _gather(buffer, minibatches, "episode_id")[:, trained.start : trained.stop + 1]
-    reward = _gather(buffer, minibatches, "reward")[:, trained]
+    # Shifted one slot forward, and that is not an off-by-one: the rollout
+    # writes slot t as (observation o_t, action a_t sampled at o_t, reward
+    # returned by the step that APPLIED a_{t-1}). So the reward paying for
+    # slot t's own action is stored at slot t+1, and compute_gae's
+    # delta_t = reward[t] + gamma*V[t+1] - V[t] needs exactly that one.
+    # Reading buffer[:, trained] instead trains the critic to predict a reward
+    # already collected before o_t -- irreducible noise it cannot infer -- and
+    # enters each action's own reward into its advantage at weight gamma*lambda
+    # instead of 1. Nothing crashes and explained_variance stays positive.
+    reward = _gather(buffer, minibatches, "reward")[:, trained.start + 1 : trained.stop + 1]
+    # value_old is in NORMALIZED units (the critic regresses onto
+    # scaler.normalize(returns)) while reward is raw, so the critic's output is
+    # multiplied back out before the two are mixed. scaler.update() runs after
+    # this call, so scaler.scale here is still the scale the critic was
+    # actually trained under -- keep that ordering. Left un-scaled, the GAE
+    # fixed point degenerates to delta_t ~= r_t*(1 - 1/scale): the baseline
+    # stops reducing variance and the effective value horizon collapses from
+    # gamma to gamma*lambda.
     advantage, returns = compute_gae(
-        reward, value_old, episode_id, config.gamma, config.gae_lambda
+        reward, value_old * scaler.scale, episode_id, config.gamma, config.gae_lambda
     )
 
     # Once, over the whole update batch -- not per minibatch. Per-minibatch
@@ -97,6 +117,9 @@ def run_update(
     scaler.update(returns)
     value_target = scaler.normalize(returns)
 
+    # Scaled-to-scaled, deliberately: value_old is what the critic emitted and
+    # value_target is what it is regressed onto, so this measures the critic in
+    # the units it is actually trained in.
     explained = _explained_variance(value_old[:, :-1], value_target)
 
     first_dev: float | None = None
@@ -135,6 +158,19 @@ def run_update(
             if not torch.isfinite(loss.total):
                 skipped += 1
                 optimizer.zero_grad(set_to_none=True)
+                # WARNING, with the reason: a silently dropped minibatch is the
+                # trainer discarding real collected experience, and on an
+                # unattended run the only trace of it would be a step count
+                # that quietly failed to advance.
+                logger.warning(
+                    "nan_minibatch_skipped",
+                    extra={
+                        "epoch": epoch,
+                        "minibatch": index,
+                        "skipped_this_update": skipped,
+                        "reason": "non-finite total loss; gradients would be corrupt",
+                    },
+                )
                 if skipped >= config.max_nan_minibatches_per_update:
                     raise RuntimeError(
                         f"non-finite loss in {skipped} minibatches of one update; "
@@ -237,8 +273,12 @@ def _recompute_old(
 
 def _gather(buffer: RolloutBuffer, minibatches, field: str) -> torch.Tensor:
     """Reassembles one buffer field in minibatch order, so its rows line up
-    with the concatenated pi_old tensors."""
-    return torch.cat([getattr(buffer.chunk(envs), field) for envs in minibatches], dim=0)
+    with the concatenated pi_old tensors.
+
+    Reads the field directly rather than through buffer.chunk(): a chunk
+    materializes an fp32 copy of the latents (~134 MB per call at production
+    shapes) that this function discards immediately, twice per update."""
+    return torch.cat([buffer.field(field, envs) for envs in minibatches], dim=0)
 
 
 def _explained_variance(value: torch.Tensor, target: torch.Tensor) -> float:

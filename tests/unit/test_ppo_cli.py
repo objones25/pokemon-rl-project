@@ -20,6 +20,7 @@ from ppo.cli import (
     build_parser,
     main,
 )
+from tests.conftest import PINNED_ENCODER_REVISION
 
 
 def test_the_train_subcommand_defaults_to_resuming() -> None:
@@ -233,7 +234,10 @@ def _recording_real_hf_client_factory(calls: list[dict]):
 
 def _write_ppo_config(tmp_path: Path, checkpoint_dir: Path) -> Path:
     path = tmp_path / "ppo.yaml"
-    path.write_text(f"frozen_encoder_revision: x\ncheckpoint_dir: {checkpoint_dir}\n")
+    path.write_text(
+        f"frozen_encoder_revision: {PINNED_ENCODER_REVISION}\n"
+        f"checkpoint_dir: {checkpoint_dir}\n"
+    )
     return path
 
 

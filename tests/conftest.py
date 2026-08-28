@@ -43,6 +43,16 @@ load_dotenv for. On a training pod HF_TOKEN is exported per the runbook, so
 these run there; on a dev machine they skip with the reason above."""
 
 
+PINNED_ENCODER_REVISION = "0123456789abcdef0123456789abcdef01234567"
+"""A syntactically valid resolved commit sha, for every test that has to build
+a PPOConfig. PPOConfig rejects anything that is not 40 lowercase hex characters
+-- a branch head resolves at download time and would let a mid-run push to the
+encoder repo change the features underneath a running agent -- so a placeholder
+like "x" is no longer constructible. Deliberately not the real encoder pin in
+configs/ppo.yaml: a test must not silently start passing because the config file
+happens to agree with it."""
+
+
 class FakeHfClient:
     """In-memory stand-in for hf_storage.client.AtomicHfClient's Protocol
     (upload_bytes/upload_many_bytes/download_bytes) -- shared by every

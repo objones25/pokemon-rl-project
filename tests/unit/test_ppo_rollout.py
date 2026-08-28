@@ -64,6 +64,31 @@ def test_the_recorded_absolute_position_is_the_one_the_policy_used() -> None:
     ]
 
 
+def test_each_slots_reward_pays_for_the_action_recorded_in_the_previous_slot() -> None:
+    """The alignment every downstream consumer has to know about, and which a
+    constant reward makes invisible.
+
+    Iteration t calls vec_env.step(prev_action), so the reward that comes back
+    pays for a_{t-1}; the action sampled at o_t is then written to the SAME
+    slot. With `reward = action + 1` and a scripted (3, 1, 5), the slots must
+    read action (3, 1, 5) against reward (0+1, 3+1, 1+1) -- the initial
+    prev_action is 0, and each later reward is one more than the PREVIOUS
+    slot's action, never its own. compute_gae needs r(o_t, a_t), which
+    therefore lives one slot forward."""
+    harness = _rollout_harness(
+        done_at_step=None, reward_from_action=True, action_script=(3, 1, 5)
+    )
+
+    collect_rollout(**harness.kwargs(n_steps=3))
+    chunk = harness.buffer.chunk(torch.tensor([0, 1]))
+    burn_in = harness.buffer.burn_in
+
+    assert (
+        chunk.action[0, burn_in : burn_in + 3].tolist(),
+        chunk.reward[0, burn_in : burn_in + 3].tolist(),
+    ) == ([3, 1, 5], [1.0, 4.0, 2.0])
+
+
 def test_the_rollout_writes_exactly_n_steps_slots() -> None:
     harness = _rollout_harness(done_at_step=None)
     start = harness.buffer.write_cursor

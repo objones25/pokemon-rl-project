@@ -38,6 +38,7 @@ from ppo.config import PPOConfig
 from ppo.trainer import PPODeps, run_training
 from sequence_model.config import PolicyConfig
 from sequence_model.policy import RecurrentTransformerPolicy
+from tests.conftest import PINNED_ENCODER_REVISION
 
 pytestmark = pytest.mark.slow
 
@@ -60,10 +61,14 @@ class _FakeExperimentRun:
 
     def __init__(self) -> None:
         self.logged: list[dict] = []
+        self.summaries: list[dict] = []
         self.finished_with: list[int] = []
 
     def log(self, metrics: dict) -> None:
         self.logged.append(metrics)
+
+    def summary(self, metrics: dict) -> None:
+        self.summaries.append(dict(metrics))
 
     def finish(self, exit_code: int = 0) -> None:
         self.finished_with.append(exit_code)
@@ -106,7 +111,7 @@ def _real_harness(
     )
     env_config = EnvConfig(n_envs=n_envs)
     ppo_config = PPOConfig(
-        frozen_encoder_revision="smoke-test",
+        frozen_encoder_revision=PINNED_ENCODER_REVISION,
         n_steps=n_steps,
         n_epochs=1,
         minibatch_envs=n_envs,

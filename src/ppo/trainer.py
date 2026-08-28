@@ -1,20 +1,29 @@
 """The outer PPO loop.
 
 Order per iteration: rollout -> update -> telemetry -> cadence work
-(checkpoint, artifacts, hub snapshot) -> buffer shift.
+(diagnostics + artifacts every artifact_every_updates, checkpoint every
+checkpoint_every_updates) -> buffer shift.
+
+The spec's periodic Hub snapshot is deliberately NOT here: it needs an upload
+client and a credential path this trainer is not given, and
+`hub_snapshot_every_updates` is consequently unread. Recorded as a deferral in
+the design spec's handoff rather than half-built.
 
 The buffer shift happens LAST, so a checkpoint written mid-iteration describes
 a buffer state the next resume can reproduce by collecting n_steps fresh
 observations.
 
-Resume has two sub-cases, not one. Without a restored KV cache (a checkpoint
-saved before the first rollout, or one that deliberately dropped the cache)
-the run redoes the full burn_in-length warmup, exactly like a cold start --
-the cache has no real context to serve from. With a restored cache, that
-context already exists, so only ONE fresh observation is needed to seed the
-buffer's first trained slot (buffer.write_cursor is moved to burn_in first,
-so that observation lands in the right place) -- redoing the full rebuild
-there would waste burn_in real (paid) env steps on every preemption.
+The burn-in warmup runs on EVERY start, cold or resumed, restored KV cache or
+not. The buffer is not checkpointed, so on a resume its [0, burn_in) slots are
+zero -- and their abs_pos and episode_id are zero too, while the trained slots
+carry real values, so build_chunk_mask's window AND same-episode terms mask
+that prefix out entirely. The first post-resume update would then train n_steps
+positions with near-zero context while the behaviour policy that chose those
+actions had the restored cache's full context, so pi_old would be recomputed
+under a different context than pi_behaviour. Rebuilding costs burn_in real env
+steps (~0.6% of one episode) once per preemption, and the restored cache is
+still doing work throughout -- policy.step serves from it while those
+observations are collected.
 
 A cold start also calls vec_env.reset() once, to get the emulator into its
 initial state and start episode counting; a resume must NOT call it, because
@@ -27,14 +36,16 @@ from __future__ import annotations
 import logging
 import time
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
+import numpy as np
 import torch
+import wandb
 
 from observability.tracking import ExperimentRunLike, NullExperimentRun
 from pokemon_env.config import EnvConfig
-from pokemon_env.telemetry import rollout_metrics
+from pokemon_env.telemetry import contact_sheet, exploration_heatmap, rollout_metrics
 from ppo import checkpoint as ppo_checkpoint
 from ppo.buffer import RolloutBuffer
 from ppo.config import PPOConfig
@@ -45,6 +56,15 @@ from ppo.update import run_update
 from sequence_model.config import PolicyConfig
 
 logger = logging.getLogger(__name__)
+
+# W&B summary keys, and the per-update metric each one takes its running best
+# from. Set explicitly rather than left as last-value: on a 48-hour run the
+# final update's numbers are the least interesting ones in the history.
+_BEST_SOURCES = {
+    "best/badges": "progress/badges_max",
+    "best/unique_coords": "explore/unique_coords_total",
+    "best/reward_mean": "reward/mean",
+}
 
 
 @dataclass
@@ -75,6 +95,19 @@ def run_training(deps: PPODeps, max_updates: int | None = None) -> None:
 
 
 def _run_training(deps: PPODeps, config: PPOConfig, max_updates: int | None) -> None:
+    logger.info(
+        "run_started",
+        extra={
+            "ppo_config": asdict(config),
+            "env_config": asdict(deps.env_config),
+            "policy_config": asdict(deps.policy_config),
+            "git_commit": deps.git_commit,
+            "init_state_hash": deps.init_state_hash,
+            "device": str(deps.device),
+            "autocast_dtype": str(deps.autocast_dtype),
+            "wandb_run_id": _run_id(deps.wandb_run),
+        },
+    )
     directory = Path(config.checkpoint_dir)
     scaler = ReturnScaler()
     buffer = RolloutBuffer(config, deps.policy_config, deps.env_config.n_envs, deps.device)
@@ -87,11 +120,10 @@ def _run_training(deps: PPODeps, config: PPOConfig, max_updates: int | None) -> 
     )
     update = 0
     global_step = 0
-    warmup_needed = True
     if resumed is not None:
         update, global_step = resumed.update + 1, resumed.global_step
         if resumed.cache is not None:
-            cache, warmup_needed = resumed.cache, False
+            cache = resumed.cache
         logger.info("resumed", extra={"update": update, "global_step": global_step})
     else:
         # Cold start only: a resume must not reload the emulator's init
@@ -117,23 +149,18 @@ def _run_training(deps: PPODeps, config: PPOConfig, max_updates: int | None) -> 
         "autocast_dtype": deps.autocast_dtype,
     }
 
-    if warmup_needed:
-        # No real context to serve from -- rebuild it from real env steps
-        # before any position has a full context window.
-        state = collect_rollout(state=state, n_steps=buffer.burn_in, **rollout_kwargs)
-        logger.info("warmup_started", extra={"steps": buffer.burn_in})
-    else:
-        # The restored cache already carries burn_in worth of real context;
-        # only the buffer needs seeding, so the cursor is moved to where the
-        # single observation below must land.
-        buffer.write_cursor = buffer.burn_in
+    # Unconditional, resume included: the buffer is not checkpointed, so its
+    # burn-in prefix is zeroed on every start and a restored cache cannot fill
+    # it. See this module's docstring.
+    state = collect_rollout(state=state, n_steps=buffer.burn_in, **rollout_kwargs)
+    logger.info("warmup_started", extra={"steps": buffer.burn_in})
 
-    # The trained region's first slot, supplied by either the warmup above or
-    # (on resume) the restored cache's existing history. Every later rollout
-    # inherits this same slot from the previous update's shift() instead.
+    # The trained region's first slot. Every later rollout inherits this same
+    # slot from the previous update's shift() instead.
     state = collect_rollout(state=state, n_steps=1, **rollout_kwargs)
     logger.info("warmup_complete", extra={"steps": buffer.write_cursor})
 
+    best: dict[str, float] = {}
     while max_updates is None or update < start_update + max_updates:
         started = time.monotonic()
         if deps.device.type == "cuda":
@@ -147,32 +174,43 @@ def _run_training(deps: PPODeps, config: PPOConfig, max_updates: int | None) -> 
             deps.policy_config, deps.env_config.n_envs, deps.device, deps.autocast_dtype,
         )
 
-        # An assert, not a metric: after recomputing pi_old the policy has not
-        # changed at (epoch 1, minibatch 1), so any deviation is a real bug
-        # and the run must stop.
-        assert stats.max_abs_ratio_dev_epoch1_mb1 < 1e-5, (
-            f"epoch-1 minibatch-1 ratio deviated by "
-            f"{stats.max_abs_ratio_dev_epoch1_mb1}; pi_old was not recomputed from "
-            "the current weights"
-        )
-        if abs(stats.approx_kl) > config.abort_approx_kl:
-            raise RuntimeError(
-                f"approx_kl {stats.approx_kl} exceeded {config.abort_approx_kl}; "
-                "aborting with the checkpoint intact"
+        # Both abort paths log with exc_info before propagating: this is a
+        # 48-hour unattended run, and the difference between "died at hour 30
+        # on the ratio invariant" and "died at hour 30 on KL" is the whole
+        # diagnosis. The exception itself still propagates untouched.
+        try:
+            _check_abort_conditions(stats, config)
+        except (AssertionError, RuntimeError):
+            logger.exception(
+                "training_aborted",
+                extra={"update": update, "global_step": global_step},
             )
+            raise
 
         elapsed = time.monotonic() - started
         env_metrics = rollout_metrics(
             deps.vec_env.last_step, deps.vec_env.last_components,
             deps.vec_env.clip_fire_rate, _respawns(deps.vec_env), deps.vec_env.stats(),
         )
-        deps.wandb_run.log(
-            update_metrics(
-                stats, env_metrics, update, global_step, elapsed,
-                config.n_steps * deps.env_config.n_envs / max(elapsed, 1e-9),
-                _current_lr(deps.optimizer), _peak_vram_gb(deps.device),
-            )
+        metrics: dict = update_metrics(
+            stats, env_metrics, update, global_step, elapsed,
+            config.n_steps * deps.env_config.n_envs / max(elapsed, 1e-9),
+            _current_lr(deps.optimizer), _peak_vram_gb(deps.device),
         )
+        _record_best(best, env_metrics)
+
+        if update % config.artifact_every_updates == 0:
+            # The leading indicators, and the two images. Both are far too
+            # expensive for every update -- diagnostics materializes the full
+            # attention matrix SDPA never forms -- and both move before loss
+            # and grad norm do, which is the entire reason they exist.
+            metrics.update(
+                _policy_diagnostics(deps.policy, buffer, config, deps.device, deps.autocast_dtype)
+            )
+            metrics.update(_artifacts(deps.vec_env, update))
+            deps.wandb_run.summary(best)
+
+        deps.wandb_run.log(metrics)
 
         if update % config.checkpoint_every_updates == 0:
             ppo_checkpoint.write_checkpoint(
@@ -188,6 +226,81 @@ def _run_training(deps: PPODeps, config: PPOConfig, max_updates: int | None) -> 
         update += 1
 
     logger.info("training_finished", extra={"update": update, "global_step": global_step})
+
+
+def _check_abort_conditions(stats, config: PPOConfig) -> None:
+    """The two conditions that stop the run. Extracted so the caller can wrap
+    both in one handler that logs with a traceback before re-raising."""
+    # An assert, not a metric: after recomputing pi_old the policy has not
+    # changed at (epoch 1, minibatch 1), so any deviation is a real bug.
+    assert stats.max_abs_ratio_dev_epoch1_mb1 < 1e-5, (
+        f"epoch-1 minibatch-1 ratio deviated by "
+        f"{stats.max_abs_ratio_dev_epoch1_mb1}; pi_old was not recomputed from "
+        "the current weights"
+    )
+    if abs(stats.approx_kl) > config.abort_approx_kl:
+        raise RuntimeError(
+            f"approx_kl {stats.approx_kl} exceeded {config.abort_approx_kl}; "
+            "aborting with the checkpoint intact"
+        )
+
+
+def _record_best(best: dict[str, float], env_metrics: dict[str, float]) -> None:
+    """Folds this update's env metrics into the running bests, in place."""
+    for target, source in _BEST_SOURCES.items():
+        best[target] = max(best.get(target, env_metrics[source]), env_metrics[source])
+
+
+def _policy_diagnostics(
+    policy, buffer: RolloutBuffer, config: PPOConfig, device, autocast_dtype
+) -> dict[str, float]:
+    """Attention-logit magnitude, attention distance mass, and final-layer
+    residual norm, on one minibatch. These move BEFORE loss and grad norm do,
+    which is the whole reason the policy exposes them -- and why they are worth
+    a forward pass that materializes the attention matrix SDPA never forms.
+
+    Under the same autocast context as the training step, so the numbers
+    describe that step rather than an fp32 approximation of it."""
+    envs = torch.arange(min(config.minibatch_envs, buffer.n_envs), device=device)
+    chunk = buffer.chunk(envs)
+    was_training = policy.training
+    policy.eval()
+    try:
+        with torch.inference_mode(), torch.autocast(device.type, dtype=autocast_dtype):
+            return policy.diagnostics(
+                chunk.latent, chunk.aux_state, chunk.prev_action, chunk.prev_reward,
+                chunk.abs_pos, chunk.episode_id, config.diagnostics_layer,
+            )
+    finally:
+        policy.train(was_training)
+
+
+def _artifacts(vec_env, update: int) -> dict:
+    """The two images a human can sanity-check without reading a log line:
+    where the agents have been, and what all of them are looking at right now.
+    A raw ndarray is not rendered as an image by wandb -- it has to be wrapped
+    in wandb.Image, and WandbRun.log swallows every exception by design, so a
+    missing wrapper would fail silently rather than raise."""
+    coord_keys = [key for entry in vec_env.stats() for key in entry["coord_keys"]]
+    return {
+        "explore/heatmap": wandb.Image(
+            _visit_counts_as_image(exploration_heatmap(coord_keys)), caption=f"update {update}"
+        ),
+        "env/contact_sheet": wandb.Image(
+            contact_sheet(vec_env.last_step.frames), caption=f"update {update}"
+        ),
+    }
+
+
+def _visit_counts_as_image(heatmap: np.ndarray) -> np.ndarray:
+    """uint32 visit counts -> uint8 grayscale, peak-normalized. A plain cast
+    would render a tile visited once as value 1, which is indistinguishable
+    from black -- the artifact would look empty exactly when exploration is
+    only just starting, which is when it is most worth looking at."""
+    peak = int(heatmap.max(initial=0))
+    if peak == 0:
+        return heatmap.astype(np.uint8)
+    return (heatmap.astype(np.float32) * (255.0 / peak)).astype(np.uint8)
 
 
 def _respawns(vec_env) -> int:

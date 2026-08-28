@@ -134,6 +134,21 @@ def resume(
             )
             continue
 
+        # Raised, not skipped: the manifest records the encoder revision
+        # precisely so a mid-run encoder change is detectable, and every older
+        # manifest in the directory carries the same stale revision -- falling
+        # back to one of those would resume against the same wrong features
+        # while looking like it recovered. Mirrors restore_env_checkpoint's
+        # init_state_hash check, which raises for the same reason.
+        if manifest["frozen_encoder_revision"] != config.frozen_encoder_revision:
+            raise ValueError(
+                f"checkpoint was written against frozen encoder revision "
+                f"{manifest['frozen_encoder_revision']}, but this run is configured for "
+                f"{config.frozen_encoder_revision}. Every latent the policy was trained "
+                "on came from the old encoder; resuming would feed it features from a "
+                "different one."
+            )
+
         policy_state = load_checkpoint(directory / manifest["policy_file"])
         restore_policy_checkpoint(policy, optimizer, scheduler, policy_state)
         restore_env_checkpoint(

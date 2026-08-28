@@ -9,10 +9,18 @@ trainer may hard-code 1024 or 2048."""
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, fields
 from pathlib import Path
 
 import yaml
+
+# A resolved git commit on the Hub is exactly 40 lowercase hex characters.
+# Anything else -- a branch name, a tag, a short sha -- can move under a
+# running agent, and the manifest would record the mutable name rather than
+# what was actually downloaded.
+_COMMIT_SHA = re.compile(r"[0-9a-f]{40}")
+_BRANCH_HEADS = frozenset({"main", "master"})
 
 
 @dataclass(frozen=True)
@@ -49,6 +57,21 @@ class PPOConfig:
                 "frozen_encoder_revision must be pinned to a resolved commit. An "
                 "unpinned revision lets a mid-run push to the encoder repo change "
                 "the features underneath a running agent, with nothing raised."
+            )
+        if self.frozen_encoder_revision.lower() in _BRANCH_HEADS:
+            raise ValueError(
+                f"frozen_encoder_revision={self.frozen_encoder_revision!r} is a branch "
+                "head, not a pin: it resolves at download time, so a mid-run push to "
+                "the encoder repo changes the features underneath a running agent, and "
+                "the checkpoint manifest records only the branch name -- so a resume "
+                "cannot detect that the encoder moved either. Pass the resolved commit "
+                "sha (HfApi().repo_info(repo_id, repo_type='model').sha)."
+            )
+        if not _COMMIT_SHA.fullmatch(self.frozen_encoder_revision):
+            raise ValueError(
+                f"frozen_encoder_revision={self.frozen_encoder_revision!r} is not a "
+                "resolved commit sha (40 lowercase hex characters). Tags and short "
+                "shas are not pins: only a full sha names one immutable tree."
             )
         if self.n_steps < 1:
             raise ValueError(f"n_steps={self.n_steps} must be at least 1")

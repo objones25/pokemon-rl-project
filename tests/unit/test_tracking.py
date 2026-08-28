@@ -14,6 +14,9 @@ class FakeWandbRun:
         self.defined: list[tuple[str, str]] = []
         self.finished_with: object = "not-finished"
         self.id = "fake-run-id"
+        # wandb's Run.summary is a dict-like whose .update() writes the
+        # run-level summary; a plain dict matches that surface exactly.
+        self.summary: dict = {}
 
     def log(self, metrics: dict) -> None:
         self.logged.append(metrics)
@@ -57,6 +60,10 @@ class _WandbModuleExposingTopLevelLogAndFinish(FakeWandbModule):
 class _RaisingRun:
     """Simulates a tracking SDK's Run object failing at the log/finish
     level after some internal state gets invalidated."""
+
+    @property
+    def summary(self) -> dict:
+        raise RuntimeError("simulated wandb Run.summary failure")
 
     def log(self, metrics: dict) -> None:
         raise RuntimeError("simulated wandb Run.log() failure")
@@ -120,6 +127,28 @@ def test_wandb_run_log_failure_is_swallowed_not_raised(caplog) -> None:
     assert any(r.message == "wandb_log_failed" for r in caplog.records)
 
 
+def test_wandb_run_summary_writes_through_the_run_objects_summary_dict() -> None:
+    """Run-level bests must reach `Run.summary`, not the history: logged as an
+    ordinary metric they would be overwritten by the next update, and the
+    dashboard's summary column would show the LAST value of a 48-hour run
+    rather than its best."""
+    fake = FakeWandbModule()
+    run = WandbRun(fake, project="p", name="r")
+
+    run.summary({"best/badges": 3.0})
+
+    assert fake.run.summary == {"best/badges": 3.0}
+
+
+def test_wandb_run_summary_failure_is_swallowed_not_raised(caplog) -> None:
+    run = WandbRun(_RaisingWandbModule(), project="p", name="r")
+
+    with caplog.at_level(logging.WARNING, logger="observability.tracking"):
+        run.summary({"best/badges": 3.0})  # must not raise
+
+    assert any(r.message == "wandb_summary_failed" for r in caplog.records)
+
+
 def test_wandb_run_finish_failure_is_swallowed_not_raised(caplog) -> None:
     run = WandbRun(_RaisingWandbModule(), project="p", name="r")
 
@@ -133,6 +162,7 @@ def test_null_experiment_run_is_a_no_op() -> None:
     run = NullExperimentRun()
 
     assert run.log({"anything": 1}) is None
+    assert run.summary({"anything": 1}) is None
     assert run.finish() is None
 
 

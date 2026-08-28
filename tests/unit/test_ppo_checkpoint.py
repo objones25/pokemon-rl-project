@@ -23,6 +23,7 @@ from ppo.normalizer import ReturnScaler
 from sequence_model.cache import RolloutCache
 from sequence_model.config import PolicyConfig
 from sequence_model.policy import RecurrentTransformerPolicy
+from tests.conftest import PINNED_ENCODER_REVISION
 
 from .fakes import FakeVecEnv
 
@@ -62,10 +63,17 @@ class _CheckpointHarness:
             "git_commit": "deadbeef",
         }
 
-    def resume_kwargs(self, context_len: int | None = None) -> dict:
+    def resume_kwargs(
+        self, context_len: int | None = None, frozen_encoder_revision: str | None = None
+    ) -> dict:
         policy_config = self.policy_config
         if context_len is not None:
             policy_config = dataclasses.replace(policy_config, context_len=context_len)
+        config = self.config
+        if frozen_encoder_revision is not None:
+            config = dataclasses.replace(
+                config, frozen_encoder_revision=frozen_encoder_revision
+            )
         return {
             "directory": self.directory,
             "policy": self.policy,
@@ -74,7 +82,7 @@ class _CheckpointHarness:
             "vec_env": self.vec_env,
             "scaler": self.scaler,
             "policy_config": policy_config,
-            "config": self.config,
+            "config": config,
             "init_state_hash": self.init_state_hash,
         }
 
@@ -107,7 +115,7 @@ def _checkpoint_harness(tmp_path: Path) -> _CheckpointHarness:
         vec_env=vec_env,
         scaler=ReturnScaler(),
         policy_config=policy_config,
-        config=PPOConfig(frozen_encoder_revision="x", n_steps=4),
+        config=PPOConfig(frozen_encoder_revision=PINNED_ENCODER_REVISION, n_steps=4),
         init_state_hash="deadbeef",
     )
 
@@ -234,6 +242,33 @@ def test_resume_selects_update_eleven_over_nine_and_ten(tmp_path) -> None:
     result = resume(**harness.resume_kwargs())
 
     assert result.update == 11
+
+
+def test_resume_refuses_a_checkpoint_written_against_a_different_encoder_revision(
+    tmp_path,
+) -> None:
+    """The manifest records frozen_encoder_revision precisely so a mid-run
+    encoder change is detectable. Accepting it anyway would feed a policy
+    trained entirely on one encoder's latents the features of another, with
+    nothing raised -- the exact failure the pin exists to prevent."""
+    harness = _checkpoint_harness(tmp_path)
+    write_checkpoint(**harness.kwargs(update=1))
+
+    with pytest.raises(ValueError, match="frozen encoder revision"):
+        resume(**harness.resume_kwargs(frozen_encoder_revision="f" * 40))
+
+
+def test_resume_accepts_a_checkpoint_written_against_the_same_encoder_revision(
+    tmp_path,
+) -> None:
+    """The other direction: the guard must not reject the ordinary resume it
+    is wrapped around."""
+    harness = _checkpoint_harness(tmp_path)
+    write_checkpoint(**harness.kwargs(update=1))
+
+    result = resume(**harness.resume_kwargs(frozen_encoder_revision=PINNED_ENCODER_REVISION))
+
+    assert result.update == 1
 
 
 def test_write_checkpoint_prunes_all_three_globs_to_keep_last_n(tmp_path) -> None:

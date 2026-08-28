@@ -12,6 +12,7 @@ from ppo.config import PPOConfig
 from ppo.telemetry import STEP_METRICS, update_metrics, wandb_config
 from ppo.update import UpdateStats
 from sequence_model.config import PolicyConfig
+from tests.conftest import PINNED_ENCODER_REVISION
 
 
 def _stats_kwargs(**overrides: object) -> dict:
@@ -57,7 +58,7 @@ def _stats_kwargs(**overrides: object) -> dict:
 
 def _config_kwargs() -> dict:
     return {
-        "ppo_config": PPOConfig(frozen_encoder_revision="abc123"),
+        "ppo_config": PPOConfig(frozen_encoder_revision=PINNED_ENCODER_REVISION),
         "env_config": EnvConfig(),
         "policy_config": PolicyConfig(),
         "gate_results": {
@@ -193,4 +194,4 @@ def test_the_wandb_config_records_gate_results_under_the_gate_prefix() -> None:
 def test_the_wandb_config_records_the_pinned_encoder_revision() -> None:
     config = wandb_config(**_config_kwargs())
 
-    assert config["ppo/frozen_encoder_revision"] == "abc123"
+    assert config["ppo/frozen_encoder_revision"] == PINNED_ENCODER_REVISION
