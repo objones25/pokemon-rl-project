@@ -3,14 +3,30 @@
 Gate 1 asks torch directly which SDPA backends can serve the model's real
 call, rather than reading kernel names out of a profile. Verified against
 torch 2.13 by introspection: torch.nn.attention exposes
-can_use_flash_attention(params, debug=False) and
+can_use_flash_attention(params, debug=False),
 can_use_efficient_attention(params, debug=False), and
+can_use_cudnn_attention(params, debug=False), and
 torch.backends.cuda.SDPAParams takes seven positional arguments --
 (query, key, value, attn_mask, dropout, is_causal, enable_gqa).
 attention.py's forward_chunk calls F.scaled_dot_product_attention with
 enable_gqa=True, so k and v are never expanded to query-head width -- the
 gate must build SDPAParams with the same asymmetric shapes or it measures a
 call the model never makes.
+
+All three backends are probed, not just flash and efficient: reading torch
+2.13's own dispatch source (aten/src/ATen/native/transformers/cuda/sdp_utils.cpp)
+shows flash's general_constraints include check_for_attn_mask, which rejects
+ANY explicit attn_mask outright -- and this model's causal + sliding-window +
+episode-boundary mask can never collapse to is_causal alone. Efficient
+attention's dense_constraints instantiate
+check_batch_size_and_num_heads_dense<false /*supports_gqa*/> -- GQA support is
+compiled out of that backend entirely, so enable_gqa=True cannot make it
+usable no matter the shapes. Only cudnn's dense_constraints instantiate the
+GQA-supporting template AND tolerate an explicit mask
+(check_attn_mask_shape, not check_for_attn_mask) -- the one backend that can
+actually serve this exact call. A gate that never asks about cudnn cannot
+tell "restructure the model, nothing fused will ever work" from "the report
+just never checked the one candidate that would have worked."
 
 Gate 2 answers the environment spec's own open question -- whether 64 envs
 is right for the per-step cost -- with a measured number. 64 PyBoy emulators
@@ -25,6 +41,7 @@ from collections.abc import Callable
 import torch
 from torch.backends.cuda import (
     SDPAParams,
+    can_use_cudnn_attention,
     can_use_efficient_attention,
     can_use_flash_attention,
 )
@@ -62,15 +79,20 @@ def sdpa_params_for(
 def sdpa_backend_report(
     policy_config: PolicyConfig, minibatch_envs: int, seq_len: int, device: torch.device
 ) -> dict:
-    """Gate 1. A materialized bool mask rules out FlashAttention; MATH would
-    materialize roughly 537 MB of scores at (8, 8, 2048) in bf16. If neither
-    alternative is usable, the restructure decision surfaces here rather than
-    after the money is spent. debug=True makes torch print its rejection
-    reason for whichever backend is disqualified."""
+    """Gate 1. A materialized bool mask rules out FlashAttention, and GQA is
+    compiled out of efficient attention entirely regardless of enable_gqa (see
+    this module's docstring) -- cudnn is the one backend that can actually
+    serve this exact call, so it must be probed too, not just the two backends
+    the original design handoff knew about. If none of the three is usable,
+    MATH would materialize roughly 537 MB of scores at (8, 8, 2048) in bf16,
+    and the restructure decision surfaces here rather than after the money is
+    spent. debug=True makes torch print its rejection reason for whichever
+    backend is disqualified."""
     params = sdpa_params_for(policy_config, minibatch_envs, seq_len, device)
     report = {
         "flash": bool(can_use_flash_attention(params, debug=True)),
         "efficient": bool(can_use_efficient_attention(params, debug=True)),
+        "cudnn": bool(can_use_cudnn_attention(params, debug=True)),
         "shapes": {
             "query": list(params.query.shape),
             "key": list(params.key.shape),

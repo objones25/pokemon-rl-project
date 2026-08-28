@@ -110,10 +110,26 @@ def test_the_report_names_every_candidate_backend() -> None:
     it wouldn't catch either bug. Pin the full content instead, including the
     asymmetric query/key widths that are this gate's entire point.
 
-    The (False, False) pin is empirically verified against torch 2.13 on
-    CPU: both can_use_flash_attention and can_use_efficient_attention
-    currently require a CUDA tensor. A future torch adding CPU support to
-    either backend would need this test revisited."""
+    The (False, False, False) pin is empirically verified against torch 2.13
+    on CPU: can_use_flash_attention, can_use_efficient_attention, and
+    can_use_cudnn_attention all currently require a CUDA tensor. A future
+    torch adding CPU support to any of the three would need this test
+    revisited.
+
+    cudnn is the one candidate that can actually serve this model's real
+    call on real hardware: verified by reading torch 2.13's own dispatch
+    source (aten/src/ATen/native/transformers/cuda/sdp_utils.cpp) --
+    can_use_flash_attention's general_constraints include
+    check_for_attn_mask, which rejects any non-null attn_mask outright, and
+    can_use_mem_efficient_attention's dense_constraints instantiate
+    check_batch_size_and_num_heads_dense<false /*supports_gqa*/>, so GQA is
+    compiled out of that backend entirely regardless of enable_gqa. Only
+    cudnn's dense_constraints instantiate the GQA-supporting template AND
+    tolerate an explicit mask (check_attn_mask_shape, not
+    check_for_attn_mask) -- the one combination this model's causal +
+    sliding-window + episode-boundary mask actually needs. A report that
+    never asks the question can't ever tell a real "gate 1 fails, restructure
+    now" from "the report itself is incomplete"."""
     report = sdpa_backend_report(
         _policy_config(), minibatch_envs=4, seq_len=16, device=torch.device("cpu")
     )
@@ -121,6 +137,7 @@ def test_the_report_names_every_candidate_backend() -> None:
     assert report == {
         "flash": False,
         "efficient": False,
+        "cudnn": False,
         "shapes": {"query": [4, 8, 16, 16], "key": [4, 2, 16, 16], "enable_gqa": True},
     }
 

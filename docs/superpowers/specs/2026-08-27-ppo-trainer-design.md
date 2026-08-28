@@ -443,15 +443,23 @@ the model's real asymmetric shapes: `q` at `(8, 8, 2048, 64)`, `k` and `v` at
 disqualify a backend on its own, so a gate run with symmetric head counts would
 measure something the model never executes.
 
-Call `can_use_flash_attention(p, debug=True)` and
-`can_use_efficient_attention(p, debug=True)`, logging what `debug` prints. Then
-time one `forward_chunk` under each backend forced via `sdpa_kernel`, recording
-peak memory. **Pass:** a non-`MATH` backend is available, or `MATH`'s measured
-peak fits the pod with margin. A materialized bool mask rules out
-FlashAttention, and `MATH` would materialize roughly 537 MB of scores at
-`(B=8, H=8, L=2048)` in bf16; if neither alternative is usable, the restructure
-decision surfaces before the money is spent. `CUDNN_ATTENTION` is a candidate
-the original handoff did not know about.
+Call `can_use_flash_attention(p, debug=True)`,
+`can_use_efficient_attention(p, debug=True)`, and `can_use_cudnn_attention(p,
+debug=True)`, logging what `debug` prints. Then time one `forward_chunk` under
+each backend forced via `sdpa_kernel`, recording peak memory. **Pass:** a
+non-`MATH` backend is available, or `MATH`'s measured peak fits the pod with
+margin. A materialized bool mask rules out FlashAttention outright
+(`check_for_attn_mask` in torch 2.13's own dispatch constraints), and GQA is
+compiled out of efficient attention entirely regardless of `enable_gqa`
+(`check_batch_size_and_num_heads_dense<false /*supports_gqa*/>` in torch
+2.13's dispatch source — a template parameter, not a runtime check). `MATH`
+would materialize roughly 537 MB of scores at `(B=8, H=8, L=2048)` in bf16; if
+none of the three is usable, the restructure decision surfaces before the
+money is spent. `CUDNN_ATTENTION` is the one candidate whose dense
+constraints support both GQA and an explicit mask — the original handoff
+didn't know about it, and `preflight.py` didn't actually call it until a real
+pod run on 2026-08-28 showed flash and efficient both `False` and nothing had
+checked the third backend.
 
 **Gate 2 — rollout throughput** at `n_envs ∈ {16, 32, 64}` on the target pod's
 actual vCPU count. This answers the env spec's own open question — *"whether 64
