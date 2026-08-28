@@ -626,7 +626,56 @@ That backward compatibility is a test, not an intention.
 Add `src/ppo` to `[tool.hatch.build.targets.wheel].packages` and
 `pokemon-ppo = "ppo.cli:main"` to `[project.scripts]`.
 
-## 12. Open questions
+## 12. Known gaps carried out of implementation
+
+Surfaced by the whole-branch review and deliberately not fixed on this branch.
+Recorded here because the SDD workspace that held them is scratch, and these
+are real.
+
+**Blocking the first paid run:**
+
+- **The slow acceptance tier has never run against a real ROM.** Both tests in
+  `tests/integration/test_ppo_smoke.py` skipped on the dev machine with stated
+  reasons — no `Pokemon Red.gb`, no `artifacts/init.state`. Their harness logic
+  was verified with a `FakeVecEnv` substitution, but §8's gate 4 is unmet until
+  they run for real. That is a pod gate, not a laptop gate.
+- **`torch.compile`, `channels_last`, and `cudnn.benchmark` are not applied.**
+  §4's fixed-shape design — including the 1023-step warmup — exists precisely so
+  these are safe, and nothing currently collects the benefit. They belong with
+  gates 1–3 because they must be measured on the pod anyway.
+- **§8's gate 3 (memory probe) is not implemented in `preflight.py`.** Fixed
+  shapes make the first real update an implicit probe, so an OOM surfaces in the
+  first iteration rather than 40 hours in. Either add it or amend §8's count.
+
+**Deferred, not blocking:**
+
+- **No Hub snapshot.** `PPOConfig.hub_snapshot_every_updates` exists and is read
+  nowhere; §6's "roughly hourly snapshot" and "the final policy is pushed" are
+  unimplemented. The trainer has no upload client or credential path, and
+  checkpoints live on the network volume by design. Wire it or delete the field.
+- **§6's cache-resume wording overstates what the KV cache buys.** "Resuming
+  with an empty cache puts a value-loss spike in the telemetry after every
+  restart" is true of the *rollout* path only. `forward_chunk` never consults the
+  KV cache, so the cache alone cannot prevent an update-side spike. The trainer
+  now always rebuilds the burn-in prefix on resume, which is what actually
+  closes that gap.
+- **Truncation at the terminal slot is treated as termination.** The final
+  transition of each episode gets `reward = 0` and no bootstrap, rather than
+  bootstrapping off `V(o_T)`. One slot per 163,840-step episode against a ~333-step
+  effective horizon at `γ = 0.997`, so immaterial — but it is the terminal
+  treatment, not a truncation bootstrap, and it would matter if episodes shortened.
+- **Metric names drift from §7:** `env/worker_respawns` vs `env/respawns`,
+  `progress/badges_max` / `_mean` vs `progress/badges`. Pick one and reconcile.
+- **`ResumeResult.wandb_run_id` is dead** — the CLI reads the run id from the
+  `wandb_run_id.txt` sidecar instead. Two recorded sources, one consumer.
+- **Unused parameters:** `run_update` accepts `policy_config` and never uses it.
+- **`trainer._respawns` reaches into `vec_env._backends`.** `SubprocessBackend.respawns`
+  is already public; only the container access is private. A respawn count on
+  `stats()` would remove the reach-in.
+- **`.abs()` in the staleness computation is unproven,** because the test
+  harness's offset is always positive so the difference is never negative.
+
+## 13. Open questions
 
 Deliberately not decided here, because each needs a run to answer:
 
