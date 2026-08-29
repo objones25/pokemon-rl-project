@@ -9,6 +9,41 @@ from pokemon_env.vec_env import InProcessBackend, VecPokemonEnv
 from .fakes import FakeBackend, FakeEmulator
 
 
+def test_inprocess_backend_recv_returns_the_result_from_send_step() -> None:
+    config = EnvConfig(n_envs=1, max_steps=2)
+    backend = InProcessBackend(EnvSession(FakeEmulator(), config, init_state=b"init"))
+    backend.send_reset()
+    backend.recv()
+
+    backend.send_step(0)
+    result = backend.recv()
+
+    assert (result.episode_id, result.done) == (0, False)
+
+
+def test_inprocess_backend_recv_without_a_prior_send_raises() -> None:
+    """The two-phase split makes call order a real invariant for the first
+    time -- a stray recv() with nothing dispatched must be caught here, not
+    return a stale or default result."""
+    config = EnvConfig(n_envs=1, max_steps=2)
+    backend = InProcessBackend(EnvSession(FakeEmulator(), config, init_state=b"init"))
+
+    with pytest.raises(RuntimeError, match="no matching send_step/send_reset"):
+        backend.recv()
+
+
+def test_inprocess_backend_send_step_while_a_previous_dispatch_is_unread_raises() -> None:
+    """Guards the exact bug class this refactor introduces: a future edit to
+    VecPokemonEnv that dispatches twice before recv() would otherwise
+    silently overwrite which command recv() answers for."""
+    config = EnvConfig(n_envs=1, max_steps=2)
+    backend = InProcessBackend(EnvSession(FakeEmulator(), config, init_state=b"init"))
+    backend.send_reset()
+
+    with pytest.raises(RuntimeError, match="previous dispatch has not been recv"):
+        backend.send_step(0)
+
+
 @pytest.fixture
 def vec_env() -> VecPokemonEnv:
     config = EnvConfig(n_envs=3, max_steps=2)
