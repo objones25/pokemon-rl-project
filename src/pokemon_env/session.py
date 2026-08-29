@@ -56,7 +56,17 @@ class EnvSession:
         self._rewards.reset(self._emulator)
         self._step_count = 0
         self._episode_id += 1
-        return self._observe(reward=0.0, clipped=False, components={})
+        # Read once here, not threaded through anything else: reset happens
+        # once per episode (~1/163,840th as often as step), so a lone extra
+        # read is negligible -- unlike the per-step duplication this same
+        # pair of reads would be if left unfixed in _observe/build_aux_state.
+        return self._observe(
+            reward=0.0,
+            clipped=False,
+            components={},
+            badge_count=ram.badge_count(self._emulator),
+            event_flag_count=ram.event_flag_count(self._emulator),
+        )
 
     def step(self, action: int) -> StepResult:
         if not 0 <= action < ACTION_DIM:
@@ -75,9 +85,18 @@ class EnvSession:
             reward=breakdown.reward,
             clipped=breakdown.clipped,
             components=breakdown.components,
+            badge_count=breakdown.badge_count,
+            event_flag_count=breakdown.event_flag_count,
         )
 
-    def _observe(self, reward: float, clipped: bool, components: dict[str, float]) -> StepResult:
+    def _observe(
+        self,
+        reward: float,
+        clipped: bool,
+        components: dict[str, float],
+        badge_count: int,
+        event_flag_count: int,
+    ) -> StepResult:
         exploration = ExplorationCounters(
             coords_seen=self._rewards.coords_seen,
             steps_since_new_coord=self._rewards.steps_since_new_coord,
@@ -86,7 +105,12 @@ class EnvSession:
         return StepResult(
             frame=self._emulator.screen_frame(),
             aux=build_aux_state(
-                self._emulator, self._step_count, exploration, self._config.max_steps
+                self._emulator,
+                self._step_count,
+                exploration,
+                self._config.max_steps,
+                badge_count,
+                event_flag_count,
             ),
             reward=reward,
             done=self._step_count >= self._config.max_steps,

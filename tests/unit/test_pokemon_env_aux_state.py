@@ -14,8 +14,19 @@ _NO_EXPLORATION = ExplorationCounters(coords_seen=0, steps_since_new_coord=0, ma
 
 
 def _build(fake_emulator, step_count: int = 0, exploration=_NO_EXPLORATION) -> np.ndarray:
-    """Helper, not a test: the common call shape."""
-    return build_aux_state(fake_emulator, step_count, exploration, max_steps=163_840)
+    """Helper, not a test: the common call shape. badge_count/event_flag_count
+    are derived from fake_emulator here rather than hardcoded, since
+    build_aux_state no longer reads them itself -- the caller (EnvSession) is
+    expected to pass in values it already read while computing the reward,
+    but every test here still only sets up `fake_emulator.memory` directly."""
+    return build_aux_state(
+        fake_emulator,
+        step_count,
+        exploration,
+        max_steps=163_840,
+        badge_count=ram.badge_count(fake_emulator),
+        event_flag_count=ram.event_flag_count(fake_emulator),
+    )
 
 
 def test_aux_state_has_the_width_the_policy_config_fixes(fake_emulator) -> None:

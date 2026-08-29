@@ -1,3 +1,5 @@
+from unittest.mock import patch
+
 import pytest
 
 from pokemon_env import ram
@@ -76,6 +78,23 @@ def test_step_rejects_an_out_of_range_action(session) -> None:
 
     with pytest.raises(ValueError, match="action=7 is outside"):
         session.step(7)
+
+
+def test_step_reads_badge_count_and_event_flag_count_exactly_once_each(session) -> None:
+    """rewards.step() and aux_state.build_aux_state() each independently need
+    these two RAM-derived values. EnvSession.step() must compute each once
+    and thread the result to both, not let each side re-read RAM for a value
+    that has not changed since the tick just completed -- event_flag_count in
+    particular is a 311-byte popcount, not a single-byte read."""
+    session.reset()
+
+    with (
+        patch.object(ram, "badge_count", wraps=ram.badge_count) as badge_spy,
+        patch.object(ram, "event_flag_count", wraps=ram.event_flag_count) as event_spy,
+    ):
+        session.step(0)
+
+    assert (badge_spy.call_count, event_spy.call_count) == (1, 1)
 
 
 def test_frame_has_the_encoder_input_shape(session) -> None:

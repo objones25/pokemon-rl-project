@@ -28,6 +28,12 @@ class RewardBreakdown:
     reward: float
     clipped: bool
     components: dict[str, float]
+    # Raw (unweighted) counts this step already read from RAM, exposed so
+    # EnvSession can hand them to build_aux_state instead of it re-deriving
+    # the same values with a second RAM read -- event_flag_count in
+    # particular is a 311-byte popcount, not a single-byte read.
+    badge_count: int
+    event_flag_count: int
 
 
 @dataclass
@@ -85,24 +91,31 @@ class RewardAccumulator:
         self._update_healing(mem)
         self._update_exploration(mem)
 
+        badge_count = ram.badge_count(mem)
+        event_flag_count = ram.event_flag_count(mem)
+
         components = {
-            "badges": self._config.badge_weight * ram.badge_count(mem),
+            "badges": self._config.badge_weight * badge_count,
             "heal": self._config.heal_weight * self._state.total_healing,
             "explore": self._config.explore_weight * self._state.explore_sum,
-            "events": self._config.event_weight * self._event_score(mem),
+            "events": self._config.event_weight * self._event_score(mem, event_flag_count),
             "levels": self._config.level_weight * ram.level_score(mem),
         }
         total = sum(components.values())
 
         gain = max(0.0, total - self._state.max_total)
         self._state.max_total = max(self._state.max_total, total)
-        return RewardBreakdown(reward=min(gain, 1.0), clipped=gain > 1.0, components=components)
+        return RewardBreakdown(
+            reward=min(gain, 1.0),
+            clipped=gain > 1.0,
+            components=components,
+            badge_count=badge_count,
+            event_flag_count=event_flag_count,
+        )
 
-    def _event_score(self, mem: Emulator) -> int:
+    def _event_score(self, mem: Emulator, event_flag_count: int) -> int:
         return max(
-            ram.event_flag_count(mem)
-            - self._state.base_event_flags
-            - int(ram.museum_ticket_set(mem)),
+            event_flag_count - self._state.base_event_flags - int(ram.museum_ticket_set(mem)),
             0,
         )
 

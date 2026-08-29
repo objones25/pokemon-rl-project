@@ -42,8 +42,15 @@ def build_aux_state(
     step_count: int,
     exploration: ExplorationCounters,
     max_steps: int,
+    badge_count: int,
+    event_flag_count: int,
 ) -> np.ndarray:
-    """(32,) float32 in [-1, 1]. See the design spec's slot table."""
+    """(32,) float32 in [-1, 1]. See the design spec's slot table.
+
+    `badge_count`/`event_flag_count` are passed in rather than read from
+    `mem` here, because the caller (EnvSession.step) already read both while
+    computing the reward for this same tick -- re-reading them would be a
+    second RAM scan of values that cannot have changed since."""
     raw = np.zeros(AUX_STATE_DIM, dtype=np.float32)
 
     # Slots past party_size hold whatever the last Pokemon to occupy them left
@@ -64,8 +71,8 @@ def build_aux_state(
         (current / maximum if i < live and maximum > 0 else 0.0)
         for i, (current, maximum) in enumerate(party_hp)
     ]
-    raw[13] = ram.badge_count(mem) / ram.MAX_BADGES
-    raw[14] = ram.event_flag_count(mem) / ram.EVENT_FLAG_COUNT
+    raw[13] = badge_count / ram.MAX_BADGES
+    raw[14] = event_flag_count / ram.EVENT_FLAG_COUNT
 
     x, y, map_id = ram.game_coords(mem)
     raw[15] = map_id / 255.0
