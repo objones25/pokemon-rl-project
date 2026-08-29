@@ -91,6 +91,29 @@ def export_frozen_encoder(encoder: nn.Module) -> tuple[bytes, bytes]:
     return weights_bytes, config_bytes
 
 
+def _validate_latent_stats(mean: torch.Tensor, std: torch.Tensor) -> None:
+    """Deliberately duplicates src/pokemon_env/encoder.py's load_latent_stats
+    guard rather than importing it -- CLAUDE.md's codebase map keeps
+    contrastive_pretrain and pokemon_env independent by design, and this
+    invariant happening to be identical on both sides of that boundary is
+    a coincidence, not a reason to couple the two sub-projects."""
+    for name, tensor in (("latent_mean", mean), ("latent_std", std)):
+        non_finite = torch.nonzero(~torch.isfinite(tensor)).flatten().tolist()
+        if non_finite:
+            raise ValueError(
+                f"{name} has {len(non_finite)} non-finite entries at indices "
+                f"{non_finite[:20]}{' ...' if len(non_finite) > 20 else ''}; refusing to publish"
+            )
+    non_positive = torch.nonzero(std <= 0).flatten().tolist()
+    if non_positive:
+        raise ValueError(
+            f"latent_std has {len(non_positive)} non-positive entries at indices "
+            f"{non_positive[:20]}{' ...' if len(non_positive) > 20 else ''}; refusing to publish. "
+            "A dead or under-sampled encoder channel would divide by the 1e-6 floor "
+            "downstream and feed ~1e6-scale inputs to the policy's value head."
+        )
+
+
 def push_frozen_encoder(
     client: AtomicHfClient,
     encoder: nn.Module,
@@ -107,6 +130,7 @@ def push_frozen_encoder(
     mid-publish failure, which _load_frozen_encoder_from_client then hard-
     fails on; one commit either lands completely or not at all, and the
     retry below retries the whole publish as one unit."""
+    _validate_latent_stats(latent_mean, latent_std)
     weights_bytes, config_bytes = export_frozen_encoder(encoder)
     stats_bytes = json.dumps(
         {"mean": latent_mean.tolist(), "std": latent_std.tolist()}
@@ -189,20 +213,57 @@ def compute_latent_stats(
     rows: Iterable[dict],
     device: torch.device,
     max_examples: int = 2000,
+    seed: int = 0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """`rows` yields dicts with an "original" (1, H, W) uint8 tensor --
     the same shape contrastive_pretrain.dataset.to_pair_transform
-    produces. Restores the encoder's original train/eval mode on exit."""
+    produces. Restores the encoder's original train/eval mode on exit.
+
+    Uses reservoir sampling (Algorithm R): visits the FULL `rows` stream
+    once and produces a uniform random sample of size `max_examples`
+    regardless of the stream's order. A take-first-N implementation over
+    an unshuffled stream (build_val_dataset deliberately never shuffles,
+    for compute_val_loss's resume-without-shuffle needs) can miss a real
+    feature channel entirely if it only fires late in the stream -- this
+    produced this project's 2026-08-28 nine-dead-latent-channel incident.
+    `seed` makes the sample reproducible across a resumed run, matching
+    how build_train_dataset already threads a seed through.
+
+    Only the `max_examples` rows the reservoir ends up retaining are ever
+    encoded, and in a single batched forward pass after the stream
+    traversal finishes -- not one encoder forward per row of the (held-out
+    videos can total 100k+ rows) stream. The reservoir holds raw uint8
+    frame tensors during traversal (cheap), so visiting every row for
+    representativeness no longer multiplies the encoder-forward cost,
+    which is what actually dominates this function's runtime."""
+    assert max_examples > 0, f"max_examples must be positive, got {max_examples}"
+
     was_training = encoder.training
     encoder.eval()
-    features = []
+    generator = torch.Generator().manual_seed(seed)
+    reservoir: list[torch.Tensor] = []
+    for i, row in enumerate(rows):
+        frame = row["original"]
+        if len(reservoir) < max_examples:
+            reservoir.append(frame)
+        else:
+            j = int(torch.randint(0, i + 1, (1,), generator=generator).item())
+            if j < max_examples:
+                reservoir[j] = frame
+
+    if not reservoir:
+        encoder.train(was_training)
+        raise ValueError(
+            "compute_latent_stats received an empty `rows` stream -- the held-out "
+            "video set (config.val_video_ids) produced zero rows to sample from"
+        )
+
+    batch = torch.stack(reservoir).to(device).float()
     with torch.inference_mode():
-        for i, row in enumerate(rows):
-            if i >= max_examples:
-                break
-            frame = row["original"].unsqueeze(0).to(device).float()
-            features.append(encoder(frame).squeeze(0).cpu())
+        features = encoder(batch).cpu()
     encoder.train(was_training)
 
-    stacked = torch.stack(features)
-    return stacked.mean(dim=0), stacked.std(dim=0)
+    assert features.shape[0] <= max_examples, "reservoir grew past its cap"
+    mean, std = features.mean(dim=0), features.std(dim=0)
+    assert mean.shape == std.shape == (features.shape[1],)
+    return mean, std

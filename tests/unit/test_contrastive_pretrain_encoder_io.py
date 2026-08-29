@@ -209,6 +209,46 @@ def test_push_frozen_encoder_publishes_all_three_files_as_one_atomic_commit(
     assert fake_hf_client.commits[0]["paths"] == ["config.json", "latent_stats.json", "model.safetensors"]
 
 
+@pytest.mark.parametrize(
+    ("latent_mean", "latent_std", "match"),
+    [
+        pytest.param(
+            torch.zeros(2048),
+            torch.cat([torch.zeros(1), torch.ones(2047)]),
+            "non-positive",
+            id="zero_std_entry",
+        ),
+        pytest.param(
+            torch.zeros(2048),
+            torch.cat([torch.tensor([float("nan")]), torch.ones(2047)]),
+            "non-finite",
+            id="nan_std_entry",
+        ),
+        pytest.param(
+            torch.cat([torch.tensor([float("inf")]), torch.zeros(2047)]),
+            torch.ones(2048),
+            "non-finite",
+            id="inf_mean_entry",
+        ),
+    ],
+)
+def test_push_frozen_encoder_refuses_to_upload_broken_latent_stats(
+    fake_hf_client, encoder: nn.Module, latent_mean: torch.Tensor, latent_std: torch.Tensor, match: str
+) -> None:
+    """Publish-time mirror of pokemon_env/encoder.py's load-time guard: a
+    dead or under-sampled channel must never reach the Hub, not just be
+    caught later on a paid PPO pod at env construction. Asserts the upload
+    call count is zero, not just that ValueError was raised -- a test that
+    only checks the raise could still pass if the upload happened first."""
+    with pytest.raises(ValueError, match=match):
+        push_frozen_encoder(
+            fake_hf_client, encoder, latent_mean, latent_std, sleep_func=lambda _: None
+        )
+
+    assert fake_hf_client.upload_calls == []
+    assert fake_hf_client.commits == []
+
+
 def test_push_frozen_encoder_retries_transient_upload_failures(encoder: nn.Module) -> None:
     client = _FlakyThenWorksHfClient()
 
@@ -329,26 +369,6 @@ def test_compute_latent_stats_shapes(encoder_and_dim: tuple[nn.Module, int]) -> 
     assert std.shape == (dim,)
 
 
-def test_compute_latent_stats_truncates_at_max_examples(encoder_and_dim: tuple[nn.Module, int]) -> None:
-    """A shape-only assertion can't distinguish truncation from processing
-    all 10 rows -- mean/std are always shape (dim,) regardless of how many
-    rows got averaged. Spying on encoder.forward (which compute_latent_stats
-    reaches via `encoder(frame)` -> nn.Module.__call__ -> self.forward)
-    gives a genuinely black-box count of rows actually processed."""
-    encoder, dim = encoder_and_dim
-    rows = [
-        {"original": torch.randint(0, 256, (1, 144, 160), dtype=torch.uint8)}
-        for _ in range(10)
-    ]
-
-    with patch.object(encoder, "forward", wraps=encoder.forward) as spy:
-        mean, std = compute_latent_stats(encoder, rows, device=torch.device("cpu"), max_examples=3)
-
-    assert spy.call_count == 3  # truncated at max_examples, not all 10 rows
-    assert mean.shape == (dim,)
-    assert std.shape == (dim,)
-
-
 @pytest.mark.parametrize("was_training", [True, False])
 def test_compute_latent_stats_restores_original_training_mode(
     encoder: nn.Module, was_training: bool
@@ -359,6 +379,159 @@ def test_compute_latent_stats_restores_original_training_mode(
     compute_latent_stats(encoder, rows, device=torch.device("cpu"), max_examples=2)
 
     assert encoder.training is was_training
+
+
+class _MarkerEncoder(nn.Module):
+    """Deterministically maps each row's pixel marker (frame[:, 0, 0, 0])
+    into feature channel 0; every other channel is constant 1.0, so only
+    channel 0's std reflects which rows actually got sampled. Stands in
+    for a real encoder channel that only fires on a small, late-arriving
+    slice of the held-out stream -- exactly the shape of the 9 flagged
+    channels in the 2026-08-28 incident."""
+
+    def __init__(self, dim: int) -> None:
+        super().__init__()
+        self.dim = dim
+
+    def forward(self, frame: torch.Tensor) -> torch.Tensor:
+        marker = frame[:, 0, 0, 0]
+        feature = torch.ones(frame.shape[0], self.dim)
+        feature[:, 0] = marker
+        return feature
+
+
+def test_compute_latent_stats_reservoir_sampling_detects_a_channel_invisible_in_the_first_slice() -> None:
+    """Regression test for the sampling bug behind the 9-dead-latent-channel
+    incident: a channel that never fires in the first `max_examples` rows
+    of an unshuffled stream must not measure std == 0 just because the old
+    take-first-N implementation would never see it fire.
+
+    Parameters are deliberately NOT a small max_examples against a huge
+    total_rows: with a rare marker (e.g. 3 marker-0 rows out of 300), a
+    uniform reservoir sample of size 3 has ~97% probability of missing all
+    3 by chance (hypergeometric P(k=0) with K=3, N=300, n=3 ~= 0.97) --
+    that would make this test flaky-by-design, failing for almost any
+    seed, not just an unlucky one. Splitting the pool exactly in half
+    (max_examples marker-0 rows out of 2*max_examples total) makes
+    P(the reservoir misses every marker-0 row) astronomically small
+    (~1/C(40,20) ~= 7e-12 at these parameters) regardless of seed, while
+    still satisfying the exact shape this test documents: "first
+    max_examples rows exactly zero, nonzero afterward."""
+    dim = 4
+    max_examples = 20
+    total_rows = 40
+    encoder = _MarkerEncoder(dim)
+    rows = [
+        {"original": torch.full((1, 144, 160), 0, dtype=torch.uint8)}
+        for _ in range(max_examples)
+    ] + [
+        {"original": torch.full((1, 144, 160), 1, dtype=torch.uint8)}
+        for _ in range(total_rows - max_examples)
+    ]
+
+    # Documents the bug precisely: the OLD take-first-N implementation this
+    # spec replaces would report std == 0 for channel 0, because every one
+    # of the first `max_examples` rows carries marker 0. Simulates that old
+    # per-row calling convention directly (not a call into the real, now-
+    # batched compute_latent_stats) via a list comprehension, per this
+    # project's no-for/if/while-in-a-test-body gate.
+    old_std = torch.stack(
+        [encoder(row["original"].unsqueeze(0).float()).squeeze(0) for row in rows[:max_examples]]
+    ).std(dim=0)
+    assert old_std[0].item() == 0.0
+
+    _, new_std = compute_latent_stats(
+        encoder, rows, device=torch.device("cpu"), max_examples=max_examples, seed=0
+    )
+
+    assert new_std[0].item() != 0.0
+
+
+def test_compute_latent_stats_is_deterministic_given_a_seed(
+    encoder_and_dim: tuple[nn.Module, int]
+) -> None:
+    """Needed for resume-reproducibility this project already holds
+    elsewhere (dataset.py's per-row seeding): the same rows, seed, and
+    max_examples must produce bit-identical mean/std across two calls."""
+    encoder, _ = encoder_and_dim
+    rows = [
+        {"original": torch.randint(0, 256, (1, 144, 160), dtype=torch.uint8)}
+        for _ in range(20)
+    ]
+
+    mean_a, std_a = compute_latent_stats(
+        encoder, rows, device=torch.device("cpu"), max_examples=5, seed=42
+    )
+    mean_b, std_b = compute_latent_stats(
+        encoder, rows, device=torch.device("cpu"), max_examples=5, seed=42
+    )
+
+    assert torch.equal(mean_a, mean_b)
+    assert torch.equal(std_a, std_b)
+
+
+class _CountingIterable:
+    """Wraps a plain list so a test can prove every element was pulled from
+    the stream, independent of how many of those elements the encoder ever
+    sees -- reservoir sampling and encoder-forward batching are two
+    separate properties, and this only asserts the former."""
+
+    def __init__(self, items: list[dict]) -> None:
+        self._items = items
+        self.count = 0
+
+    def __iter__(self):
+        for item in self._items:
+            self.count += 1
+            yield item
+
+
+def test_compute_latent_stats_visits_every_row_in_the_stream_even_past_max_examples(
+    encoder_and_dim: tuple[nn.Module, int]
+) -> None:
+    """Reservoir sampling (Algorithm R) must visit the FULL rows stream to
+    produce a uniform sample -- unlike the take-first-N implementation this
+    replaces, which stopped at max_examples. Replaces
+    test_compute_latent_stats_truncates_at_max_examples, whose assertion
+    (call_count == max_examples) asserted exactly the bug this spec fixes.
+
+    Stream traversal (every row pulled from `rows`) and encoder-forward
+    cost (how many times `encoder.forward` runs) are now two different
+    numbers: compute_latent_stats encodes only the retained reservoir, in
+    one batched forward pass, after the stream traversal finishes -- so
+    `encoder.forward` is called exactly once per compute_latent_stats call
+    regardless of stream length. Verified here with two independent
+    spies: a counting wrapper around the `rows` iterable (proves the
+    stream was fully visited) and a wraps= spy on `encoder.forward`
+    (proves the encoder itself is called once, batched, not once per
+    row)."""
+    encoder, dim = encoder_and_dim
+    rows = [
+        {"original": torch.randint(0, 256, (1, 144, 160), dtype=torch.uint8)}
+        for _ in range(10)
+    ]
+    counting_rows = _CountingIterable(rows)
+
+    with patch.object(encoder, "forward", wraps=encoder.forward) as spy:
+        mean, std = compute_latent_stats(
+            encoder, counting_rows, device=torch.device("cpu"), max_examples=3
+        )
+
+    assert counting_rows.count == 10  # every row visited, not truncated at max_examples
+    assert spy.call_count == 1  # encoder called once, batched, only on the retained reservoir
+    assert mean.shape == (dim,)
+    assert std.shape == (dim,)
+
+
+def test_compute_latent_stats_raises_on_an_empty_rows_stream() -> None:
+    """Negative space: an empty `rows` stream means val_video_ids matched
+    zero rows in the base dataset -- a config/data problem (operating
+    error), not a programmer bug, so this must raise a typed exception
+    with an actionable message rather than crash inside torch.stack([])."""
+    encoder, _ = build_encoder(pretrained=False)
+
+    with pytest.raises(ValueError, match="empty"):
+        compute_latent_stats(encoder, [], device=torch.device("cpu"), max_examples=5)
 
 
 class _FakeRealHfClient:

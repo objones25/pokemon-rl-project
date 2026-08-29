@@ -497,7 +497,14 @@ new best validation loss):
 true}`.
 - `latent_stats.json` — mean/std of the 2048-d backbone output, computed
   over the held-out validation videos, for the sequence-model stage's
-  affine normalization layer (see Scope boundary).
+  affine normalization layer (see Scope boundary). Drawn via seeded
+  reservoir sampling (Algorithm R) over the full held-out stream, not a
+  take-first-N slice — an unshuffled take-first-N sample can silently miss
+  a real feature channel that only fires late in the stream (see
+  `docs/superpowers/specs/2026-08-29-latent-stats-sampling-fix-design.md`).
+  `push_frozen_encoder` refuses to publish if any `latent_std` entry is
+  non-positive or non-finite, mirroring the load-time guard in
+  `src/pokemon_env/encoder.py`.
 - Upload goes through `hf_storage`'s rate-limit-aware retry, same as
   `manifest.json` in `data_collection`.
 
