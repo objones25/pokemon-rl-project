@@ -274,3 +274,27 @@ def test_reset_dispatches_every_send_before_any_recv() -> None:
     vec_env.reset()
 
     assert call_log == ["send:0", "send:1", "send:2", "recv:0", "recv:1", "recv:2"]
+
+
+def test_step_still_recvs_from_every_backend_when_one_backends_send_step_is_swallowed() -> None:
+    """Mirrors SubprocessBackend.send_step(), which swallows a
+    BrokenPipeError/OSError from conn.send() instead of raising -- the
+    failure only ever surfaces later, from recv(). Backend 1 here logs its
+    send_step call (proving VecPokemonEnv actually reached it) but produces
+    no real dispatch, standing in for that swallowed failure. If
+    VecPokemonEnv's dispatch loop stopped after backend 1 instead of
+    sending to every backend before recv'ing from any of them, the later
+    send:2/recv:* entries would never make it into the log."""
+    call_log: list[str] = []
+    backends = [
+        RecordingBackend(0, call_log),
+        RecordingBackend(1, call_log, fails_send_step=True),
+        RecordingBackend(2, call_log),
+    ]
+    vec_env = VecPokemonEnv(backends, EnvConfig(n_envs=3))
+    vec_env.reset()
+    call_log.clear()
+
+    vec_env.step(np.zeros(3, dtype=np.int64))
+
+    assert call_log == ["send:0", "send:1", "send:2", "recv:0", "recv:1", "recv:2"]

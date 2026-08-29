@@ -132,10 +132,19 @@ class RecordingBackend:
     establish. Nothing about that ordering is visible from the returned
     StepResults themselves, so this is the only way to test it."""
 
-    def __init__(self, index: int, call_log: list[str]) -> None:
+    def __init__(
+        self, index: int, call_log: list[str], fails_send_step: bool = False
+    ) -> None:
         self._index = index
         self._call_log = call_log
         self._pending: StepResult | None = None
+        # Stands in for SubprocessBackend.send_step() swallowing a
+        # BrokenPipeError/OSError from conn.send(): the call still happens
+        # (logged below) but produces no real dispatch. recv() below mirrors
+        # the real backend's recovery -- it never raises from a swallowed
+        # send, it returns a valid StepResult (there, via a respawn) -- so
+        # this fake falls back to a fresh result instead of the missing one.
+        self._fails_send_step = fails_send_step
 
     def _result(self) -> StepResult:
         return StepResult(
@@ -154,11 +163,13 @@ class RecordingBackend:
 
     def send_step(self, action: int) -> None:
         self._call_log.append(f"send:{self._index}")
-        self._pending = self._result()
+        if not self._fails_send_step:
+            self._pending = self._result()
 
     def recv(self) -> StepResult:
         self._call_log.append(f"recv:{self._index}")
-        result, self._pending = self._pending, None
+        result = self._pending if self._pending is not None else self._result()
+        self._pending = None
         return result
 
     def state_dict(self) -> dict:

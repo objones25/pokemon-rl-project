@@ -105,9 +105,11 @@ def test_a_fresh_rollout_state_never_sends_episode_start_action_to_the_env() -> 
     action validation for an env pending reset; a brand-new RolloutState is
     not pending one, so the sentinel would reach vec_env.step() unfiltered
     and FakeVecEnv (mirroring EnvSession.step) raises exactly like the real
-    backend does. Real production symptom: SubprocessBackend treats that
-    raise as a worker failure and respawns from init.state, silently
-    discarding whatever game position a resume just restored."""
+    backend does. Real production symptom: the worker's EnvSession.step()
+    raises, the worker reports it over the pipe as an explicit error reply,
+    and SubprocessBackend.recv() re-raises it as a RuntimeError -- crashing
+    the run mid-resume instead of silently respawning and discarding the
+    game position a resume just restored."""
     harness = _rollout_harness(done_at_step=None, start_at_episode_start=True)
 
     collect_rollout(**harness.kwargs(n_steps=3))
