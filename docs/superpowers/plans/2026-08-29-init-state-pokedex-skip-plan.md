@@ -482,7 +482,12 @@ Facts to apply, confirmed against `pret/pokered` this session:
 
 - The bedroom's exit stairs require pressing **UP**, not DOWN, at the column
   aligned with the stairwell — walking toward the "downstairs" tile from
-  above is what triggers the transition.
+  above is what triggers the transition. **Corrected during implementation:**
+  what actually fired the transition in the accepted script was a **RIGHT**
+  press onto the rail tile one column over (UP attempts there were blocked
+  by a wall segment) — see the spec's "Corrections found during
+  implementation" section. The sequence below is the real, byte-identical-
+  replay-verified one; only this stated mechanism was wrong.
 - A direction change's first press only turns the sprite when it wasn't
   already facing that way; the second press in the same direction is what
   moves it.
@@ -496,7 +501,9 @@ Facts to apply, confirmed against `pret/pokered` this session:
 
 - [ ] **Step 1: Iterate with the harness from `scratch/phase_a`'s final checkpoint**
 
-Navigate: bedroom exit (UP at the stairs column) → ground floor → out of the
+Navigate: bedroom exit (UP at the stairs column — corrected during
+implementation to RIGHT, see the "Facts to apply" note above) → ground
+floor → out of the
 house → Pallet Town → to Oak's rival-trigger coordinate (walking through it
 triggers his "Wait!" interception automatically — no `a` press needed there)
 → lab entry → navigate to and select the ball at `(7, 3)` → confirm
@@ -583,17 +590,31 @@ Facts to apply, confirmed this session:
   exit) in via a scripted `PAD_UP, 8` movement, then
   `OaksLabToggleOaksScript` hides `OAK2` and shows `OAKSLAB_OAK1` (the same
   object at `(5, 2)` used during starter selection) for the actual
-  follow/delivery dialogue. **This sequence fires automatically on walking
+  follow/delivery dialogue. ~~**This sequence fires automatically on walking
   into the lab** with the event flag set — it is not a "walk up and press A
-  on a static NPC" interaction the way the Mart clerk was.
+  on a static NPC" interaction the way the Mart clerk was.~~ **Corrected
+  during implementation — this framing is wrong; see the spec's "Corrections
+  found during implementation" section.** The `OaksLabDefaultScript` chain
+  described above is real, but it is Phase B's *first* Oak encounter
+  (starter selection), already consumed by the time the player returns from
+  Viridian — Phase B's own rival-exit script has already advanced the
+  persistent `wOaksLabCurScript` state byte to `SCRIPT_OAKSLAB_NOOP`, so
+  nothing fires automatically on lab re-entry for the delivery leg. The real
+  delivery trigger *is* the "walk up and press A on a static NPC"
+  interaction this bullet dismisses: `OaksLabOak1Text`, ordinary NPC
+  interaction with the `OAKSLAB_OAK1` object at `(5, 2)`, which checks
+  `EVENT_BATTLED_RIVAL_IN_OAKS_LAB` and whether `OAKS_PARCEL` is in the bag
+  before delivering and re-arming the state machine.
 
 - [ ] **Step 1: Iterate with the harness from `scratch/phase_c`'s final checkpoint**
 
 Navigate: Mart exit → Viridian City → Route 1 (south, the freely-passable
-direction this time) → Pallet Town → walk into Oak's lab. Expect the
-automatic Oak-enters/toggle/follow sequence to begin without further input;
-apply waits generous enough to cover it, then `a` through the resulting
-Pokédex-delivery dialogue.
+direction this time) → Pallet Town → walk into Oak's lab. **Corrected during
+implementation:** nothing fires automatically here — walk up to the
+`OAKSLAB_OAK1` object at `(5, 2)`, face it, and press `a` to trigger
+`OaksLabOak1Text`, then continue `a`-ing through the resulting
+Pokédex-delivery dialogue. See the "Facts to apply" note above and the
+spec's "Corrections found during implementation" section.
 
 - [ ] **Step 2: Confirm controllability**
 
