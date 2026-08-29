@@ -178,6 +178,23 @@ def test_resume_skips_a_checkpoint_whose_manifest_was_never_written(tmp_path) ->
     assert result.update == 1
 
 
+def test_resume_skips_a_checkpoint_whose_manifest_is_corrupted_json(tmp_path) -> None:
+    """A crash mid-write of the manifest file itself (the actual commit
+    point) leaves valid-looking .pt files but unparseable JSON. Falling back
+    to the previous update's manifest is the documented behavior; raising
+    would take an otherwise-resumable run down on its own crash-recovery
+    path."""
+    harness = _checkpoint_harness(tmp_path)
+    write_checkpoint(**harness.kwargs(update=1))
+    write_checkpoint(**harness.kwargs(update=2))
+    (tmp_path / "manifest_update000002.json").write_text('{"update": 2, "trunc')
+
+    result = resume(**harness.resume_kwargs())
+
+    assert result is not None
+    assert result.update == 1
+
+
 def test_resume_skips_a_checkpoint_whose_env_file_is_truncated(tmp_path) -> None:
     harness = _checkpoint_harness(tmp_path)
     write_checkpoint(**harness.kwargs(update=1))

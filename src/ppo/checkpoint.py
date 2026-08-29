@@ -20,7 +20,12 @@ from pathlib import Path
 
 import torch
 
-from checkpointing.io import load_checkpoint, prune_checkpoints, save_checkpoint
+from checkpointing.io import (
+    load_checkpoint,
+    prune_checkpoints,
+    save_checkpoint,
+    save_text_atomic,
+)
 from pokemon_env.checkpoint import (
     ENV_CHECKPOINT_PATTERN,
     build_env_checkpoint_state,
@@ -84,10 +89,18 @@ def write_checkpoint(
     save_checkpoint(
         policy_file,
         build_policy_checkpoint_state(
-            update, global_step, policy, optimizer, scheduler, cache, capture_rng_state()
+            update,
+            global_step,
+            policy,
+            optimizer,
+            scheduler,
+            cache,
+            capture_rng_state(),
         ),
     )
-    save_checkpoint(env_file, build_env_checkpoint_state(update, vec_env, init_state_hash))
+    save_checkpoint(
+        env_file, build_env_checkpoint_state(update, vec_env, init_state_hash)
+    )
 
     manifest = {
         "update": update,
@@ -105,13 +118,16 @@ def write_checkpoint(
         "wandb_run_id": wandb_run_id,
     }
     manifest_file = directory / f"manifest_update{update:06d}.json"
-    # Written LAST. Everything above may exist without this; nothing resumes
-    # from a checkpoint this file does not name.
-    manifest_file.write_text(json.dumps(manifest, indent=2))
+    # Written LAST, and atomically: this file is the commit point this
+    # module's own docstring describes, so a crash mid-write must not leave
+    # a truncated manifest that looks present but fails to parse on resume.
+    save_text_atomic(manifest_file, json.dumps(manifest, indent=2))
 
     for pattern in (POLICY_PATTERN, ENV_PATTERN, MANIFEST_PATTERN):
         prune_checkpoints(directory, config.keep_last_n, pattern)
-    logger.info("checkpoint_written", extra={"update": update, "path": str(manifest_file)})
+    logger.info(
+        "checkpoint_written", extra={"update": update, "path": str(manifest_file)}
+    )
     return manifest_file
 
 
@@ -127,7 +143,21 @@ def resume(
     init_state_hash: str,
 ) -> ResumeResult | None:
     for manifest_file in sorted(directory.glob(MANIFEST_PATTERN), reverse=True):
-        manifest = json.loads(manifest_file.read_text())
+        try:
+            manifest = json.loads(manifest_file.read_text())
+        except json.JSONDecodeError:
+            # A corrupted manifest -- a torn write from before this module
+            # wrote it atomically, a non-POSIX filesystem, a bad copy -- is
+            # this module's own "commit point" docstring's promised fallback,
+            # not yet implemented until now. Treated exactly like an
+            # incomplete file pair below: fall back to the previous update
+            # rather than taking the whole resume down on its own
+            # crash-recovery path.
+            logger.warning(
+                "checkpoint_manifest_corrupted_skipped",
+                extra={"manifest": str(manifest_file)},
+            )
+            continue
         if not _files_intact(directory, manifest):
             logger.warning(
                 "checkpoint_incomplete_skipped", extra={"manifest": str(manifest_file)}
@@ -160,7 +190,10 @@ def resume(
         cache = _restore_cache(policy_state, policy_config)
         logger.info(
             "resumed_from_checkpoint",
-            extra={"update": manifest["update"], "global_step": manifest["global_step"]},
+            extra={
+                "update": manifest["update"],
+                "global_step": manifest["global_step"],
+            },
         )
         return ResumeResult(
             update=int(manifest["update"]),

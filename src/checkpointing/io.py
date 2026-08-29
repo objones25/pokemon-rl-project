@@ -26,6 +26,19 @@ def save_checkpoint(path: str | Path, state: dict) -> None:
     tmp_path.replace(path)  # atomic on POSIX -- no half-written checkpoint on a mid-save crash
 
 
+def save_text_atomic(path: str | Path, text: str) -> None:
+    """Same temp-file-then-replace pattern as `save_checkpoint`, for a
+    caller's own manifest/commit-point file rather than a torch state dict --
+    a plain `path.write_text(text)` can leave a truncated file on a mid-write
+    crash, which is exactly the failure a "commit point" file exists to not
+    have."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    tmp_path.write_text(text)
+    tmp_path.replace(path)
+
+
 def load_checkpoint(path: str | Path) -> dict:
     return torch.load(Path(path), weights_only=True)
 
