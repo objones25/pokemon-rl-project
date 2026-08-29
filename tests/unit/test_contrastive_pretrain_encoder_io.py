@@ -364,10 +364,22 @@ def test_compute_latent_stats_reservoir_sampling_detects_a_channel_invisible_in_
     """Regression test for the sampling bug behind the 9-dead-latent-channel
     incident: a channel that never fires in the first `max_examples` rows
     of an unshuffled stream must not measure std == 0 just because the old
-    take-first-N implementation would never see it fire."""
+    take-first-N implementation would never see it fire.
+
+    Parameters are deliberately NOT a small max_examples against a huge
+    total_rows: with a rare marker (e.g. 3 marker-0 rows out of 300), a
+    uniform reservoir sample of size 3 has ~97% probability of missing all
+    3 by chance (hypergeometric P(k=0) with K=3, N=300, n=3 ~= 0.97) --
+    that would make this test flaky-by-design, failing for almost any
+    seed, not just an unlucky one. Splitting the pool exactly in half
+    (max_examples marker-0 rows out of 2*max_examples total) makes
+    P(the reservoir misses every marker-0 row) astronomically small
+    (~1/C(40,20) ~= 7e-12 at these parameters) regardless of seed, while
+    still satisfying the exact shape this test documents: "first
+    max_examples rows exactly zero, nonzero afterward."""
     dim = 4
-    max_examples = 3
-    total_rows = 300
+    max_examples = 20
+    total_rows = 40
     encoder = _MarkerEncoder(dim)
     rows = [
         {"original": torch.full((1, 144, 160), 0, dtype=torch.uint8)}
