@@ -456,7 +456,7 @@ def run_training(deps: TrainingDeps) -> None:
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             latent_mean, latent_std = compute_latent_stats(
-                compiled_encoder, val_dataset, device
+                compiled_encoder, val_dataset, device, seed=config.seed
             )
             push_frozen_encoder(
                 deps.frozen_encoder_client, encoder, latent_mean, latent_std

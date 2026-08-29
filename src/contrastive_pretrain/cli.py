@@ -160,7 +160,9 @@ def export_frozen_encoder_command(checkpoint_path: Path, config_path: Path) -> N
     encoder.load_state_dict(state["model"])
 
     val_dataset = build_val_dataset(config)
-    latent_mean, latent_std = compute_latent_stats(encoder, val_dataset, device=torch.device("cpu"))
+    latent_mean, latent_std = compute_latent_stats(
+        encoder, val_dataset, device=torch.device("cpu"), seed=config.seed
+    )
 
     HfApi().create_repo(config.frozen_encoder_repo_id, repo_type="model", exist_ok=True, private=True)
     client = RealHfClient(HfApi(), config.frozen_encoder_repo_id, repo_type="model")

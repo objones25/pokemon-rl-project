@@ -309,6 +309,49 @@ def test_run_training_publishes_raw_encoder_weights_not_compiled_wrapper(
     assert not any(key.startswith("_orig_mod.") for key in published_keys)
 
 
+def test_run_training_threads_config_seed_into_compute_latent_stats(
+    tmp_path, monkeypatch, fast_run_training
+) -> None:
+    """PPOConfig.frozen_encoder_revision pins a specific published artifact,
+    but the sample compute_latent_stats draws to produce that artifact must
+    itself be reproducible across a resumed run -- this is the wiring that
+    reproducibility depends on."""
+    monkeypatch.setattr(
+        "contrastive_pretrain.train.build_train_dataset",
+        lambda config: _FakeStreamingDataset(n=8),
+    )
+    monkeypatch.setattr(
+        "contrastive_pretrain.train.build_val_dataset",
+        lambda config: _FakeStreamingDataset(n=8),
+    )
+    captured: dict = {}
+
+    def _fake_compute_latent_stats(encoder, rows, device, *, seed):
+        captured["seed"] = seed
+        return torch.zeros(EMBEDDING_DIM), torch.ones(EMBEDDING_DIM)
+
+    monkeypatch.setattr(
+        "contrastive_pretrain.train.compute_latent_stats", _fake_compute_latent_stats
+    )
+
+    config = TrainingConfig(
+        pretrained=False,
+        batch_size=4,
+        num_workers=0,
+        max_epochs=1,
+        checkpoint_interval_steps=1000,
+        network_volume_checkpoint_dir=str(tmp_path / "checkpoints"),
+        seed=12345,
+    )
+    deps = TrainingDeps(
+        config=config, frozen_encoder_client=_FakeHfClient(), device=torch.device("cpu")
+    )
+
+    run_training(deps)
+
+    assert captured["seed"] == 12345
+
+
 class _EpochRecordingFakeDataset(_FakeStreamingDataset):
     """Same fake stream, but records every epoch run_training announces --
     the only externally observable signal for "which epochs did this run

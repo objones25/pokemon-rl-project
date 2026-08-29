@@ -309,3 +309,52 @@ def test_export_frozen_encoder_command_success_path(tmp_path, monkeypatch) -> No
     # gets pushed, not a fresh/mismatched one.
     for key, value in encoder.state_dict().items():
         assert torch.equal(value, captured["encoder"].state_dict()[key])
+
+
+def test_export_frozen_encoder_command_threads_config_seed_into_compute_latent_stats(
+    tmp_path, monkeypatch
+) -> None:
+    encoder, _ = build_encoder(pretrained=False)
+    checkpoint_path = tmp_path / "checkpoint_step00000001.pt"
+    save_checkpoint(checkpoint_path, {"model": encoder.state_dict()})
+
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("batch_size: 2\nseed: 999\n")
+
+    captured: dict = {}
+
+    monkeypatch.setattr(
+        "contrastive_pretrain.cli.build_val_dataset",
+        lambda _config: [
+            {"original": torch.randint(0, 256, (1, 144, 160), dtype=torch.uint8)}
+            for _ in range(2)
+        ],
+    )
+
+    def _fake_compute_latent_stats(encoder, rows, device, *, seed):
+        captured["seed"] = seed
+        return torch.zeros(2048), torch.ones(2048)
+
+    monkeypatch.setattr(
+        "contrastive_pretrain.cli.compute_latent_stats", _fake_compute_latent_stats
+    )
+    monkeypatch.setattr("contrastive_pretrain.cli.HfApi", lambda: _FakeHfApi())
+    monkeypatch.setattr("contrastive_pretrain.cli.RealHfClient", lambda *_a, **_k: "the-client")
+    monkeypatch.setattr(
+        "contrastive_pretrain.cli.push_frozen_encoder", lambda *_a, **_k: None
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(
+        main,
+        [
+            "export-frozen-encoder",
+            "--checkpoint",
+            str(checkpoint_path),
+            "--config",
+            str(config_path),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["seed"] == 999
