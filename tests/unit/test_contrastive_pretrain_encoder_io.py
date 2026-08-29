@@ -431,14 +431,13 @@ def test_compute_latent_stats_reservoir_sampling_detects_a_channel_invisible_in_
 
     # Documents the bug precisely: the OLD take-first-N implementation this
     # spec replaces would report std == 0 for channel 0, because every one
-    # of the first `max_examples` rows carries marker 0.
-    old_features = []
-    for i, row in enumerate(rows):
-        if i >= max_examples:
-            break
-        frame = row["original"].unsqueeze(0).float()
-        old_features.append(encoder(frame).squeeze(0))
-    old_std = torch.stack(old_features).std(dim=0)
+    # of the first `max_examples` rows carries marker 0. Simulates that old
+    # per-row calling convention directly (not a call into the real, now-
+    # batched compute_latent_stats) via a list comprehension, per this
+    # project's no-for/if/while-in-a-test-body gate.
+    old_std = torch.stack(
+        [encoder(row["original"].unsqueeze(0).float()).squeeze(0) for row in rows[:max_examples]]
+    ).std(dim=0)
     assert old_std[0].item() == 0.0
 
     _, new_std = compute_latent_stats(
@@ -471,6 +470,22 @@ def test_compute_latent_stats_is_deterministic_given_a_seed(
     assert torch.equal(std_a, std_b)
 
 
+class _CountingIterable:
+    """Wraps a plain list so a test can prove every element was pulled from
+    the stream, independent of how many of those elements the encoder ever
+    sees -- reservoir sampling and encoder-forward batching are two
+    separate properties, and this only asserts the former."""
+
+    def __init__(self, items: list[dict]) -> None:
+        self._items = items
+        self.count = 0
+
+    def __iter__(self):
+        for item in self._items:
+            self.count += 1
+            yield item
+
+
 def test_compute_latent_stats_visits_every_row_in_the_stream_even_past_max_examples(
     encoder_and_dim: tuple[nn.Module, int]
 ) -> None:
@@ -478,17 +493,32 @@ def test_compute_latent_stats_visits_every_row_in_the_stream_even_past_max_examp
     produce a uniform sample -- unlike the take-first-N implementation this
     replaces, which stopped at max_examples. Replaces
     test_compute_latent_stats_truncates_at_max_examples, whose assertion
-    (call_count == max_examples) asserted exactly the bug this spec fixes."""
+    (call_count == max_examples) asserted exactly the bug this spec fixes.
+
+    Stream traversal (every row pulled from `rows`) and encoder-forward
+    cost (how many times `encoder.forward` runs) are now two different
+    numbers: compute_latent_stats encodes only the retained reservoir, in
+    one batched forward pass, after the stream traversal finishes -- so
+    `encoder.forward` is called exactly once per compute_latent_stats call
+    regardless of stream length. Verified here with two independent
+    spies: a counting wrapper around the `rows` iterable (proves the
+    stream was fully visited) and a wraps= spy on `encoder.forward`
+    (proves the encoder itself is called once, batched, not once per
+    row)."""
     encoder, dim = encoder_and_dim
     rows = [
         {"original": torch.randint(0, 256, (1, 144, 160), dtype=torch.uint8)}
         for _ in range(10)
     ]
+    counting_rows = _CountingIterable(rows)
 
     with patch.object(encoder, "forward", wraps=encoder.forward) as spy:
-        mean, std = compute_latent_stats(encoder, rows, device=torch.device("cpu"), max_examples=3)
+        mean, std = compute_latent_stats(
+            encoder, counting_rows, device=torch.device("cpu"), max_examples=3
+        )
 
-    assert spy.call_count == 10  # every row visited, not truncated at max_examples
+    assert counting_rows.count == 10  # every row visited, not truncated at max_examples
+    assert spy.call_count == 1  # encoder called once, batched, only on the retained reservoir
     assert mean.shape == (dim,)
     assert std.shape == (dim,)
 

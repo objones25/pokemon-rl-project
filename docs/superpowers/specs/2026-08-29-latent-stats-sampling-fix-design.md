@@ -250,3 +250,28 @@ kind of speculative escape hatch CLAUDE.md's conventions caution against.
   spec targets is fixed either way; an unmeasured `max_examples` only
   means the *size* of the sample, not its representativeness, is still a
   guess.
+- **The full-stream traversal's CPU cost is not eliminated, only the GPU
+  side of it.** A final-review fix pass batched `compute_latent_stats` so
+  only the retained `max_examples` reservoir is ever encoded, in one
+  forward pass, instead of the original reservoir-sampling implementation's
+  one `encoder(frame)` call per row of the (100k+ row) held-out stream —
+  removing the dominant, per-row GPU-forward cost. The stream traversal
+  itself still runs `to_pair_transform`'s augmentation pipeline on every
+  row it visits (`src/contrastive_pretrain/dataset.py` is out of scope for
+  this branch and was not touched), so a full pass's CPU-side cost is
+  unchanged. Separately, if `TrainingConfig.local_cache_dir` is left at its
+  default (`None`), each publish still re-streams the dataset from the Hub
+  rather than reading a local cache — a cost hazard CLAUDE.md's Infra
+  section already names elsewhere in this project.
+- **The currently-published encoder will hard-fail `_validate_latent_stats`
+  on its next re-export.** Per `configs/ppo.yaml`'s comment on
+  `frozen_encoder_revision`, dims 1773 and 1994 of the currently-published
+  `objones25/pokemon-contrastive-encoder` artifact are genuinely constant
+  channels that were fixed by manually flooring their std to 1.0 outside
+  the codebase, not by anything `compute_latent_stats` or
+  `push_frozen_encoder` does. A future re-export of that specific
+  checkpoint through `push_frozen_encoder` will therefore hard-fail on
+  `_validate_latent_stats`, by design, and will need the same manual
+  intervention documented in `configs/ppo.yaml` — or the escape-hatch
+  design decision this spec deliberately leaves open above — not a bug in
+  this fix.

@@ -97,12 +97,18 @@ def _validate_latent_stats(mean: torch.Tensor, std: torch.Tensor) -> None:
     contrastive_pretrain and pokemon_env independent by design, and this
     invariant happening to be identical on both sides of that boundary is
     a coincidence, not a reason to couple the two sub-projects."""
-    if not (torch.isfinite(mean).all() and torch.isfinite(std).all()):
-        raise ValueError("latent_mean/latent_std contain non-finite values; refusing to publish")
-    non_positive = int((std <= 0).sum())
+    for name, tensor in (("latent_mean", mean), ("latent_std", std)):
+        non_finite = torch.nonzero(~torch.isfinite(tensor)).flatten().tolist()
+        if non_finite:
+            raise ValueError(
+                f"{name} has {len(non_finite)} non-finite entries at indices "
+                f"{non_finite[:20]}{' ...' if len(non_finite) > 20 else ''}; refusing to publish"
+            )
+    non_positive = torch.nonzero(std <= 0).flatten().tolist()
     if non_positive:
         raise ValueError(
-            f"latent_std has {non_positive} non-positive entries; refusing to publish. "
+            f"latent_std has {len(non_positive)} non-positive entries at indices "
+            f"{non_positive[:20]}{' ...' if len(non_positive) > 20 else ''}; refusing to publish. "
             "A dead or under-sampled encoder channel would divide by the 1e-6 floor "
             "downstream and feed ~1e6-scale inputs to the policy's value head."
         )
@@ -221,33 +227,43 @@ def compute_latent_stats(
     feature channel entirely if it only fires late in the stream -- this
     produced this project's 2026-08-28 nine-dead-latent-channel incident.
     `seed` makes the sample reproducible across a resumed run, matching
-    how build_train_dataset already threads a seed through."""
+    how build_train_dataset already threads a seed through.
+
+    Only the `max_examples` rows the reservoir ends up retaining are ever
+    encoded, and in a single batched forward pass after the stream
+    traversal finishes -- not one encoder forward per row of the (held-out
+    videos can total 100k+ rows) stream. The reservoir holds raw uint8
+    frame tensors during traversal (cheap), so visiting every row for
+    representativeness no longer multiplies the encoder-forward cost,
+    which is what actually dominates this function's runtime."""
     assert max_examples > 0, f"max_examples must be positive, got {max_examples}"
 
     was_training = encoder.training
     encoder.eval()
     generator = torch.Generator().manual_seed(seed)
     reservoir: list[torch.Tensor] = []
-    with torch.inference_mode():
-        for i, row in enumerate(rows):
-            frame = row["original"].unsqueeze(0).to(device).float()
-            feature = encoder(frame).squeeze(0).cpu()
-            if len(reservoir) < max_examples:
-                reservoir.append(feature)
-            else:
-                j = int(torch.randint(0, i + 1, (1,), generator=generator).item())
-                if j < max_examples:
-                    reservoir[j] = feature
-    encoder.train(was_training)
+    for i, row in enumerate(rows):
+        frame = row["original"]
+        if len(reservoir) < max_examples:
+            reservoir.append(frame)
+        else:
+            j = int(torch.randint(0, i + 1, (1,), generator=generator).item())
+            if j < max_examples:
+                reservoir[j] = frame
 
     if not reservoir:
+        encoder.train(was_training)
         raise ValueError(
             "compute_latent_stats received an empty `rows` stream -- the held-out "
             "video set (config.val_video_ids) produced zero rows to sample from"
         )
 
-    stacked = torch.stack(reservoir)
-    assert stacked.shape[0] <= max_examples, "reservoir grew past its cap"
-    mean, std = stacked.mean(dim=0), stacked.std(dim=0)
-    assert mean.shape == std.shape == (stacked.shape[1],)
+    batch = torch.stack(reservoir).to(device).float()
+    with torch.inference_mode():
+        features = encoder(batch).cpu()
+    encoder.train(was_training)
+
+    assert features.shape[0] <= max_examples, "reservoir grew past its cap"
+    mean, std = features.mean(dim=0), features.std(dim=0)
+    assert mean.shape == std.shape == (features.shape[1],)
     return mean, std
