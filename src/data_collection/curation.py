@@ -9,6 +9,7 @@ exercised manually, per the spec's testing strategy.
 from __future__ import annotations
 
 from pathlib import Path
+from urllib.parse import parse_qs, urlparse
 
 import cv2
 import numpy as np
@@ -21,6 +22,20 @@ def render_preview(frame_gray: np.ndarray, x: int, y: int, w: int, h: int) -> np
     preview = frame_gray.copy()
     cv2.rectangle(preview, (x, y), (x + w, y + h), color=255, thickness=2)
     return preview
+
+
+def extract_video_id(video_url: str) -> str:
+    """The video id is the "v" query parameter on a youtube.com/watch URL, or
+    the final path segment on a youtu.be short URL. Parsed structurally
+    (urlparse + parse_qs), not by splitting on "=": a share link's extra
+    query params (e.g. "&t=30s" for a timestamp) put a SECOND "=" after the
+    real one, and splitting on "=" then taking the last segment silently
+    returns the timestamp fragment instead of the video id."""
+    parsed = urlparse(video_url)
+    query_id = parse_qs(parsed.query).get("v")
+    if query_id:
+        return query_id[0]
+    return parsed.path.rstrip("/").rsplit("/", 1)[-1]
 
 
 _SMOKE_TEST_SEEK_SECONDS = 120
@@ -90,7 +105,7 @@ def run_curation(
             w = int(input_func(f"w [{w}]: ") or w)
             h = int(input_func(f"h [{h}]: ") or h)
 
-    video_id = video_url.rstrip("/").split("=")[-1].split("/")[-1]
+    video_id = extract_video_id(video_url)
 
     source = VideoSource(
         video_id=video_id,
