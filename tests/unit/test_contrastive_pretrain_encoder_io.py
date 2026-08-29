@@ -329,26 +329,6 @@ def test_compute_latent_stats_shapes(encoder_and_dim: tuple[nn.Module, int]) -> 
     assert std.shape == (dim,)
 
 
-def test_compute_latent_stats_truncates_at_max_examples(encoder_and_dim: tuple[nn.Module, int]) -> None:
-    """A shape-only assertion can't distinguish truncation from processing
-    all 10 rows -- mean/std are always shape (dim,) regardless of how many
-    rows got averaged. Spying on encoder.forward (which compute_latent_stats
-    reaches via `encoder(frame)` -> nn.Module.__call__ -> self.forward)
-    gives a genuinely black-box count of rows actually processed."""
-    encoder, dim = encoder_and_dim
-    rows = [
-        {"original": torch.randint(0, 256, (1, 144, 160), dtype=torch.uint8)}
-        for _ in range(10)
-    ]
-
-    with patch.object(encoder, "forward", wraps=encoder.forward) as spy:
-        mean, std = compute_latent_stats(encoder, rows, device=torch.device("cpu"), max_examples=3)
-
-    assert spy.call_count == 3  # truncated at max_examples, not all 10 rows
-    assert mean.shape == (dim,)
-    assert std.shape == (dim,)
-
-
 @pytest.mark.parametrize("was_training", [True, False])
 def test_compute_latent_stats_restores_original_training_mode(
     encoder: nn.Module, was_training: bool
@@ -359,6 +339,117 @@ def test_compute_latent_stats_restores_original_training_mode(
     compute_latent_stats(encoder, rows, device=torch.device("cpu"), max_examples=2)
 
     assert encoder.training is was_training
+
+
+class _MarkerEncoder(nn.Module):
+    """Deterministically maps each row's pixel marker (frame[:, 0, 0, 0])
+    into feature channel 0; every other channel is constant 1.0, so only
+    channel 0's std reflects which rows actually got sampled. Stands in
+    for a real encoder channel that only fires on a small, late-arriving
+    slice of the held-out stream -- exactly the shape of the 9 flagged
+    channels in the 2026-08-28 incident."""
+
+    def __init__(self, dim: int) -> None:
+        super().__init__()
+        self.dim = dim
+
+    def forward(self, frame: torch.Tensor) -> torch.Tensor:
+        marker = frame[:, 0, 0, 0]
+        feature = torch.ones(frame.shape[0], self.dim)
+        feature[:, 0] = marker
+        return feature
+
+
+def test_compute_latent_stats_reservoir_sampling_detects_a_channel_invisible_in_the_first_slice() -> None:
+    """Regression test for the sampling bug behind the 9-dead-latent-channel
+    incident: a channel that never fires in the first `max_examples` rows
+    of an unshuffled stream must not measure std == 0 just because the old
+    take-first-N implementation would never see it fire."""
+    dim = 4
+    max_examples = 3
+    total_rows = 300
+    encoder = _MarkerEncoder(dim)
+    rows = [
+        {"original": torch.full((1, 144, 160), 0, dtype=torch.uint8)}
+        for _ in range(max_examples)
+    ] + [
+        {"original": torch.full((1, 144, 160), 1, dtype=torch.uint8)}
+        for _ in range(total_rows - max_examples)
+    ]
+
+    # Documents the bug precisely: the OLD take-first-N implementation this
+    # spec replaces would report std == 0 for channel 0, because every one
+    # of the first `max_examples` rows carries marker 0.
+    old_features = []
+    for i, row in enumerate(rows):
+        if i >= max_examples:
+            break
+        frame = row["original"].unsqueeze(0).float()
+        old_features.append(encoder(frame).squeeze(0))
+    old_std = torch.stack(old_features).std(dim=0)
+    assert old_std[0].item() == 0.0
+
+    _, new_std = compute_latent_stats(
+        encoder, rows, device=torch.device("cpu"), max_examples=max_examples, seed=0
+    )
+
+    assert new_std[0].item() != 0.0
+
+
+def test_compute_latent_stats_is_deterministic_given_a_seed(
+    encoder_and_dim: tuple[nn.Module, int]
+) -> None:
+    """Needed for resume-reproducibility this project already holds
+    elsewhere (dataset.py's per-row seeding): the same rows, seed, and
+    max_examples must produce bit-identical mean/std across two calls."""
+    encoder, _ = encoder_and_dim
+    rows = [
+        {"original": torch.randint(0, 256, (1, 144, 160), dtype=torch.uint8)}
+        for _ in range(20)
+    ]
+
+    mean_a, std_a = compute_latent_stats(
+        encoder, rows, device=torch.device("cpu"), max_examples=5, seed=42
+    )
+    mean_b, std_b = compute_latent_stats(
+        encoder, rows, device=torch.device("cpu"), max_examples=5, seed=42
+    )
+
+    assert torch.equal(mean_a, mean_b)
+    assert torch.equal(std_a, std_b)
+
+
+def test_compute_latent_stats_visits_every_row_in_the_stream_even_past_max_examples(
+    encoder_and_dim: tuple[nn.Module, int]
+) -> None:
+    """Reservoir sampling (Algorithm R) must visit the FULL rows stream to
+    produce a uniform sample -- unlike the take-first-N implementation this
+    replaces, which stopped at max_examples. Replaces
+    test_compute_latent_stats_truncates_at_max_examples, whose assertion
+    (call_count == max_examples) asserted exactly the bug this spec fixes."""
+    encoder, dim = encoder_and_dim
+    rows = [
+        {"original": torch.randint(0, 256, (1, 144, 160), dtype=torch.uint8)}
+        for _ in range(10)
+    ]
+
+    with patch.object(encoder, "forward", wraps=encoder.forward) as spy:
+        mean, std = compute_latent_stats(encoder, rows, device=torch.device("cpu"), max_examples=3)
+
+    assert spy.call_count == 10  # every row visited, not truncated at max_examples
+    assert mean.shape == (dim,)
+    assert std.shape == (dim,)
+
+
+def test_compute_latent_stats_raises_on_an_empty_rows_stream() -> None:
+    """Negative space: an empty `rows` stream means val_video_ids matched
+    zero rows in the base dataset -- a config/data problem (operating
+    error), not a programmer bug, so this must raise a typed exception
+    with an actionable message rather than crash inside torch.stack([])."""
+    encoder, _ = build_encoder(pretrained=False)
+
+    with pytest.raises(ValueError, match="empty"):
+        compute_latent_stats(encoder, [], device=torch.device("cpu"), max_examples=5)
 
 
 class _FakeRealHfClient:

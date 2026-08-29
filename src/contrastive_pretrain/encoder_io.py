@@ -189,20 +189,47 @@ def compute_latent_stats(
     rows: Iterable[dict],
     device: torch.device,
     max_examples: int = 2000,
+    seed: int = 0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """`rows` yields dicts with an "original" (1, H, W) uint8 tensor --
     the same shape contrastive_pretrain.dataset.to_pair_transform
-    produces. Restores the encoder's original train/eval mode on exit."""
+    produces. Restores the encoder's original train/eval mode on exit.
+
+    Uses reservoir sampling (Algorithm R): visits the FULL `rows` stream
+    once and produces a uniform random sample of size `max_examples`
+    regardless of the stream's order. A take-first-N implementation over
+    an unshuffled stream (build_val_dataset deliberately never shuffles,
+    for compute_val_loss's resume-without-shuffle needs) can miss a real
+    feature channel entirely if it only fires late in the stream -- this
+    produced this project's 2026-08-28 nine-dead-latent-channel incident.
+    `seed` makes the sample reproducible across a resumed run, matching
+    how build_train_dataset already threads a seed through."""
+    assert max_examples > 0, f"max_examples must be positive, got {max_examples}"
+
     was_training = encoder.training
     encoder.eval()
-    features = []
+    generator = torch.Generator().manual_seed(seed)
+    reservoir: list[torch.Tensor] = []
     with torch.inference_mode():
         for i, row in enumerate(rows):
-            if i >= max_examples:
-                break
             frame = row["original"].unsqueeze(0).to(device).float()
-            features.append(encoder(frame).squeeze(0).cpu())
+            feature = encoder(frame).squeeze(0).cpu()
+            if len(reservoir) < max_examples:
+                reservoir.append(feature)
+            else:
+                j = int(torch.randint(0, i + 1, (1,), generator=generator).item())
+                if j < max_examples:
+                    reservoir[j] = feature
     encoder.train(was_training)
 
-    stacked = torch.stack(features)
-    return stacked.mean(dim=0), stacked.std(dim=0)
+    if not reservoir:
+        raise ValueError(
+            "compute_latent_stats received an empty `rows` stream -- the held-out "
+            "video set (config.val_video_ids) produced zero rows to sample from"
+        )
+
+    stacked = torch.stack(reservoir)
+    assert stacked.shape[0] <= max_examples, "reservoir grew past its cap"
+    mean, std = stacked.mean(dim=0), stacked.std(dim=0)
+    assert mean.shape == std.shape == (stacked.shape[1],)
+    return mean, std
