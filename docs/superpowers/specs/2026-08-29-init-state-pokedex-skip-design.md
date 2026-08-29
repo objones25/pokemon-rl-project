@@ -104,31 +104,61 @@ chosen — only `party_size`, `badges`, `oak_parcel`, `oak_pokedex` are
 frozen-contract-relevant (aux vector slots 0, 7-12, 13 read party stats
 generically; nothing keys on species). But the choice is not free of
 consequence for *training dynamics*, which is a real reason to make it
-deliberately rather than by whichever ball is nearest:
+deliberately rather than by whichever ball is nearest.
 
-- **Squirtle** learns Bubble at level 8 and Water Gun at level 13, both
-  super-effective against Brock's Rock/Ground Onix and Geodude — the first
-  gym, and the first badge event reward. Squirtle vs. Misty's Water-type gym
-  is a neutral matchup rather than a disadvantageous one. This is the
-  strongest early-game matchup profile of the three starters and is Whidden's
-  own choice in `has_pokedex.state`, so picking it also keeps this project's
-  starting point identical to the reference implementation's, not just
-  structurally equivalent to it.
-- **Bulbasaur** is a reasonable second choice — strong against Brock directly
-  (Grass/Poison resists neither of his types but Vine Whip still does
-  reasonable neutral damage, and his own moves are weak against Bulbasaur) —
-  but Grass/Poison is weak to the Bug-type attacks Viridian Forest's wild
-  Pokémon use, which sits directly on the path this project's extended script
-  now walks through twice (once to the Mart, once back). Its signature move,
-  Leech Seed, is a genuinely strong tool (chip damage plus healing) but is a
-  multi-turn stall strategy — set it up, then out-stall the opponent — that
-  asks for exactly the kind of turn-sequencing reasoning a policy with no
-  forward model and no long-horizon credit assignment is least likely to
-  discover on its own; it is more likely to sit unused than to be learned.
-- **Charmander** is weak to both Brock (Rock/Ground resists Fire, and Onix's
-  Rock-type moves hit Fire hard) and Misty (Water beats Fire directly) — the
-  two gyms right after this project's extended starting point — and is not
-  considered further here.
+Every claim below is read directly from `pret/pokered` — Brock's and Misty's
+actual trainer data (`data/trainers/parties.asm`), confirmation that neither
+gets a custom moveset (`data/trainers/special_moves.asm`, which lists exactly
+which gym leaders get a hand-picked move and does not mention Brock or
+Misty), each Pokémon's level-up learnset (`data/pokemon/evos_moves.asm`), and
+the real Gen 1 type-effectiveness table (`data/types/type_matchups.asm`) —
+not recalled from memory.
+
+**Brock's team is Geodude (level 12) and Onix (level 14), and neither one
+knows a Rock-type move.** Geodude's learnset doesn't add Rock Throw until
+level 16; Onix's not until level 19. At the levels Brock actually fields
+them, their only damaging move is Tackle (Normal-type, resisted or boosted by
+nothing relevant here). This means beating Brock is entirely about your own
+offense, not surviving his — and by the type chart, **Water and Grass are
+equally strong against him**: Water is `SUPER_EFFECTIVE` against both Rock
+and Ground, and separately, so is Grass — a same-type-effective attack from
+either starter hits Geodude/Onix's Rock/Ground typing twice over. Typing
+alone does not separate Squirtle from Bulbasaur at this gym.
+
+What does separate them is **when each starter actually gets that move**:
+Squirtle learns Bubble (its first Water-type damaging move) at level 8;
+Bulbasaur doesn't learn Vine Whip (its first Grass-type damaging move) until
+level 13. Bulbasaur's own earliest tool, Leech Seed at level 7, deals no
+direct damage at all — it's a multi-turn drain-and-stall move, a genuinely
+strong tool in skilled play but one that asks for exactly the kind of
+turn-sequencing reasoning a policy with no forward model and no long-horizon
+credit assignment is least likely to discover; a policy that never learns to
+use it is just fighting with Tackle for longer. Squirtle's kit is simpler
+throughout: Tackle, then Bubble, then Water Gun (level 15) — always "use your
+strongest single-turn damage move," never a setup move to sequence.
+
+**Misty's team is Staryu (level 18) and Starmie (level 21)**, also with no
+custom moveset, and their only damaging moves are Tackle and Water Gun.
+Squirtle's Water attacks are resisted by her Water-typed Pokémon, and her
+Water Gun is equally resisted by Squirtle right back (`WATER` vs `WATER` is
+`NOT_VERY_EFFECTIVE` in both directions) — a mutual wash, not the "neutral
+matchup" an earlier draft of this spec claimed. Squirtle is not in danger
+here, but it has no offensive edge either. Bulbasaur is actually better
+positioned at this specific gym — Grass is `SUPER_EFFECTIVE` against her
+Water team. Charmander is unambiguously the worst choice against her: Fire is
+resisted by her team, and her Water Gun hits Charmander `SUPER_EFFECTIVE` in
+return (`WATER` vs `FIRE`) — the only pairing among the three starters that
+is bad in both directions at once.
+
+Given Bulbasaur is genuinely competitive on typing (as strong as Squirtle
+against Brock, stronger against Misty), the case for Squirtle rests on two
+things this project actually cares about, not on a typing advantage that
+does not hold up: it reaches its first hard-hitting move four levels sooner
+(8 vs. 13), and its entire early kit never requires the multi-turn setup
+reasoning Leech Seed calls for. It is also Whidden's own choice in
+`has_pokedex.state`, so picking it keeps this project's starting point
+identical to the reference implementation's, not just structurally
+equivalent to it.
 
 The script should walk to and select the Squirtle ball specifically (per
 `pret/pokered`'s `scripts/OaksLab.asm`, the three balls sit at fixed,
