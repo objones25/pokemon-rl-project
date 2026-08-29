@@ -4,6 +4,13 @@ Addresses and decoding are read from PWhiddy/PokemonRedExperiments' verified
 readers, not inferred from constant names. Source of truth:
 https://datacrystal.romhacking.net/wiki/Pokémon_Red/Blue:RAM_map
 
+oak_parcel_set/oak_pokedex_set additionally match
+baselines/red_gym_env.py:509-510 -- v1, inside a commented-out block (opens
+line 503, closes line 523) and absent from v2/red_gym_env_v2.py entirely, so
+this is not a v2-vetted address the way the rest of this module's readers
+are. Confirmed directly against the real ROM this session, not merely a
+reading of that dead code.
+
 Everything here is a pure function over the Emulator Protocol's read_memory,
 so all of it is testable against a synthetic bytearray."""
 
@@ -26,6 +33,10 @@ EVENT_FLAGS_END = 0xD87E  # exclusive -- 311 bytes = 2488 flags
 EVENT_FLAG_COUNT = (EVENT_FLAGS_END - EVENT_FLAGS_START) * 8
 MUSEUM_TICKET_ADDR = 0xD754
 MUSEUM_TICKET_BIT = 0
+OAK_PARCEL_ADDR = 0xD74E
+OAK_PARCEL_BIT = 1
+OAK_POKEDEX_ADDR = 0xD74B
+OAK_POKEDEX_BIT = 5
 
 MAP_ID_ADDR = 0xD35E
 X_POS_ADDR = 0xD362
@@ -103,6 +114,14 @@ def event_flag_count(mem: Emulator) -> int:
 
 def museum_ticket_set(mem: Emulator) -> bool:
     return read_bit(mem, MUSEUM_TICKET_ADDR, MUSEUM_TICKET_BIT)
+
+
+def oak_parcel_set(mem: Emulator) -> bool:
+    return read_bit(mem, OAK_PARCEL_ADDR, OAK_PARCEL_BIT)
+
+
+def oak_pokedex_set(mem: Emulator) -> bool:
+    return read_bit(mem, OAK_POKEDEX_ADDR, OAK_POKEDEX_BIT)
 
 
 def game_coords(mem: Emulator) -> tuple[int, int, int]:
