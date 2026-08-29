@@ -9,7 +9,10 @@ baselines/red_gym_env.py:509-510 -- v1, inside a commented-out block (opens
 line 503, closes line 523) and absent from v2/red_gym_env_v2.py entirely, so
 this is not a v2-vetted address the way the rest of this module's readers
 are. Confirmed directly against the real ROM this session, not merely a
-reading of that dead code.
+reading of that dead code. Both have no production caller as of this
+writing -- they exist to verify `init_state.py`'s generated state during
+authoring; `EVENT_FLAG_COUNT`'s aggregate reader already covers both flags
+for reward purposes.
 
 Everything here is a pure function over the Emulator Protocol's read_memory,
 so all of it is testable against a synthetic bytearray."""

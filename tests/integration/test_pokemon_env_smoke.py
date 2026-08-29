@@ -87,6 +87,19 @@ def test_generated_init_state_reaches_oaks_lab_with_the_pokedex() -> None:
     are reproducible run to run on the same ROM revision, the same property
     this test's RAM assertions already rely on.
 
+    `generate_init_state` ticks with `render=False` throughout (correct for
+    production -- headless PPO envs never draw), so the screen buffer is
+    never actually rendered during the script itself. The one render-only
+    tick below, strictly after `generate_init_state` returns, is what makes
+    `screen_frame()` read real pixels instead of the buffer's initial
+    all-zero contents -- an earlier version of this assertion skipped that
+    tick and its pinned hash turned out to be the SHA256 of a blank
+    144x160 zero buffer, so it would have passed even if the screen were
+    still showing a dialogue box, or nothing had run at all. The extra tick
+    is placed after RAM is read and after `generate_init_state` returns, so
+    it cannot affect the script's semantics or (were this test ever changed
+    to save one) what gets written to `artifacts/init.state`.
+
     This test is deliberately ROM-revision sensitive, same as its
     predecessor: a different ROM (a different release, a hacked ROM, Blue
     instead of Red) would produce different RAM values and a different
@@ -103,11 +116,14 @@ def test_generated_init_state_reaches_oaks_lab_with_the_pokedex() -> None:
     badges = ram.badge_count(emulator)
     oak_parcel = ram.oak_parcel_set(emulator)
     oak_pokedex = ram.oak_pokedex_set(emulator)
+    emulator.tick(1, True)  # generate_init_state ticks render=False throughout (correct
+    # for production), so the screen buffer is untouched until we explicitly ask for one
+    # rendered frame here -- matches scratch/drive_init_state.py's own render-fix ordering
     frame_hash = hashlib.sha256(emulator.screen_frame().tobytes()).hexdigest()
     emulator.close()
 
     assert (party_size, badges, oak_parcel, oak_pokedex) == (1, 0, True, True)
-    assert frame_hash == "46e2096b907947368d310929303a04005b39c4a278e3a7de2225c355b4522694"
+    assert frame_hash == "373695a8ec0af8200f032992342e7f1f658b98ffa6dd9739c5caff270bb50b73"
 
 
 _needs_init_state = pytest.mark.skipif(
