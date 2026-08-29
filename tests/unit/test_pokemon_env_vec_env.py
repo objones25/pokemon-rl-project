@@ -6,7 +6,42 @@ from pokemon_env.config import EnvConfig
 from pokemon_env.session import EnvSession
 from pokemon_env.vec_env import InProcessBackend, VecPokemonEnv
 
-from .fakes import FakeBackend, FakeEmulator
+from .fakes import FakeBackend, FakeEmulator, RecordingBackend
+
+
+def test_inprocess_backend_recv_returns_the_result_from_send_step() -> None:
+    config = EnvConfig(n_envs=1, max_steps=2)
+    backend = InProcessBackend(EnvSession(FakeEmulator(), config, init_state=b"init"))
+    backend.send_reset()
+    backend.recv()
+
+    backend.send_step(0)
+    result = backend.recv()
+
+    assert (result.episode_id, result.done) == (0, False)
+
+
+def test_inprocess_backend_recv_without_a_prior_send_raises() -> None:
+    """The two-phase split makes call order a real invariant for the first
+    time -- a stray recv() with nothing dispatched must be caught here, not
+    return a stale or default result."""
+    config = EnvConfig(n_envs=1, max_steps=2)
+    backend = InProcessBackend(EnvSession(FakeEmulator(), config, init_state=b"init"))
+
+    with pytest.raises(RuntimeError, match="no matching send_step/send_reset"):
+        backend.recv()
+
+
+def test_inprocess_backend_send_step_while_a_previous_dispatch_is_unread_raises() -> None:
+    """Guards the exact bug class this refactor introduces: a future edit to
+    VecPokemonEnv that dispatches twice before recv() would otherwise
+    silently overwrite which command recv() answers for."""
+    config = EnvConfig(n_envs=1, max_steps=2)
+    backend = InProcessBackend(EnvSession(FakeEmulator(), config, init_state=b"init"))
+    backend.send_reset()
+
+    with pytest.raises(RuntimeError, match="previous dispatch has not been recv"):
+        backend.send_step(0)
 
 
 @pytest.fixture
@@ -210,3 +245,56 @@ def test_load_state_dict_rejects_a_pre_task_2_checkpoint_missing_episode_lengths
 
     with pytest.raises(ValueError, match="schema_version=1"):
         vec_env.load_state_dict(state)
+
+
+def test_step_dispatches_every_send_before_any_recv() -> None:
+    """The property this whole fix exists to establish: VecPokemonEnv.step()
+    must not block on backend i's reply before backend i+1 has even been
+    told what to do -- that's the sequential-dispatch bug the spec measures
+    at ~64x on 64 real subprocess workers. This test can't see wall-clock
+    time (RecordingBackend does no real work), but call order is exactly
+    what a return to the old `backend.step()`-per-iteration shape would
+    break, and this catches that regardless of timing."""
+    call_log: list[str] = []
+    backends = [RecordingBackend(i, call_log) for i in range(3)]
+    vec_env = VecPokemonEnv(backends, EnvConfig(n_envs=3))
+    vec_env.reset()
+    call_log.clear()
+
+    vec_env.step(np.zeros(3, dtype=np.int64))
+
+    assert call_log == ["send:0", "send:1", "send:2", "recv:0", "recv:1", "recv:2"]
+
+
+def test_reset_dispatches_every_send_before_any_recv() -> None:
+    call_log: list[str] = []
+    backends = [RecordingBackend(i, call_log) for i in range(3)]
+    vec_env = VecPokemonEnv(backends, EnvConfig(n_envs=3))
+
+    vec_env.reset()
+
+    assert call_log == ["send:0", "send:1", "send:2", "recv:0", "recv:1", "recv:2"]
+
+
+def test_step_still_recvs_from_every_backend_when_one_backends_send_step_is_swallowed() -> None:
+    """Mirrors SubprocessBackend.send_step(), which swallows a
+    BrokenPipeError/OSError from conn.send() instead of raising -- the
+    failure only ever surfaces later, from recv(). Backend 1 here logs its
+    send_step call (proving VecPokemonEnv actually reached it) but produces
+    no real dispatch, standing in for that swallowed failure. If
+    VecPokemonEnv's dispatch loop stopped after backend 1 instead of
+    sending to every backend before recv'ing from any of them, the later
+    send:2/recv:* entries would never make it into the log."""
+    call_log: list[str] = []
+    backends = [
+        RecordingBackend(0, call_log),
+        RecordingBackend(1, call_log, fails_send_step=True),
+        RecordingBackend(2, call_log),
+    ]
+    vec_env = VecPokemonEnv(backends, EnvConfig(n_envs=3))
+    vec_env.reset()
+    call_log.clear()
+
+    vec_env.step(np.zeros(3, dtype=np.int64))
+
+    assert call_log == ["send:0", "send:1", "send:2", "recv:0", "recv:1", "recv:2"]

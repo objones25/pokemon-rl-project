@@ -198,7 +198,13 @@ def spawn_real_worker(
 
 class SubprocessBackend:
     """Parent-side handle on one worker. Respawns it from init.state on death
-    or timeout rather than taking the whole run down."""
+    or timeout rather than taking the whole run down.
+
+    step/reset are two-phase: send_step()/send_reset() dispatch the command
+    and return immediately, catching only a failure of the send itself.
+    recv() blocks for the reply. VecPokemonEnv relies on this split to fire
+    every backend's send before waiting on any reply -- see
+    docs/superpowers/specs/2026-08-29-vec-env-step-concurrency-design.md."""
 
     def __init__(
         self,
@@ -225,6 +231,12 @@ class SubprocessBackend:
         # offset keeps the parent-visible sequence climbing across respawns.
         self._episode_offset = 0
         self._last_episode_id = -1
+        # Two-phase dispatch state. None means "no send is outstanding";
+        # recv() clears it back to None as soon as it reads it, so a stray
+        # second recv() (or a recv() with no matching send) is caught here
+        # rather than silently blocking on a pipe read that was never primed.
+        self._pending_is_step: bool | None = None
+        self._send_failed = False
         self._spawn()
 
     @property
@@ -237,6 +249,10 @@ class SubprocessBackend:
         )
 
     def _call(self, command: Command, argument: object = None) -> dict:
+        """Synchronous send+recv, for commands that are never dispatched
+        two-phase (STATE_DICT, LOAD_STATE, STATS -- once per PPO update, not
+        once per step) and for the internal reset used to recover after a
+        respawn."""
         self._conn.send((command, argument))
         if not self._conn.poll(self._config.worker_timeout_s):
             raise TimeoutError(
@@ -255,10 +271,11 @@ class SubprocessBackend:
         coord set, so restoring it against a current-time accumulator would
         silently re-earn rewards for progress already banked.
 
-        Ends in `_reset_once`, deliberately NOT `reset`. `reset` recovers by
-        calling back into here, so recovering twice would recurse forever on a
-        worker that dies on every spawn. An unattended run that spins silently
-        is worse than one that dies with a clear error."""
+        Ends in `_reset_once`, deliberately NOT a two-phase send_reset()+
+        recv(): `_reset_once` recovers by calling back into here, so
+        recovering twice would recurse forever on a worker that dies on
+        every spawn. An unattended run that spins silently is worse than one
+        that dies with a clear error."""
         self._respawns += 1
         self._episode_offset = self._last_episode_id + 1
         if self._process.is_alive():
@@ -295,22 +312,63 @@ class SubprocessBackend:
         recurse."""
         return self._to_result(self._call(Command.RESET))
 
-    def reset(self) -> StepResult:
-        """VecPokemonEnv routes every autoreset through here, so a worker that
-        dies on an episode boundary must be recovered here too -- otherwise it
-        propagates out of VecPokemonEnv.step() and kills the run."""
+    def _dispatch(self, command: Command, argument: object, is_step: bool, label: str) -> None:
+        if self._pending_is_step is not None:
+            raise RuntimeError(
+                f"env {self._index}: {label} called while a previous dispatch has "
+                "not been recv()'d yet -- sends and recvs must alternate one-for-one"
+            )
+        self._pending_is_step = is_step
         try:
-            return self._reset_once()
-        except (TimeoutError, RuntimeError, EOFError, BrokenPipeError):
-            return self._restart()
+            self._conn.send((command, argument))
+            self._send_failed = False
+        except (BrokenPipeError, OSError):
+            # The worker is already dead. Swallowed here, not raised: this
+            # runs inside VecPokemonEnv's dispatch loop, which has no
+            # try/except, so raising would abort dispatch to every backend
+            # after this one before recv() is even called on the ones that
+            # already sent fine. recv() surfaces it instead, on the same
+            # _restart() path a recv()-side timeout already takes.
+            self._send_failed = True
 
-    def step(self, action: int) -> StepResult:
+    def send_reset(self) -> None:
+        """VecPokemonEnv routes every autoreset through here, so a worker that
+        dies on an episode boundary must be recovered via recv() below --
+        otherwise it propagates out of VecPokemonEnv.step() and kills the
+        run."""
+        self._dispatch(Command.RESET, None, is_step=False, label="send_reset")
+
+    def send_step(self, action: int) -> None:
+        self._dispatch(Command.STEP, action, is_step=True, label="send_step")
+
+    def recv(self) -> StepResult:
+        if self._pending_is_step is None:
+            raise RuntimeError(
+                f"env {self._index}: recv() called with no matching "
+                "send_step/send_reset"
+            )
+        is_step = self._pending_is_step
+        self._pending_is_step = None
+        command_name = "STEP" if is_step else "RESET"
         try:
-            payload = self._call(Command.STEP, action)
-        except (TimeoutError, RuntimeError, EOFError, BrokenPipeError):
+            if self._send_failed:
+                raise BrokenPipeError(
+                    f"env {self._index}: send failed before the worker could reply"
+                )
+            if not self._conn.poll(self._config.worker_timeout_s):
+                raise TimeoutError(
+                    f"env {self._index} did not answer {command_name} within "
+                    f"{self._config.worker_timeout_s}s; a 24-frame tick takes about "
+                    "1ms, so this is a hang, not slowness"
+                )
+            status, payload = self._conn.recv()
+        except (TimeoutError, EOFError, BrokenPipeError):
             restarted = self._restart()
-            # Force the episode boundary so the trainer resets its KV cache for
-            # this env; a respawned worker shares no history with the old one.
+            if not is_step:
+                return restarted
+            # Force the episode boundary so the trainer resets its KV cache
+            # for this env; a respawned worker shares no history with the
+            # old one.
             return StepResult(
                 frame=restarted.frame,
                 aux=restarted.aux,
@@ -320,6 +378,14 @@ class SubprocessBackend:
                 components={},
                 clipped=False,
             )
+        if status == "error":
+            # A software bug in this project's own reward/observation code,
+            # not a process failure -- the worker is still alive and
+            # replied. Raised here, outside the except block above, so it
+            # can never be caught by the respawn path and silently
+            # discarded as an elevated respawn count. See "Adjacent bug
+            # found during review" in the spec.
+            raise RuntimeError(f"env {self._index} worker failed: {payload}")
         return self._to_result(payload)
 
     def state_dict(self) -> dict:

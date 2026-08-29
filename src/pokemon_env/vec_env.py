@@ -32,8 +32,9 @@ VEC_ENV_SCHEMA_VERSION = 2
 
 
 class EnvBackend(Protocol):
-    def reset(self) -> StepResult: ...
-    def step(self, action: int) -> StepResult: ...
+    def send_reset(self) -> None: ...
+    def send_step(self, action: int) -> None: ...
+    def recv(self) -> StepResult: ...
     def state_dict(self) -> dict: ...
     def load_state_dict(self, state: dict) -> None: ...
     def stats(self) -> dict: ...
@@ -43,16 +44,43 @@ class EnvBackend(Protocol):
 class InProcessBackend:
     """Drives an EnvSession directly. Exists so vec_env logic -- autoreset
     ordering, episode_id monotonicity, batching -- is testable without
-    spawning processes."""
+    spawning processes.
+
+    Has no concurrency to exploit -- it drives one EnvSession in the parent
+    process -- so send_step/send_reset just run the work eagerly and stash
+    the StepResult; recv() returns and clears it. The stash also enforces
+    the send/recv call-order invariant SubprocessBackend depends on for real
+    concurrency: a second send before a recv, or a recv with nothing
+    pending, is a programmer error in the dispatch loop, not something that
+    should silently succeed with a stale value."""
 
     def __init__(self, session: EnvSession) -> None:
         self._session = session
+        self._pending: StepResult | None = None
 
-    def reset(self) -> StepResult:
-        return self._session.reset()
+    def _dispatch(self, result: StepResult) -> None:
+        if self._pending is not None:
+            raise RuntimeError(
+                "InProcessBackend: send_step/send_reset called while a previous "
+                "dispatch has not been recv()'d yet -- sends and recvs must "
+                "alternate one-for-one"
+            )
+        self._pending = result
 
-    def step(self, action: int) -> StepResult:
-        return self._session.step(action)
+    def send_reset(self) -> None:
+        self._dispatch(self._session.reset())
+
+    def send_step(self, action: int) -> None:
+        self._dispatch(self._session.step(action))
+
+    def recv(self) -> StepResult:
+        if self._pending is None:
+            raise RuntimeError(
+                "InProcessBackend: recv() called with no matching "
+                "send_step/send_reset"
+            )
+        result, self._pending = self._pending, None
+        return result
 
     def state_dict(self) -> dict:
         """Same envelope as SubprocessBackend's, so a checkpoint is portable
@@ -122,19 +150,23 @@ class VecPokemonEnv:
 
     def reset(self) -> VecStep:
         self._needs_reset[:] = False
-        return self._collect([backend.reset() for backend in self._backends])
+        for backend in self._backends:
+            backend.send_reset()
+        return self._collect([backend.recv() for backend in self._backends])
 
     def step(self, actions: np.ndarray) -> VecStep:
         if len(actions) != self._config.n_envs:
             raise ValueError(
                 f"actions has length {len(actions)}, expected {self._config.n_envs}"
             )
-        results = [
-            backend.reset() if needs_reset else backend.step(int(action))
-            for backend, action, needs_reset in zip(
-                self._backends, actions, self._needs_reset, strict=True
-            )
-        ]
+        for backend, action, needs_reset in zip(
+            self._backends, actions, self._needs_reset, strict=True
+        ):
+            if needs_reset:
+                backend.send_reset()
+            else:
+                backend.send_step(int(action))
+        results = [backend.recv() for backend in self._backends]
         self._needs_reset = np.array([result.done for result in results], dtype=bool)
         return self._collect(results)
 

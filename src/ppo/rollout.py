@@ -19,15 +19,18 @@ episode_start_action is one past the real action range -- it is an embedding
 index for the policy's context input, never a legal env action. It reaches
 vec_env.step() as `state.prev_action` in two situations, and only one of them
 is safe: (a) immediately after a done, when VecPokemonEnv routes that env
-through backend.reset() and never looks at the action value at all, and
-(b) on a fresh RolloutState's first iteration (every cold start and every
-resume constructs one with prev_action=episode_start_action), when the env is
-NOT pending a reset and the value goes straight into EnvSession.step(), which
-raises. The real backend then treats that exception as a worker failure and
-respawns from init.state -- silently discarding whatever game position a
-resume just restored. `_env_action` substitutes a real action for the literal
-step() call in both cases; the context handed to policy.step stays
-`state.prev_action`, sentinel and all, exactly as before."""
+through backend.send_reset() + recv() and never looks at the action value at
+all, and (b) on a fresh RolloutState's first iteration (every cold start and
+every resume constructs one with prev_action=episode_start_action), when the
+env is NOT pending a reset and the value goes straight into
+backend.send_step(), which dispatches to the worker's EnvSession.step() and
+raises there. The worker reports that as an explicit ("error", ...) reply
+rather than dying outright, and SubprocessBackend.recv() re-raises it as a
+RuntimeError -- taking the whole run down mid-resume with a traceback,
+instead of the silent respawn from init.state that used to discard whatever
+game position a resume just restored. `_env_action` substitutes a real action
+for the literal step() call in both cases; the context handed to policy.step
+stays `state.prev_action`, sentinel and all, exactly as before."""
 
 from __future__ import annotations
 

@@ -110,14 +110,22 @@ def test_handle_command_rejects_an_unknown_command(frame_buffer, session) -> Non
 
 
 class FakeConnection:
-    """Stands in for a multiprocessing Pipe end. `poll_results` and
-    `responses` are consumed in order, so a test scripts the exact sequence
-    the backend will observe."""
+    """Stands in for a multiprocessing Pipe end. `poll_results`, `responses`,
+    and `send_side_effects` are each consumed in order, so a test scripts the
+    exact sequence the backend will observe."""
 
-    def __init__(self, responses: list, poll_results: list[bool] | None = None) -> None:
+    def __init__(
+        self,
+        responses: list,
+        poll_results: list[bool] | None = None,
+        send_side_effects: list[BaseException | None] | None = None,
+    ) -> None:
         self.sent: list = []
         self.responses = list(responses)
         self.poll_results = list(poll_results) if poll_results is not None else []
+        self.send_side_effects = (
+            list(send_side_effects) if send_side_effects is not None else []
+        )
         self.closed = False
         # Recorded so a test can assert the configured timeout actually reaches
         # poll(). The failure this catches is poll(None), which blocks forever:
@@ -126,6 +134,10 @@ class FakeConnection:
         self.poll_timeouts: list[float | None] = []
 
     def send(self, obj: object) -> None:
+        if self.send_side_effects:
+            effect = self.send_side_effects.pop(0)
+            if effect is not None:
+                raise effect
         self.sent.append(obj)
 
     def poll(self, timeout: float | None = None) -> bool:
@@ -171,10 +183,10 @@ def _ok(index: int = 0) -> tuple:
     )
 
 
-def _backend(frame_buffer, responses, poll_results=None, index=0):
+def _backend(frame_buffer, responses, poll_results=None, index=0, send_side_effects=None):
     """Helper, not a test: a SubprocessBackend wired to scripted fakes.
     Returns (backend, connection, process) so tests can assert on all three."""
-    connection = FakeConnection(responses, poll_results)
+    connection = FakeConnection(responses, poll_results, send_side_effects)
     process = FakeProcess()
 
     def fake_spawn(shm_name, idx, config, rom_path, init_state):
@@ -194,9 +206,11 @@ def _backend(frame_buffer, responses, poll_results=None, index=0):
 
 def test_step_sends_the_step_command_with_its_action(frame_buffer) -> None:
     backend, connection, _ = _backend(frame_buffer, [_ok(), _ok()])
-    backend.reset()
+    backend.send_reset()
+    backend.recv()
 
-    backend.step(3)
+    backend.send_step(3)
+    backend.recv()
 
     assert connection.sent[-1] == (Command.STEP, 3)
 
@@ -231,9 +245,11 @@ def test_step_respawns_and_forces_done_when_the_worker_times_out(
     backend, _, _ = _backend(
         frame_buffer, [_ok(), _ok()], poll_results=[True, False, True]
     )
-    backend.reset()
+    backend.send_reset()
+    backend.recv()
 
-    result = backend.step(0)
+    backend.send_step(0)
+    result = backend.recv()
 
     assert (result.done, result.reward) == (True, 0.0)
 
@@ -244,8 +260,10 @@ def test_a_respawn_increments_the_respawn_counter(frame_buffer) -> None:
     backend, _, _ = _backend(
         frame_buffer, [_ok(), _ok()], poll_results=[True, False, True]
     )
-    backend.reset()
-    backend.step(0)
+    backend.send_reset()
+    backend.recv()
+    backend.send_step(0)
+    backend.recv()
 
     assert backend.respawns == 1
 
@@ -256,8 +274,10 @@ def test_a_respawn_terminates_a_process_that_is_still_alive(frame_buffer) -> Non
     backend, _, process = _backend(
         frame_buffer, [_ok(), _ok()], poll_results=[True, False, True]
     )
-    backend.reset()
-    backend.step(0)
+    backend.send_reset()
+    backend.recv()
+    backend.send_step(0)
+    backend.recv()
 
     assert process.terminated is True
 
@@ -293,7 +313,8 @@ def test_to_result_takes_its_frame_from_the_shared_slot(frame_buffer) -> None:
     frame_buffer.array[0] = 77
     backend, _, _ = _backend(frame_buffer, [_ok()])
 
-    result = backend.reset()
+    backend.send_reset()
+    result = backend.recv()
 
     assert int(result.frame[0, 0]) == 77
 
@@ -374,33 +395,108 @@ def test_call_passes_the_configured_timeout_to_poll(frame_buffer) -> None:
     strictly worse than crashing, because nothing alerts."""
     backend, connection, _ = _backend(frame_buffer, [_ok()])
 
-    backend.reset()
+    backend.send_reset()
+    backend.recv()
 
     assert connection.poll_timeouts == [pytest.approx(60.0)]
 
 
 def test_reset_respawns_instead_of_propagating_a_dead_worker(frame_buffer) -> None:
-    """VecPokemonEnv routes every autoreset through backend.reset(), so a
-    worker that dies on an episode boundary must be recovered here. Before
-    this guard existed the exception escaped VecPokemonEnv.step() and killed
-    the whole run -- exactly what the respawn logic exists to prevent."""
+    """VecPokemonEnv routes every autoreset through backend.send_reset()+
+    recv(), so a worker that dies on an episode boundary must be recovered
+    here. Before this guard existed the exception escaped VecPokemonEnv.step()
+    and killed the whole run -- exactly what the respawn logic exists to
+    prevent."""
     backend, _, _ = _backend(frame_buffer, [_ok(), _ok()], poll_results=[False, True])
 
-    result = backend.reset()
+    backend.send_reset()
+    result = backend.recv()
 
     assert (backend.respawns, result.done) == (1, False)
 
 
 def test_reset_recovery_does_not_recurse_when_every_spawn_dies(frame_buffer) -> None:
-    """_restart ends in the bare _reset_once, not reset, so a worker that dies
-    on every spawn raises loudly instead of looping forever. A silent infinite
-    retry is the worse failure: the run neither progresses nor reports."""
+    """_restart ends in the bare _reset_once, not another two-phase dispatch,
+    so a worker that dies on every spawn raises loudly instead of looping
+    forever. A silent infinite retry is the worse failure: the run neither
+    progresses nor reports."""
     backend, _, _ = _backend(
         frame_buffer, [_ok(), _ok()], poll_results=[False, False, False]
     )
 
+    backend.send_reset()
     with pytest.raises(TimeoutError, match="did not answer"):
-        backend.reset()
+        backend.recv()
+
+
+def test_send_step_swallows_a_broken_pipe_and_recv_respawns(frame_buffer) -> None:
+    """Two-phase dispatch means send_step cannot propagate a broken pipe out
+    of VecPokemonEnv's dispatch loop -- doing so would abort every backend
+    after it before recv() is even called on the ones that already sent
+    fine. The failure must be swallowed here and surfaced from recv()
+    instead, on the same _restart() path a recv()-side timeout already
+    takes."""
+    backend, _, _ = _backend(
+        frame_buffer,
+        [_ok(), _ok()],
+        poll_results=[True, True],
+        send_side_effects=[None, BrokenPipeError("pipe gone"), None],
+    )
+    backend.send_reset()
+    backend.recv()
+
+    backend.send_step(0)  # underlying conn.send raises -- must not propagate
+    result = backend.recv()
+
+    assert (result.done, result.reward) == (True, 0.0)
+
+
+def test_recv_reraises_an_explicit_worker_error_without_respawning(frame_buffer) -> None:
+    """CLAUDE.md's own convention: programmer errors crash loud, operating
+    errors get retried. Before this fix, a genuine bug in rewards.py/
+    aux_state.py surfaced identically to a hung process -- silently
+    discarded as an elevated respawn count instead of a traceback."""
+    backend, _, _ = _backend(
+        frame_buffer, [("error", "ValueError: boom")], poll_results=[True]
+    )
+    backend.send_step(0)
+
+    with pytest.raises(RuntimeError, match="env 0 worker failed"):
+        backend.recv()
+
+    assert backend.respawns == 0
+
+
+def test_recv_still_respawns_on_a_genuine_timeout(frame_buffer) -> None:
+    """Pinned alongside the error-reply test above so the two paths cannot be
+    silently merged back together by a future edit."""
+    backend, _, _ = _backend(frame_buffer, [_ok()], poll_results=[False, True])
+    backend.send_step(0)
+
+    result = backend.recv()
+
+    assert (backend.respawns, result.done) == (1, True)
+
+
+def test_recv_without_a_prior_send_raises(frame_buffer) -> None:
+    """The two-phase split makes call order significant for the first time --
+    a stray recv() with nothing dispatched must be caught here, not silently
+    block on a pipe read that was never primed."""
+    backend, _, _ = _backend(frame_buffer, [_ok()])
+
+    with pytest.raises(RuntimeError, match="no matching send_step/send_reset"):
+        backend.recv()
+
+
+def test_send_step_while_a_previous_dispatch_is_unread_raises(frame_buffer) -> None:
+    """Guards the exact bug class this refactor introduces: a future edit to
+    VecPokemonEnv that calls send_step twice before recv() would otherwise
+    silently overwrite which command recv() answers for."""
+    backend, _, _ = _backend(frame_buffer, [_ok()])
+    backend.send_step(0)
+
+    with pytest.raises(RuntimeError, match="previous dispatch has not been recv"):
+        backend.send_step(1)
 
 
 def test_episode_id_keeps_climbing_across_a_respawn(frame_buffer) -> None:
@@ -411,9 +507,11 @@ def test_episode_id_keeps_climbing_across_a_respawn(frame_buffer) -> None:
     backend, _, _ = _backend(
         frame_buffer, [_ok(3), _ok(0), _ok(0)], poll_results=[True, False, True]
     )
-    before = backend.reset().episode_id
+    backend.send_reset()
+    before = backend.recv().episode_id
 
-    after = backend.step(0).episode_id
+    backend.send_step(0)
+    after = backend.recv().episode_id
 
     assert (before, after) == (3, 4)
 
@@ -427,8 +525,10 @@ def test_state_dict_carries_the_episode_offset_across_a_resume(frame_buffer) -> 
         [_ok(3), _ok(0), ("ok", {"state": {"step_count": 7}})],
         poll_results=[True, False, True],
     )
-    backend.reset()
-    backend.step(0)
+    backend.send_reset()
+    backend.recv()
+    backend.send_step(0)
+    backend.recv()
 
     state = backend.state_dict()
 
