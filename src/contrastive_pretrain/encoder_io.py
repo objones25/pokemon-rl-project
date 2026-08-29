@@ -91,6 +91,23 @@ def export_frozen_encoder(encoder: nn.Module) -> tuple[bytes, bytes]:
     return weights_bytes, config_bytes
 
 
+def _validate_latent_stats(mean: torch.Tensor, std: torch.Tensor) -> None:
+    """Deliberately duplicates src/pokemon_env/encoder.py's load_latent_stats
+    guard rather than importing it -- CLAUDE.md's codebase map keeps
+    contrastive_pretrain and pokemon_env independent by design, and this
+    invariant happening to be identical on both sides of that boundary is
+    a coincidence, not a reason to couple the two sub-projects."""
+    if not (torch.isfinite(mean).all() and torch.isfinite(std).all()):
+        raise ValueError("latent_mean/latent_std contain non-finite values; refusing to publish")
+    non_positive = int((std <= 0).sum())
+    if non_positive:
+        raise ValueError(
+            f"latent_std has {non_positive} non-positive entries; refusing to publish. "
+            "A dead or under-sampled encoder channel would divide by the 1e-6 floor "
+            "downstream and feed ~1e6-scale inputs to the policy's value head."
+        )
+
+
 def push_frozen_encoder(
     client: AtomicHfClient,
     encoder: nn.Module,
@@ -107,6 +124,7 @@ def push_frozen_encoder(
     mid-publish failure, which _load_frozen_encoder_from_client then hard-
     fails on; one commit either lands completely or not at all, and the
     retry below retries the whole publish as one unit."""
+    _validate_latent_stats(latent_mean, latent_std)
     weights_bytes, config_bytes = export_frozen_encoder(encoder)
     stats_bytes = json.dumps(
         {"mean": latent_mean.tolist(), "std": latent_std.tolist()}

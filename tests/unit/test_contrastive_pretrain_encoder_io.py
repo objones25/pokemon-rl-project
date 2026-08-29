@@ -209,6 +209,46 @@ def test_push_frozen_encoder_publishes_all_three_files_as_one_atomic_commit(
     assert fake_hf_client.commits[0]["paths"] == ["config.json", "latent_stats.json", "model.safetensors"]
 
 
+@pytest.mark.parametrize(
+    ("latent_mean", "latent_std", "match"),
+    [
+        pytest.param(
+            torch.zeros(2048),
+            torch.cat([torch.zeros(1), torch.ones(2047)]),
+            "non-positive",
+            id="zero_std_entry",
+        ),
+        pytest.param(
+            torch.zeros(2048),
+            torch.cat([torch.tensor([float("nan")]), torch.ones(2047)]),
+            "non-finite",
+            id="nan_std_entry",
+        ),
+        pytest.param(
+            torch.cat([torch.tensor([float("inf")]), torch.zeros(2047)]),
+            torch.ones(2048),
+            "non-finite",
+            id="inf_mean_entry",
+        ),
+    ],
+)
+def test_push_frozen_encoder_refuses_to_upload_broken_latent_stats(
+    fake_hf_client, encoder: nn.Module, latent_mean: torch.Tensor, latent_std: torch.Tensor, match: str
+) -> None:
+    """Publish-time mirror of pokemon_env/encoder.py's load-time guard: a
+    dead or under-sampled channel must never reach the Hub, not just be
+    caught later on a paid PPO pod at env construction. Asserts the upload
+    call count is zero, not just that ValueError was raised -- a test that
+    only checks the raise could still pass if the upload happened first."""
+    with pytest.raises(ValueError, match=match):
+        push_frozen_encoder(
+            fake_hf_client, encoder, latent_mean, latent_std, sleep_func=lambda _: None
+        )
+
+    assert fake_hf_client.upload_calls == []
+    assert fake_hf_client.commits == []
+
+
 def test_push_frozen_encoder_retries_transient_upload_failures(encoder: nn.Module) -> None:
     client = _FlakyThenWorksHfClient()
 
