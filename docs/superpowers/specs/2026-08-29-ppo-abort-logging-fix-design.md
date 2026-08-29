@@ -123,14 +123,17 @@ where the two blocks could drift out of sync (e.g., a future editor updating
 one handler's `extra={...}` fields and forgetting the other).
 
 **Why this doesn't risk mis-labeling an unrelated failure as "training
-aborted"**: `run_update`'s call graph (forward/backward pass, optimizer step,
-gradient clipping) does not raise `RuntimeError` or `AssertionError` for
-reasons other than the three abort conditions and the NaN check under normal
-operation — a genuinely unrelated failure (e.g., a `MemoryError` from a real
-OOM, a `KeyboardInterrupt`) is not an instance of either caught type and
-propagates through this block exactly as before, untouched. The widened
-`try` does not change what gets caught, only which call the existing catch
-now surrounds.
+aborted"**: On this branch's installed torch 2.13, `torch.cuda.OutOfMemoryError`
+is a subclass of `RuntimeError` and so will be caught and logged with a
+`training_aborted` record — but this is not a bug, it is beneficial. The
+log record preserves the true exception type and traceback in `exc_info`, so
+a reader can still diagnose "this was an OOM, not an abort condition" from the
+structured log, and gets a record at all rather than just Python's default
+traceback. Genuinely unrelated failures (e.g., `KeyboardInterrupt`, or a plain
+Python `MemoryError` not from torch) are not instances of `RuntimeError` or
+`AssertionError` and propagate through this block exactly as before, untouched.
+The widened `try` does not change what gets caught, only which call the
+existing catch now surrounds.
 
 ## What changes
 

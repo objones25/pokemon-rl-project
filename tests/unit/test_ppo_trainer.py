@@ -457,8 +457,8 @@ def test_the_epoch_one_ratio_abort_also_logs_an_error_carrying_the_traceback(
 def test_a_nan_storm_abort_also_logs_an_error_carrying_the_traceback(
     tmp_path, caplog
 ) -> None:
-    """The third abort path -- run_update's own NaN-storm abort -- raises
-    RuntimeError from OUTSIDE the try block that wraps _check_abort_conditions,
+    """The third abort path -- run_update's own NaN-storm abort -- used to raise
+    RuntimeError from outside the try block that wraps _check_abort_conditions,
     at src/ppo/trainer.py's `stats = deps.run_update(...)` call. Before the fix
     this propagates with no training_aborted record; the assertion on the log
     record (not just pytest.raises) is what would have caught that, since the
