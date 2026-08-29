@@ -67,16 +67,24 @@ class _TrainerHarness:
     n_steps: int
 
 
-def _stub_run_update(*, approx_kl: float, epoch1_dev: float):
+def _stub_run_update(*, approx_kl: float, epoch1_dev: float, forced_nan_abort: bool = False):
     """A stand-in for `run_update` that skips the real forward/backward
     pass entirely, so the KL-abort and epoch-1-invariant tests can force an
     exact value onto exactly the two fields the trainer inspects -- wired in
-    through `PPODeps.run_update`, never `mock.patch`."""
+    through `PPODeps.run_update`, never `mock.patch`. `forced_nan_abort`
+    instead raises the same `RuntimeError` `run_update`'s own NaN-storm abort
+    raises, at the default `max_nan_minibatches_per_update` threshold, so a
+    test can prove that abort path reaches `run_training`'s log handler too."""
 
     def _run_update(
         policy, optimizer, scheduler, buffer, scaler, config, policy_config,
         n_envs, device, autocast_dtype,
     ) -> UpdateStats:
+        if forced_nan_abort:
+            raise RuntimeError(
+                "non-finite loss in 3 minibatches of one update; aborting "
+                "rather than stepping on corrupt gradients"
+            )
         return UpdateStats(
             policy_loss=0.0, value_loss=0.0, entropy=0.0, total_loss=0.0,
             clip_fraction=0.0, approx_kl=approx_kl,
@@ -95,11 +103,13 @@ def _trainer_harness(
     artifact_every_updates: int = 25,
     forced_approx_kl: float | None = None,
     forced_epoch1_dev: float | None = None,
+    forced_nan_abort: bool = False,
 ) -> _TrainerHarness:
     """A tiny real policy (matching the other ppo/ harnesses' shapes) plus a
     `FakeVecEnv`/`FakeLatentEncoder` and a `FakeExperimentRun`. `run_update`
-    defaults to the real one; `forced_approx_kl`/`forced_epoch1_dev` swap in
-    `_stub_run_update` instead, through `PPODeps.run_update`."""
+    defaults to the real one; `forced_approx_kl`/`forced_epoch1_dev`/
+    `forced_nan_abort` swap in `_stub_run_update` instead, through
+    `PPODeps.run_update`."""
     torch.manual_seed(0)
     policy_config = PolicyConfig(
         d_model=32, n_layers=2, n_heads=2, head_dim=16, n_kv_heads=1,
@@ -122,10 +132,11 @@ def _trainer_harness(
     wandb_run = FakeExperimentRun()
 
     run_update_dep = run_update
-    if forced_approx_kl is not None or forced_epoch1_dev is not None:
+    if forced_approx_kl is not None or forced_epoch1_dev is not None or forced_nan_abort:
         run_update_dep = _stub_run_update(
             approx_kl=0.0 if forced_approx_kl is None else forced_approx_kl,
             epoch1_dev=0.0 if forced_epoch1_dev is None else forced_epoch1_dev,
+            forced_nan_abort=forced_nan_abort,
         )
 
     deps = PPODeps(
@@ -441,6 +452,27 @@ def test_the_epoch_one_ratio_abort_also_logs_an_error_carrying_the_traceback(
     aborted = [r for r in caplog.records if r.message == "training_aborted"]
 
     assert [r.exc_info[0] for r in aborted] == [AssertionError]
+
+
+def test_a_nan_storm_abort_also_logs_an_error_carrying_the_traceback(
+    tmp_path, caplog
+) -> None:
+    """The third abort path -- run_update's own NaN-storm abort -- raises
+    RuntimeError from OUTSIDE the try block that wraps _check_abort_conditions,
+    at src/ppo/trainer.py's `stats = deps.run_update(...)` call. Before the fix
+    this propagates with no training_aborted record; the assertion on the log
+    record (not just pytest.raises) is what would have caught that, since the
+    exception already reaches the caller either way."""
+    harness = _trainer_harness(tmp_path, forced_nan_abort=True)
+
+    with (
+        caplog.at_level(logging.ERROR, logger="ppo.trainer"),
+        pytest.raises(RuntimeError, match="non-finite loss"),
+    ):
+        run_training(harness.deps, max_updates=1)
+    aborted = [r for r in caplog.records if r.message == "training_aborted"]
+
+    assert [r.exc_info[0] for r in aborted] == [RuntimeError]
 
 
 def test_visit_counts_are_peak_normalized_so_a_single_visit_is_visible() -> None:

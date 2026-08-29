@@ -237,16 +237,17 @@ def _run_training(deps: PPODeps, config: PPOConfig, max_updates: int | None) -> 
         state = collect_rollout(state=state, n_steps=config.n_steps, **rollout_kwargs)
         global_step += config.n_steps * deps.env_config.n_envs
 
-        stats = deps.run_update(
-            deps.policy, deps.optimizer, deps.scheduler, buffer, scaler, config,
-            deps.policy_config, deps.env_config.n_envs, deps.device, deps.autocast_dtype,
-        )
-
-        # Both abort paths log with exc_info before propagating: this is a
-        # 48-hour unattended run, and the difference between "died at hour 30
-        # on the ratio invariant" and "died at hour 30 on KL" is the whole
-        # diagnosis. The exception itself still propagates untouched.
+        # All three abort paths -- the epoch-1 ratio invariant, the approx_kl
+        # threshold, and run_update's own NaN-storm abort -- log with
+        # exc_info before propagating: this is a 48-hour unattended run, and
+        # the difference between "died at hour 30 on the ratio invariant" and
+        # "died at hour 30 on KL" is the whole diagnosis. The exception
+        # itself still propagates untouched.
         try:
+            stats = deps.run_update(
+                deps.policy, deps.optimizer, deps.scheduler, buffer, scaler, config,
+                deps.policy_config, deps.env_config.n_envs, deps.device, deps.autocast_dtype,
+            )
             _check_abort_conditions(stats, config)
         except (AssertionError, RuntimeError):
             logger.exception(
