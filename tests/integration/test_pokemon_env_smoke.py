@@ -74,40 +74,56 @@ def test_screen_frame_returns_a_copy_not_a_live_view() -> None:
 
 
 @_needs_rom
-def test_generated_init_state_starts_in_the_bedroom_before_the_starter() -> None:
-    """The script's frame counts are guesses until this runs. `map_id != 0`
-    alone is too weak a guard: every interior (Red's house, Oak's lab) has a
-    non-zero map id too, so that assertion would pass even if the script
-    stalled on a menu partway through the intro -- it only ever caught "still
-    on the title screen" or "landed in a battle", not "stalled in a menu on
-    the right map", which is the actual failure this test exists to catch.
+def test_generated_init_state_reaches_oaks_lab_with_the_pokedex() -> None:
+    """The script's frame counts are guesses until this runs. RAM values
+    alone already proved insufficient once: the previous version of this
+    test asserted only position/party/money/battle-state and passed even
+    though the actual screen was still mid-dialogue ("My name is OAK!
+    People call me") -- none of those four values can detect "is a text box
+    currently open". Oak's parcel-delivery text ends in another multi-box
+    dialogue sequence with the same shape, so this asserts an exact
+    screenshot hash in addition to RAM state: PyBoy is deterministic given a
+    fixed ROM and a fixed input sequence, so the final frame's exact bytes
+    are reproducible run to run on the same ROM revision, the same property
+    this test's RAM assertions already rely on.
 
-    Instead this asserts the exact measured post-intro state: coordinates
-    (3, 6) in map 38 (Red's bedroom), party_size 0 (before picking a
-    starter), and money 3000 -- Pokemon Red's canonical starting amount.
-    money == 3000 together with a clean (all-zero) event_flags state is what
-    actually pins "clean start" rather than "somewhere mid-intro" -- a save
-    generated from a script that stalled mid-menu would still often land on
-    map 38 by coincidence, but would not have the canonical money value or a
-    zero event-flag state.
+    `generate_init_state` ticks with `render=False` throughout (correct for
+    production -- headless PPO envs never draw), so the screen buffer is
+    never actually rendered during the script itself. The one render-only
+    tick below, strictly after `generate_init_state` returns, is what makes
+    `screen_frame()` read real pixels instead of the buffer's initial
+    all-zero contents -- an earlier version of this assertion skipped that
+    tick and its pinned hash turned out to be the SHA256 of a blank
+    144x160 zero buffer, so it would have passed even if the screen were
+    still showing a dialogue box, or nothing had run at all. The extra tick
+    is placed after RAM is read and after `generate_init_state` returns, so
+    it cannot affect the script's semantics or (were this test ever changed
+    to save one) what gets written to `artifacts/init.state`.
 
-    This test is deliberately ROM-revision sensitive: a different ROM
-    (a different release, a hacked ROM, Blue instead of Red) would produce a
-    different starting position, and that SHOULD fail loudly here rather than
-    silently changing what all 64 environments load every reset."""
+    This test is deliberately ROM-revision sensitive, same as its
+    predecessor: a different ROM (a different release, a hacked ROM, Blue
+    instead of Red) would produce different RAM values and a different
+    frame, and that SHOULD fail loudly here rather than silently changing
+    what all 64 environments load every reset."""
+    import hashlib
+
     from pokemon_env import ram
     from pokemon_env.init_state import INTRO_SCRIPT, generate_init_state
 
     emulator = PyBoyEmulator(str(_ROM))
-    state = generate_init_state(emulator, INTRO_SCRIPT)
-    emulator.load_state(state)
-    coords = ram.game_coords(emulator)
+    generate_init_state(emulator, INTRO_SCRIPT)
     party_size = ram.party_size(emulator)
-    money = ram.read_money(emulator)
-    in_battle = ram.in_battle(emulator)
+    badges = ram.badge_count(emulator)
+    oak_parcel = ram.oak_parcel_set(emulator)
+    oak_pokedex = ram.oak_pokedex_set(emulator)
+    emulator.tick(1, True)  # generate_init_state ticks render=False throughout (correct
+    # for production), so the screen buffer is untouched until we explicitly ask for one
+    # rendered frame here -- matches scratch/drive_init_state.py's own render-fix ordering
+    frame_hash = hashlib.sha256(emulator.screen_frame().tobytes()).hexdigest()
     emulator.close()
 
-    assert (coords, party_size, money, in_battle) == ((3, 6, 38), 0, 3000, False)
+    assert (party_size, badges, oak_parcel, oak_pokedex) == (1, 0, True, True)
+    assert frame_hash == "373695a8ec0af8200f032992342e7f1f658b98ffa6dd9739c5caff270bb50b73"
 
 
 _needs_init_state = pytest.mark.skipif(

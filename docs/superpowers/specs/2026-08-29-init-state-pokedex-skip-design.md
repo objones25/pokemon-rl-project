@@ -214,7 +214,10 @@ script:
 - **The bedroom's exit stairs require pressing UP, not DOWN**, at the specific
   column that lines up with the stairwell — a Gen1 quirk where the visually
   "downstairs" transition tile is triggered by walking toward it from above,
-  not by a literal "down" input semantics might suggest.
+  not by a literal "down" input semantics might suggest. **Corrected during
+  implementation — see "Corrections found during implementation" at the end
+  of this document: the accepted script actually triggers the transition
+  with RIGHT, not UP, at the column it uses.**
 - **The mandatory rival battle in Oak's lab is triggered by a coordinate the
   player walks through, not by bumping into or interacting with the rival's
   sprite.** Facing the rival directly and pressing "A" while adjacent does
@@ -381,3 +384,42 @@ this now" argument above: the cost only grows the longer this is deferred.
   `docs/superpowers/specs/2026-08-29-vec-env-step-concurrency-design.md`,
   filed separately because the two are unrelated beyond both being found
   during the same pre-first-run review pass.
+
+## Corrections found during implementation
+
+Two facts stated earlier in this document (and echoed in the implementation
+plan) turned out to be wrong once verified live. `INTRO_SCRIPT`'s actual
+button sequence is correct — both were independently confirmed via
+byte-identical fresh-boot replay during the relevant task's review — only the
+*explanation* of what triggers each transition was wrong. Recorded here per
+this project's CLAUDE.md ("record what you deliberately did not fix... not
+in a scratch workspace that gets deleted") since the implementation ledger
+that first caught these is gitignored and does not survive past this branch.
+
+- **Bedroom exit stairs (§2, "Key game-logic facts discovered this
+  session")**: this document states the exit fires on pressing **UP** at the
+  stairs column. What actually fired the transition during live
+  implementation was a **RIGHT** press onto the rail tile one column over —
+  UP attempts there were blocked by a wall segment. The mechanism this
+  document describes (walking onto the transition tile from above triggers
+  it, not a literal "down" input) may still be the right general shape for
+  Gen1 stairs, but the specific button this document names for *this*
+  script's approach column is wrong; RIGHT is what the accepted script
+  actually presses.
+- **Parcel delivery trigger (§2 is correct; the plan's Task 6 section is
+  not)**: this document's own delivery-trigger claim in §2 —
+  `OaksLabOak1Text`, ordinary NPC interaction with the `OAKSLAB_OAK1` object
+  at `(5, 2)` — is correct and needs no change. The implementation *plan*'s
+  Task 6 section, however, describes a different (wrong) mechanism: that the
+  delivery fires automatically on walking into the lab, via
+  `OaksLabDefaultScript` → `OaksLabOakEntersLabScript` →
+  `OaksLabToggleOaksScript`. That chain is real, but it is Phase B's *first*
+  Oak encounter (starter selection), not the delivery leg — by the time the
+  player returns from Viridian, Phase B's own rival-exit script has already
+  advanced the persistent `wOaksLabCurScript` state byte past that chain to
+  `SCRIPT_OAKSLAB_NOOP`, so nothing fires automatically on lab re-entry. The
+  real trigger, confirmed via `pret/pokered`'s `scripts/OaksLab.asm` and live
+  testing, is walking up to `OAKSLAB_OAK1` and pressing A: `OaksLabOak1Text`
+  checks `EVENT_BATTLED_RIVAL_IN_OAKS_LAB` and whether `OAKS_PARCEL` is in
+  the bag, delivers the parcel, and re-arms the state machine through the
+  rival-cameo → Oak-gives-Pokédex → rival-leaves chain from there.

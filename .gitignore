@@ -27,3 +27,6 @@ wandb/
 # Generated emulator save states. ROM-derived, so never committed -- see
 # src/pokemon_env/init_state.py.
 artifacts/
+
+# Subagent-driven-development scratch workspace (ledger, briefs, reports).
+.superpowers/

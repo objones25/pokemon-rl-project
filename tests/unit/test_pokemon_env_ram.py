@@ -118,6 +118,30 @@ def test_museum_ticket_set_reads_bit_zero_of_its_own_address(fake_emulator) -> N
     assert ram.museum_ticket_set(fake_emulator) is True
 
 
+def test_oak_parcel_set_reads_bit_one_of_0xd74e(fake_emulator) -> None:
+    fake_emulator.memory[0xD74E] = 0b0000_0010
+
+    assert ram.oak_parcel_set(fake_emulator) is True
+
+
+def test_oak_parcel_set_is_false_when_bit_one_is_clear(fake_emulator) -> None:
+    fake_emulator.memory[0xD74E] = 0b0000_0001
+
+    assert ram.oak_parcel_set(fake_emulator) is False
+
+
+def test_oak_pokedex_set_reads_bit_five_of_0xd74b(fake_emulator) -> None:
+    fake_emulator.memory[0xD74B] = 0b0010_0000
+
+    assert ram.oak_pokedex_set(fake_emulator) is True
+
+
+def test_oak_pokedex_set_is_false_when_bit_five_is_clear(fake_emulator) -> None:
+    fake_emulator.memory[0xD74B] = 0b0000_0000
+
+    assert ram.oak_pokedex_set(fake_emulator) is False
+
+
 def test_read_money_decodes_binary_coded_decimal(fake_emulator) -> None:
     """Three bytes, two decimal digits each. Read as plain hex, 0x12 0x34 0x56
     becomes 1193046 instead of 123456."""
