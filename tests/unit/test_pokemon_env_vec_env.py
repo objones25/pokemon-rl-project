@@ -6,7 +6,7 @@ from pokemon_env.config import EnvConfig
 from pokemon_env.session import EnvSession
 from pokemon_env.vec_env import InProcessBackend, VecPokemonEnv
 
-from .fakes import FakeBackend, FakeEmulator
+from .fakes import FakeBackend, FakeEmulator, RecordingBackend
 
 
 def test_inprocess_backend_recv_returns_the_result_from_send_step() -> None:
@@ -245,3 +245,32 @@ def test_load_state_dict_rejects_a_pre_task_2_checkpoint_missing_episode_lengths
 
     with pytest.raises(ValueError, match="schema_version=1"):
         vec_env.load_state_dict(state)
+
+
+def test_step_dispatches_every_send_before_any_recv() -> None:
+    """The property this whole fix exists to establish: VecPokemonEnv.step()
+    must not block on backend i's reply before backend i+1 has even been
+    told what to do -- that's the sequential-dispatch bug the spec measures
+    at ~64x on 64 real subprocess workers. This test can't see wall-clock
+    time (RecordingBackend does no real work), but call order is exactly
+    what a return to the old `backend.step()`-per-iteration shape would
+    break, and this catches that regardless of timing."""
+    call_log: list[str] = []
+    backends = [RecordingBackend(i, call_log) for i in range(3)]
+    vec_env = VecPokemonEnv(backends, EnvConfig(n_envs=3))
+    vec_env.reset()
+    call_log.clear()
+
+    vec_env.step(np.zeros(3, dtype=np.int64))
+
+    assert call_log == ["send:0", "send:1", "send:2", "recv:0", "recv:1", "recv:2"]
+
+
+def test_reset_dispatches_every_send_before_any_recv() -> None:
+    call_log: list[str] = []
+    backends = [RecordingBackend(i, call_log) for i in range(3)]
+    vec_env = VecPokemonEnv(backends, EnvConfig(n_envs=3))
+
+    vec_env.reset()
+
+    assert call_log == ["send:0", "send:1", "send:2", "recv:0", "recv:1", "recv:2"]

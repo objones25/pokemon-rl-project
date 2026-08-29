@@ -79,11 +79,12 @@ class FakeBackend:
         self._badges = badges
         self._event_flags = event_flags
         self._step_count = step_count
+        self._pending: StepResult | None = None
 
     def _result(self) -> StepResult:
-        # reset/step/state_dict/load_state_dict/close and this helper exist
-        # only to satisfy EnvBackend's structural Protocol surface -- no test
-        # calls them today; only stats() is exercised.
+        # send_reset/send_step/recv/state_dict/load_state_dict/close and this
+        # helper exist only to satisfy EnvBackend's structural Protocol surface
+        # -- no test calls them today; only stats() is exercised.
         return StepResult(
             frame=np.zeros((144, 160), dtype=np.uint8),
             aux=np.zeros(AUX_STATE_DIM, dtype=np.float32),
@@ -94,11 +95,15 @@ class FakeBackend:
             clipped=False,
         )
 
-    def reset(self) -> StepResult:
-        return self._result()
+    def send_reset(self) -> None:
+        self._pending = self._result()
 
-    def step(self, action: int) -> StepResult:
-        return self._result()
+    def send_step(self, action: int) -> None:
+        self._pending = self._result()
+
+    def recv(self) -> StepResult:
+        result, self._pending = self._pending, None
+        return result
 
     def state_dict(self) -> dict:
         return {}
@@ -117,6 +122,56 @@ class FakeBackend:
             "step_count": self._step_count,
             "episode_lengths": [],
         }
+
+
+class RecordingBackend:
+    """Hand-written fake typed against `EnvBackend`, logging every
+    send_step/send_reset/recv call into a list shared across every backend
+    in one VecPokemonEnv. Exists to prove VecPokemonEnv issues every send_*
+    before any recv() -- the property the concurrent-dispatch fix exists to
+    establish. Nothing about that ordering is visible from the returned
+    StepResults themselves, so this is the only way to test it."""
+
+    def __init__(self, index: int, call_log: list[str]) -> None:
+        self._index = index
+        self._call_log = call_log
+        self._pending: StepResult | None = None
+
+    def _result(self) -> StepResult:
+        return StepResult(
+            frame=np.zeros((144, 160), dtype=np.uint8),
+            aux=np.zeros(AUX_STATE_DIM, dtype=np.float32),
+            reward=0.0,
+            done=False,
+            episode_id=0,
+            components={},
+            clipped=False,
+        )
+
+    def send_reset(self) -> None:
+        self._call_log.append(f"send:{self._index}")
+        self._pending = self._result()
+
+    def send_step(self, action: int) -> None:
+        self._call_log.append(f"send:{self._index}")
+        self._pending = self._result()
+
+    def recv(self) -> StepResult:
+        self._call_log.append(f"recv:{self._index}")
+        result, self._pending = self._pending, None
+        return result
+
+    def state_dict(self) -> dict:
+        return {}
+
+    def load_state_dict(self, state: dict) -> None:
+        pass
+
+    def stats(self) -> dict:
+        return {}
+
+    def close(self) -> None:
+        pass
 
 
 class FakeVecEnv:

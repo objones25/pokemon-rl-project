@@ -150,19 +150,23 @@ class VecPokemonEnv:
 
     def reset(self) -> VecStep:
         self._needs_reset[:] = False
-        return self._collect([backend.reset() for backend in self._backends])
+        for backend in self._backends:
+            backend.send_reset()
+        return self._collect([backend.recv() for backend in self._backends])
 
     def step(self, actions: np.ndarray) -> VecStep:
         if len(actions) != self._config.n_envs:
             raise ValueError(
                 f"actions has length {len(actions)}, expected {self._config.n_envs}"
             )
-        results = [
-            backend.reset() if needs_reset else backend.step(int(action))
-            for backend, action, needs_reset in zip(
-                self._backends, actions, self._needs_reset, strict=True
-            )
-        ]
+        for backend, action, needs_reset in zip(
+            self._backends, actions, self._needs_reset, strict=True
+        ):
+            if needs_reset:
+                backend.send_reset()
+            else:
+                backend.send_step(int(action))
+        results = [backend.recv() for backend in self._backends]
         self._needs_reset = np.array([result.done for result in results], dtype=bool)
         return self._collect(results)
 
