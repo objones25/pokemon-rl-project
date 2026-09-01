@@ -28,7 +28,6 @@ import pytest
 import torch
 
 from contrastive_pretrain.model import build_encoder
-from contrastive_pretrain.train import autocast_dtype
 from pokemon_env.config import EnvConfig
 from pokemon_env.encoder import LatentEncoder
 from pokemon_env.init_state import state_hash
@@ -39,6 +38,7 @@ from ppo.trainer import PPODeps, run_training
 from sequence_model.config import PolicyConfig
 from sequence_model.policy import RecurrentTransformerPolicy
 from tests.conftest import PINNED_ENCODER_REVISION
+from torch_utils import autocast_dtype
 
 pytestmark = pytest.mark.slow
 

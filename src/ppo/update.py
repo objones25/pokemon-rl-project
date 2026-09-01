@@ -132,6 +132,7 @@ def run_update(
         for index, envs in enumerate(minibatches):
             chunk = buffer.chunk(envs)
             rows = envs
+            optimizer.zero_grad(set_to_none=True)
             with torch.autocast(device.type, dtype=autocast_dtype):
                 output = policy.forward_chunk(
                     chunk.latent, chunk.aux_state, chunk.prev_action, chunk.prev_reward,
@@ -157,7 +158,6 @@ def run_update(
 
             if not torch.isfinite(loss.total):
                 skipped += 1
-                optimizer.zero_grad(set_to_none=True)
                 # WARNING, with the reason: a silently dropped minibatch is the
                 # trainer discarding real collected experience, and on an
                 # unattended run the only trace of it would be a step count
@@ -177,8 +177,6 @@ def run_update(
                         "aborting rather than stepping on corrupt gradients"
                     )
                 continue
-
-            optimizer.zero_grad(set_to_none=True)
 
             if epoch == 0 and index == 0:
                 policy_grad_norm, value_grad_norm = _split_grad_norms(policy, loss, config)

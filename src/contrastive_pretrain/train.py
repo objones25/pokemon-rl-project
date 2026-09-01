@@ -18,20 +18,9 @@ import torch
 from torch import nn
 
 from contrastive_pretrain.losses import nt_xent_loss
+from torch_utils import autocast_dtype
 
 logger = logging.getLogger(__name__)
-
-
-def autocast_dtype(device: torch.device) -> torch.dtype:
-    """bf16 everywhere except MPS. The target production hardware is a CUDA
-    A100 (bf16-native, Ampere+), and CPU's own recommended autocast dtype is
-    also bf16 -- but MPS has weak bf16 kernel coverage and torch's own
-    per-device guidance there is fp16 (see scripts/check_env.py's autocast
-    table in the pytorch skill). No GradScaler is used anywhere in this loop
-    (torch reports none available on MPS either), so this only changes local
-    MPS dev-loop numerics -- never the CUDA A100 production path.
-    """
-    return torch.float16 if device.type == "mps" else torch.bfloat16
 
 
 def run_memory_probe(probe_step: Callable[[], None], batch_size: int) -> None:

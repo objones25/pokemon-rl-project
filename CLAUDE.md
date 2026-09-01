@@ -36,6 +36,8 @@ and here. If you change a RAM address, cite the reader you took it from.
 | `src/checkpointing/` | Atomic writes, newest-first discovery, retention glob | Knows what a checkpoint contains |
 | `src/hf_storage/` | `HfClient` / `AtomicHfClient` Protocols + `RealHfClient`, retry with rate-limit backoff | Imports from any sub-project |
 | `src/observability/` | JSON-lines logging, W&B wrapper, contact sheets | Is optional in a long-running component |
+| `src/torch_utils.py` | `autocast_dtype()` — the one device->dtype policy every training loop shares | Contains anything project-specific |
+| `src/config_io.py` | `load_dataclass_config()` — YAML-to-frozen-dataclass loading shared by every `configs/*.yaml` owner | Imports from any sub-project |
 
 Entry points (`pyproject.toml`): `data-collection {curate,run}`,
 `contrastive-pretrain {preview,train,build-cache,export-frozen-encoder}`, and
@@ -159,7 +161,7 @@ share and weight tying do not transfer from an LM config.
   serving batch and context — here that is 64 envs x 1024 steps per PPO update.
   A config chosen without that number is a guess.
 - Defaults needing a stated reason to change: pre-norm RMSNorm, RoPE, SwiGLU
-  with `d_ff = round_to_256(8/3 * d_model)`, no linear biases, bf16 compute with
+  with `d_ff = round_to_128(8/3 * d_model)`, no linear biases, bf16 compute with
   fp32 master/Adam state, grad clip 1.0, AdamW betas (0.9, 0.95).
 - Four bugs pass every shape check and must keep their property tests: RoPE
   applied before the head split; interleaved-vs-halves RoPE pairing (this repo
@@ -180,7 +182,7 @@ pytest 9.1.1 with strict config in `pyproject.toml` (`strict_config`,
 `strict_markers`, `strict_xfail`, `strict_parametrization_ids`,
 `filterwarnings = error`, **branch coverage floor 93%**). Keep those gates and
 ratchet the floor up; a floor you have to lower is worse than none. Current
-state: 697 passing, 94.70% coverage, 14 deselected `slow`.
+state: 733 passing, 94.87% coverage, 14 deselected `slow`.
 
 - **Prove each new test can fail.** Break the code it covers (invert a condition,
   return a wrong constant), confirm red, revert — and say which test you verified

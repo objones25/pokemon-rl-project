@@ -1,7 +1,8 @@
 """PPO trainer configuration, loaded from configs/ppo.yaml.
 
-Mirrors pokemon_env.config's dataclass + yaml.safe_load pattern: frozen
-dataclass, unknown-field rejection, validation in __post_init__.
+Loading (unknown-field rejection, dataclass construction) is shared via
+config_io.load_dataclass_config; validation is this dataclass's own
+__post_init__.
 
 Shape helpers live here rather than as constants because a later
 curriculum stage raises context_len and n_steps together; nothing in the
@@ -10,10 +11,10 @@ trainer may hard-code 1024 or 2048."""
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, fields
+from dataclasses import dataclass
 from pathlib import Path
 
-import yaml
+from config_io import load_dataclass_config
 
 # A resolved git commit on the Hub is exactly 40 lowercase hex characters.
 # Anything else -- a branch name, a tag, a short sha -- can move under a
@@ -104,9 +105,4 @@ class PPOConfig:
 
 
 def load_config(path: str | Path) -> PPOConfig:
-    data = yaml.safe_load(Path(path).read_text()) or {}
-    valid_fields = {f.name for f in fields(PPOConfig)}
-    unknown = set(data) - valid_fields
-    if unknown:
-        raise ValueError(f"unknown config field(s): {sorted(unknown)}")
-    return PPOConfig(**data)
+    return load_dataclass_config(PPOConfig, path)

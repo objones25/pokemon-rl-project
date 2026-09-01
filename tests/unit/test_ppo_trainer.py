@@ -432,7 +432,10 @@ def test_an_abort_logs_an_error_carrying_the_traceback(tmp_path, caplog) -> None
     exc_info the record says a run stopped, not which invariant broke."""
     harness = _trainer_harness(tmp_path, forced_approx_kl=1.0)
 
-    with caplog.at_level(logging.ERROR, logger="ppo.trainer"), pytest.raises(RuntimeError):
+    with (
+        caplog.at_level(logging.ERROR, logger="ppo.trainer"),
+        pytest.raises(RuntimeError, match="approx_kl .* exceeded"),
+    ):
         run_training(harness.deps, max_updates=1)
     aborted = [r for r in caplog.records if r.message == "training_aborted"]
 
@@ -447,7 +450,10 @@ def test_the_epoch_one_ratio_abort_also_logs_an_error_carrying_the_traceback(
     the one that leaves no diagnosis behind."""
     harness = _trainer_harness(tmp_path, forced_epoch1_dev=0.01)
 
-    with caplog.at_level(logging.ERROR, logger="ppo.trainer"), pytest.raises(AssertionError):
+    with (
+        caplog.at_level(logging.ERROR, logger="ppo.trainer"),
+        pytest.raises(AssertionError, match="epoch-1 minibatch-1 ratio deviated"),
+    ):
         run_training(harness.deps, max_updates=1)
     aborted = [r for r in caplog.records if r.message == "training_aborted"]
 

@@ -1,5 +1,5 @@
-"""Environment configuration, loaded from configs/pokemon_env.yaml.
-Mirrors contrastive_pretrain.config's dataclass + yaml.safe_load pattern.
+"""Environment configuration, loaded from configs/pokemon_env.yaml via
+config_io.load_dataclass_config.
 
 Reward weights are initial guesses from the design spec, chosen so a normal
 step's reward lands well inside [0, 1] and the clip fires only on genuine
@@ -8,10 +8,10 @@ first run's reward histogram."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass, fields
+from dataclasses import dataclass
 from pathlib import Path
 
-import yaml
+from config_io import load_dataclass_config
 
 
 @dataclass(frozen=True)
@@ -50,9 +50,4 @@ class EnvConfig:
 
 
 def load_config(path: str | Path) -> EnvConfig:
-    data = yaml.safe_load(Path(path).read_text()) or {}
-    valid_fields = {f.name for f in fields(EnvConfig)}
-    unknown = set(data) - valid_fields
-    if unknown:
-        raise ValueError(f"unknown config field(s): {sorted(unknown)}")
-    return EnvConfig(**data)
+    return load_dataclass_config(EnvConfig, path)

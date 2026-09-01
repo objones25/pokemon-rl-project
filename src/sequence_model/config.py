@@ -1,6 +1,5 @@
 """Architecture and sizing for the temporal sequence model, loaded from
-configs/sequence_model.yaml. Mirrors contrastive_pretrain.config's
-dataclass + yaml.safe_load pattern.
+configs/sequence_model.yaml via config_io.load_dataclass_config.
 
 The defaults are the ones the design spec's arithmetic produced (22.6M
 backbone parameters, 4.00 KiB/token KV cache, 256 MiB at 64 envs x 1024
@@ -9,10 +8,10 @@ config_budget.py invalidates every memory number in that spec."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass, fields
+from dataclasses import dataclass
 from pathlib import Path
 
-import yaml
+from config_io import load_dataclass_config
 
 
 @dataclass(frozen=True)
@@ -66,9 +65,4 @@ class PolicyConfig:
 
 
 def load_config(path: str | Path) -> PolicyConfig:
-    data = yaml.safe_load(Path(path).read_text()) or {}
-    valid_fields = {f.name for f in fields(PolicyConfig)}
-    unknown = set(data) - valid_fields
-    if unknown:
-        raise ValueError(f"unknown config field(s): {sorted(unknown)}")
-    return PolicyConfig(**data)
+    return load_dataclass_config(PolicyConfig, path)

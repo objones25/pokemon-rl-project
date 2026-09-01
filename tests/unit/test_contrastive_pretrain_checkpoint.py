@@ -163,7 +163,7 @@ def test_find_latest_checkpoint_returns_none_when_directory_does_not_exist(tmp_p
 
 
 def test_load_checkpoint_raises_on_missing_file(tmp_path) -> None:
-    with pytest.raises(FileNotFoundError):
+    with pytest.raises(FileNotFoundError, match="No such file or directory"):
         load_checkpoint(tmp_path / "does_not_exist.pt")
 
 

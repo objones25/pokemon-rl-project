@@ -26,7 +26,6 @@ from dotenv import load_dotenv
 from huggingface_hub import HfApi, get_token
 
 from contrastive_pretrain.encoder_io import load_frozen_encoder
-from contrastive_pretrain.train import autocast_dtype
 from hf_storage.client import RealHfClient
 from observability.logging_config import configure_logging
 from observability.tracking import WandbRun
@@ -41,6 +40,7 @@ from ppo.telemetry import STEP_METRICS, wandb_config
 from ppo.trainer import PPODeps, run_training
 from sequence_model import config as policy_config_module
 from sequence_model.policy import RecurrentTransformerPolicy
+from torch_utils import autocast_dtype
 
 logger = logging.getLogger(__name__)
 
@@ -212,7 +212,7 @@ def _run_train(args: argparse.Namespace) -> None:
     encoder = LatentEncoder(encoder_module, device)
 
     policy = RecurrentTransformerPolicy(policy_config, latent_mean, latent_std).to(device)
-    optimizer = torch.optim.AdamW(policy.parameters(), lr=ppo_config.lr)
+    optimizer = torch.optim.AdamW(policy.parameters(), lr=ppo_config.lr, eps=1e-5)
     scheduler = torch.optim.lr_scheduler.LambdaLR(
         optimizer, _warmup_then_constant(ppo_config.warmup_steps)
     )

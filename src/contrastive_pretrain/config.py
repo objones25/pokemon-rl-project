@@ -1,12 +1,12 @@
-"""Training hyperparameters and paths, loaded from configs/contrastive_pretrain.yaml.
-Mirrors data_collection.registry's dataclass + yaml.safe_load pattern."""
+"""Training hyperparameters and paths, loaded from
+configs/contrastive_pretrain.yaml via config_io.load_dataclass_config."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass, fields
+from dataclasses import dataclass
 from pathlib import Path
 
-import yaml
+from config_io import load_dataclass_config
 
 
 @dataclass(frozen=True)
@@ -65,11 +65,4 @@ class TrainingConfig:
 
 
 def load_config(path: str | Path) -> TrainingConfig:
-    data = yaml.safe_load(Path(path).read_text()) or {}
-    if "val_video_ids" in data:
-        data["val_video_ids"] = tuple(data["val_video_ids"])
-    valid_fields = {f.name for f in fields(TrainingConfig)}
-    unknown = set(data) - valid_fields
-    if unknown:
-        raise ValueError(f"unknown config field(s): {sorted(unknown)}")
-    return TrainingConfig(**data)
+    return load_dataclass_config(TrainingConfig, path, coerce={"val_video_ids": tuple})
