@@ -33,6 +33,7 @@ def _stats_kwargs(**overrides: object) -> dict:
         "staleness_logprob_l1": 0.01,
         "skipped_minibatches": 0,
         "grad_norm": 1.0,
+        "grad_norm_max": 1.5,
         "policy_grad_norm": 0.6,
         "value_grad_norm": 0.4,
     }
@@ -47,10 +48,13 @@ def _stats_kwargs(**overrides: object) -> dict:
         "env_metrics": {},
         "update": 1,
         "global_step": 1024,
-        "iteration_s": 10.0,
-        "env_steps_per_sec": 6553.6,
+        "env_steps_this_update": 6553,
+        "rollout_s": 7.0,
+        "update_s": 3.0,
         "lr": 3e-4,
         "peak_vram_gb": 12.0,
+        "return_scale": 1.0,
+        "wall_clock_hours": 0.5,
     }
     kwargs.update(top_overrides)
     return kwargs
@@ -113,6 +117,7 @@ def test_update_metrics_maps_every_stats_field_without_transposition() -> None:
         staleness_logprob_l1=10.0,
         skipped_minibatches=11,
         grad_norm=12.0,
+        grad_norm_max=21.0,
         policy_grad_norm=13.0,
         value_grad_norm=14.0,
     )
@@ -122,10 +127,13 @@ def test_update_metrics_maps_every_stats_field_without_transposition() -> None:
         env_metrics={},
         update=15,
         global_step=16,
-        iteration_s=17.0,
-        env_steps_per_sec=18.0,
+        env_steps_this_update=1000,
+        rollout_s=8.0,
+        update_s=2.0,
         lr=19.0,
         peak_vram_gb=20.0,
+        return_scale=22.0,
+        wall_clock_hours=23.0,
     )
 
     assert metrics == pytest.approx(
@@ -134,9 +142,11 @@ def test_update_metrics_maps_every_stats_field_without_transposition() -> None:
             "train/env_step": 16.0,
             "train/lr": 19.0,
             "train/grad_norm": 12.0,
+            "train/grad_norm_max": 21.0,
             "train/policy_grad_norm": 13.0,
             "train/value_grad_norm": 14.0,
             "train/skipped_minibatches": 11.0,
+            "train/return_scale": 22.0,
             "loss/policy": 1.0,
             "loss/value": 2.0,
             "loss/entropy": 3.0,
@@ -147,11 +157,61 @@ def test_update_metrics_maps_every_stats_field_without_transposition() -> None:
             "ratio/approx_kl": 6.0,
             "staleness/logprob_l1": 10.0,
             "value/explained_variance": 9.0,
-            "perf/iteration_s": 17.0,
-            "perf/env_steps_per_sec": 18.0,
+            "perf/rollout_s": 8.0,
+            "perf/update_s": 2.0,
+            "perf/iteration_s": 10.0,
+            "perf/env_steps_per_sec": 100.0,
+            "perf/rollout_env_steps_per_sec": 125.0,
+            "perf/wall_clock_hours": 23.0,
             "system/peak_vram_gb": 20.0,
         }
     )
+
+
+def test_update_metrics_splits_rollout_and_update_time() -> None:
+    """perf/iteration_s used to be one combined timer around both the
+    rollout and the update pass, so a slow iteration could not be attributed
+    to either the 64-subprocess env or the GPU-side forward/backward."""
+    metrics = update_metrics(**_stats_kwargs(rollout_s=6.0, update_s=4.0))
+
+    assert (
+        metrics["perf/rollout_s"],
+        metrics["perf/update_s"],
+        metrics["perf/iteration_s"],
+    ) == (pytest.approx(6.0), pytest.approx(4.0), pytest.approx(10.0))
+
+
+def test_update_metrics_reports_rollout_only_throughput_separately_from_overall() -> None:
+    """A copy-paste bug that divided env_steps_this_update by iteration_s for
+    BOTH throughput fields would make these two numbers coincide even though
+    rollout_s and update_s differ -- exactly what would hide an env-side
+    bottleneck behind a normal-looking overall throughput number."""
+    metrics = update_metrics(
+        **_stats_kwargs(env_steps_this_update=1000, rollout_s=5.0, update_s=5.0)
+    )
+
+    assert (
+        metrics["perf/rollout_env_steps_per_sec"],
+        metrics["perf/env_steps_per_sec"],
+    ) == (pytest.approx(200.0), pytest.approx(100.0))
+
+
+def test_update_metrics_reports_the_return_scalers_scale() -> None:
+    """The running std that rescales value targets and advantages -- if it
+    shifts sharply (e.g. after a badge unlock changes the reward
+    distribution), that is currently invisible even though it directly
+    changes what the critic is regressed onto."""
+    metrics = update_metrics(**_stats_kwargs(return_scale=3.5))
+
+    assert metrics["train/return_scale"] == pytest.approx(3.5)
+
+
+def test_update_metrics_reports_cumulative_wall_clock_hours() -> None:
+    """Nothing else on the dashboard answers 'how many paid GPU-hours has
+    this run cost so far'."""
+    metrics = update_metrics(**_stats_kwargs(wall_clock_hours=12.25))
+
+    assert metrics["perf/wall_clock_hours"] == pytest.approx(12.25)
 
 
 def test_no_secret_shaped_key_reaches_the_wandb_config() -> None:

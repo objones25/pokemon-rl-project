@@ -90,7 +90,7 @@ def _stub_run_update(*, approx_kl: float, epoch1_dev: float, forced_nan_abort: b
             clip_fraction=0.0, approx_kl=approx_kl,
             max_abs_ratio_dev_epoch1_mb1=epoch1_dev, max_abs_ratio_dev=epoch1_dev,
             explained_variance=0.0, staleness_logprob_l1=0.0, skipped_minibatches=0,
-            grad_norm=0.0, policy_grad_norm=0.0, value_grad_norm=0.0,
+            grad_norm=0.0, grad_norm_max=0.0, policy_grad_norm=0.0, value_grad_norm=0.0,
         )
 
     return _run_update
@@ -380,6 +380,78 @@ def test_no_artifact_is_logged_on_an_update_off_the_artifact_cadence(tmp_path) -
     run_training(harness.deps, max_updates=2)
 
     assert "explore/heatmap" not in harness.wandb_run.logged[1]
+
+
+def test_rollout_and_update_time_are_logged_separately(tmp_path) -> None:
+    """perf/iteration_s used to be one combined timer, so a slow iteration
+    could not be attributed to either the env or the GPU-side update pass."""
+    harness = _trainer_harness(tmp_path)
+
+    run_training(harness.deps, max_updates=1)
+    logged = harness.wandb_run.logged[0]
+
+    assert logged["perf/rollout_s"] >= 0.0
+    assert logged["perf/update_s"] >= 0.0
+    assert logged["perf/iteration_s"] == pytest.approx(
+        logged["perf/rollout_s"] + logged["perf/update_s"]
+    )
+
+
+def test_checkpoint_write_time_is_logged_only_on_the_checkpoint_cadence(tmp_path) -> None:
+    """perf/checkpoint_s folds into the SAME update's metrics dict rather
+    than a second wandb_run.log() call, which would break the "one log()
+    call per update" invariant on a checkpoint-cadence update."""
+    harness = _trainer_harness(tmp_path, checkpoint_every_updates=2)
+
+    run_training(harness.deps, max_updates=4)
+
+    assert [
+        "perf/checkpoint_s" in logged for logged in harness.wandb_run.logged
+    ] == [True, False, True, False]
+    assert len(harness.wandb_run.logged) == 4
+
+
+def test_diagnostics_time_is_logged_only_on_the_artifact_cadence(tmp_path) -> None:
+    harness = _trainer_harness(tmp_path, artifact_every_updates=2)
+
+    run_training(harness.deps, max_updates=4)
+
+    assert [
+        "perf/diagnostics_s" in logged for logged in harness.wandb_run.logged
+    ] == [True, False, True, False]
+
+
+def test_the_return_scalers_scale_is_logged(tmp_path) -> None:
+    """The running std that rescales value targets -- if it shifts sharply,
+    that is currently invisible even though it directly changes what the
+    critic is regressed onto."""
+    harness = _trainer_harness(tmp_path)
+
+    run_training(harness.deps, max_updates=1)
+    logged = harness.wandb_run.logged[0]
+
+    assert logged["train/return_scale"] > 0.0
+
+
+def test_cumulative_wall_clock_hours_is_logged_and_increases_across_updates(tmp_path) -> None:
+    """Nothing else on the dashboard answers "how many paid GPU-hours has
+    this run cost so far"."""
+    harness = _trainer_harness(tmp_path)
+
+    run_training(harness.deps, max_updates=2)
+    logged = harness.wandb_run.logged
+
+    assert logged[0]["perf/wall_clock_hours"] > 0.0
+    assert logged[1]["perf/wall_clock_hours"] >= logged[0]["perf/wall_clock_hours"]
+
+
+def test_respawn_total_and_delta_are_both_logged(tmp_path) -> None:
+    harness = _trainer_harness(tmp_path)
+
+    run_training(harness.deps, max_updates=1)
+    logged = harness.wandb_run.logged[0]
+
+    assert (logged["env/worker_respawns_total"], logged["env/worker_respawns_delta"]) == (0.0, 0.0)
 
 
 def test_the_running_bests_are_written_to_the_wandb_summary(tmp_path) -> None:

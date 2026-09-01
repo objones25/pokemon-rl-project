@@ -40,10 +40,13 @@ def update_metrics(
     env_metrics: dict[str, float],
     update: int,
     global_step: int,
-    iteration_s: float,
-    env_steps_per_sec: float,
+    env_steps_this_update: int,
+    rollout_s: float,
+    update_s: float,
     lr: float,
     peak_vram_gb: float,
+    return_scale: float,
+    wall_clock_hours: float,
 ) -> dict[str, float]:
     """One update's scalars, plus the caller's already-assembled env/policy
     metrics merged in unchanged. `train/update` is the value STEP_METRICS
@@ -53,15 +56,24 @@ def update_metrics(
     Both split gradient norms are logged alongside the total: the policy and
     critic share a trunk, so a single clipped global `train/grad_norm` can
     hide a large value-loss gradient consuming the whole clip budget and
-    shrinking the policy gradient toward nothing."""
+    shrinking the policy gradient toward nothing.
+
+    `rollout_s`/`update_s` are kept separate rather than pre-summed by the
+    caller, and `perf/rollout_env_steps_per_sec` is computed from `rollout_s`
+    alone: a slow iteration is otherwise indistinguishable between the
+    64-subprocess env stalling and the GPU-side forward/backward, exactly
+    the "dataloader starvation" failure mode a combined timer hides."""
+    iteration_s = rollout_s + update_s
     metrics = {
         "train/update": float(update),
         "train/env_step": float(global_step),
         "train/lr": float(lr),
         "train/grad_norm": stats.grad_norm,
+        "train/grad_norm_max": stats.grad_norm_max,
         "train/policy_grad_norm": stats.policy_grad_norm,
         "train/value_grad_norm": stats.value_grad_norm,
         "train/skipped_minibatches": float(stats.skipped_minibatches),
+        "train/return_scale": float(return_scale),
         "loss/policy": stats.policy_loss,
         "loss/value": stats.value_loss,
         "loss/entropy": stats.entropy,
@@ -72,8 +84,12 @@ def update_metrics(
         "ratio/approx_kl": stats.approx_kl,
         "staleness/logprob_l1": stats.staleness_logprob_l1,
         "value/explained_variance": stats.explained_variance,
+        "perf/rollout_s": float(rollout_s),
+        "perf/update_s": float(update_s),
         "perf/iteration_s": float(iteration_s),
-        "perf/env_steps_per_sec": float(env_steps_per_sec),
+        "perf/env_steps_per_sec": float(env_steps_this_update) / max(iteration_s, 1e-9),
+        "perf/rollout_env_steps_per_sec": float(env_steps_this_update) / max(rollout_s, 1e-9),
+        "perf/wall_clock_hours": float(wall_clock_hours),
         "system/peak_vram_gb": float(peak_vram_gb),
     }
     metrics.update(env_metrics)

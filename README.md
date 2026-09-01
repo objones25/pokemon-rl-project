@@ -62,7 +62,7 @@ time. The encoder is frozen before PPO ever runs.
 | 4. Pokemon Red environment | `src/pokemon_env/` | Built. 64 subprocess emulators, RAM observations, reward, checkpoint/resume. |
 | 5. PPO trainer | `src/ppo/` | Built. Connects 3 and 4. Four pre-flight gates stand between it and the first paid run. |
 
-Test suite as of this writing: **733 passing, 94.87% branch coverage** (the
+Test suite as of this writing: **746 passing, 94.89% branch coverage** (the
 floor in `pyproject.toml` is 93%), plus 14 opt-in `slow` tests that need a real
 ROM, real ffmpeg, or real Hub credentials.
 

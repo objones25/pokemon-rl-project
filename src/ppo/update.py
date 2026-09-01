@@ -45,6 +45,12 @@ class UpdateStats:
     staleness_logprob_l1: float
     skipped_minibatches: int
     grad_norm: float
+    # The last minibatch's norm overwrites grad_norm every iteration, so an
+    # earlier spike that a later, smaller-gradient minibatch happens to
+    # overwrite is invisible in grad_norm alone -- exactly the kind of
+    # divergence signal train/grad_norm exists to catch. Tracked across every
+    # non-skipped minibatch of the update, not just (epoch 1, minibatch 1).
+    grad_norm_max: float
     # The trunk is shared between actor and critic, so one clipped global
     # gradient covers their sum. A large value-loss gradient can consume the
     # whole clip budget and shrink the policy gradient toward nothing -- which
@@ -126,6 +132,7 @@ def run_update(
     last = None
     skipped = 0
     grad_norm = 0.0
+    grad_norm_max = 0.0
     policy_grad_norm = 0.0
     value_grad_norm = 0.0
     for epoch in range(config.n_epochs):
@@ -185,6 +192,7 @@ def run_update(
             grad_norm = float(
                 torch.nn.utils.clip_grad_norm_(policy.parameters(), config.max_grad_norm)
             )
+            grad_norm_max = max(grad_norm_max, grad_norm)
             optimizer.step()
             if scheduler is not None:
                 scheduler.step()
@@ -203,6 +211,7 @@ def run_update(
         staleness_logprob_l1=staleness,
         skipped_minibatches=skipped,
         grad_norm=grad_norm,
+        grad_norm_max=grad_norm_max,
         policy_grad_norm=policy_grad_norm,
         value_grad_norm=value_grad_norm,
     )

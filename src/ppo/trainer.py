@@ -1,8 +1,12 @@
 """The outer PPO loop.
 
-Order per iteration: rollout -> update -> telemetry -> cadence work
+Order per iteration: rollout -> update -> telemetry assembled -> cadence work
 (diagnostics + artifacts every artifact_every_updates, checkpoint every
-checkpoint_every_updates) -> buffer shift.
+checkpoint_every_updates, both folding their own timing into the same
+metrics dict) -> one wandb_run.log() call -> buffer shift. Checkpoint writing
+happens before that single log() call specifically so perf/checkpoint_s
+lands in the same update's row rather than needing a second log() call,
+which would break "one log() per update."
 
 The spec's periodic Hub snapshot is deliberately NOT here: it needs an upload
 client and a credential path this trainer is not given, and
@@ -163,6 +167,12 @@ def run_training(deps: PPODeps, max_updates: int | None = None) -> None:
 
 
 def _run_training(deps: PPODeps, config: PPOConfig, max_updates: int | None) -> None:
+    # Per-process, not cumulative across preemptions: time.monotonic() resets
+    # on restart and no checkpoint state carries a prior segment's total. On a
+    # resumed run this is "hours since this segment started," not "hours this
+    # run has cost in total" -- still the number that answers "is this
+    # iteration cadence normal" without reading a wall clock by hand.
+    run_started = time.monotonic()
     logger.info(
         "run_started",
         extra={
@@ -230,11 +240,17 @@ def _run_training(deps: PPODeps, config: PPOConfig, max_updates: int | None) -> 
 
     best: dict[str, float] = {}
     while max_updates is None or update < start_update + max_updates:
-        started = time.monotonic()
         if deps.device.type == "cuda":
             torch.cuda.reset_peak_memory_stats()
 
+        # Split, not one combined timer: a slow iteration is otherwise
+        # indistinguishable between the 64-subprocess env stalling and the
+        # GPU-side forward/backward -- the "dataloader starvation" failure
+        # mode a single perf/iteration_s number hides.
+        respawns_before = _respawns(deps.vec_env)
+        rollout_started = time.monotonic()
         state = collect_rollout(state=state, n_steps=config.n_steps, **rollout_kwargs)
+        rollout_s = time.monotonic() - rollout_started
         global_step += config.n_steps * deps.env_config.n_envs
 
         # All three abort paths -- the epoch-1 ratio invariant, the approx_kl
@@ -243,6 +259,7 @@ def _run_training(deps: PPODeps, config: PPOConfig, max_updates: int | None) -> 
         # the difference between "died at hour 30 on the ratio invariant" and
         # "died at hour 30 on KL" is the whole diagnosis. The exception
         # itself still propagates untouched.
+        update_started = time.monotonic()
         try:
             stats = deps.run_update(
                 deps.policy, deps.optimizer, deps.scheduler, buffer, scaler, config,
@@ -255,8 +272,8 @@ def _run_training(deps: PPODeps, config: PPOConfig, max_updates: int | None) -> 
                 extra={"update": update, "global_step": global_step},
             )
             raise
+        update_s = time.monotonic() - update_started
 
-        elapsed = time.monotonic() - started
         # collect_rollout just advanced the env n_steps times, so last_step
         # cannot be None here. Asserted rather than widening rollout_metrics
         # to accept an Optional it would only ever have to reject.
@@ -264,14 +281,24 @@ def _run_training(deps: PPODeps, config: PPOConfig, max_updates: int | None) -> 
         assert last_step is not None, (
             "vec_env.last_step is None after collect_rollout advanced the env"
         )
+        respawns_total = _respawns(deps.vec_env)
         env_metrics = rollout_metrics(
             last_step, deps.vec_env.last_components,
-            deps.vec_env.clip_fire_rate, _respawns(deps.vec_env), deps.vec_env.stats(),
+            deps.vec_env.clip_fire_rate, respawns_total, deps.vec_env.stats(),
+            respawns_delta=respawns_total - respawns_before,
         )
         metrics: dict = update_metrics(
-            stats, env_metrics, update, global_step, elapsed,
-            config.n_steps * deps.env_config.n_envs / max(elapsed, 1e-9),
-            _current_lr(deps.optimizer), _peak_vram_gb(deps.device),
+            stats=stats,
+            env_metrics=env_metrics,
+            update=update,
+            global_step=global_step,
+            env_steps_this_update=config.n_steps * deps.env_config.n_envs,
+            rollout_s=rollout_s,
+            update_s=update_s,
+            lr=_current_lr(deps.optimizer),
+            peak_vram_gb=_peak_vram_gb(deps.device),
+            return_scale=scaler.scale,
+            wall_clock_hours=(time.monotonic() - run_started) / 3600.0,
         )
         _record_best(best, env_metrics)
 
@@ -280,24 +307,28 @@ def _run_training(deps: PPODeps, config: PPOConfig, max_updates: int | None) -> 
             # expensive for every update -- diagnostics materializes the full
             # attention matrix SDPA never forms -- and both move before loss
             # and grad norm do, which is the entire reason they exist.
+            diagnostics_started = time.monotonic()
             metrics.update(
                 _policy_diagnostics(deps.policy, buffer, config, deps.device, deps.autocast_dtype)
             )
+            metrics["perf/diagnostics_s"] = time.monotonic() - diagnostics_started
             metrics.update(_artifacts(deps.vec_env, update))
             deps.wandb_run.summary(best)
 
-        deps.wandb_run.log(metrics)
-
         if update % config.checkpoint_every_updates == 0:
+            checkpoint_started = time.monotonic()
             ppo_checkpoint.write_checkpoint(
                 directory, update, global_step, deps.policy, deps.optimizer,
                 deps.scheduler, cache, deps.vec_env, scaler, config,
                 deps.init_state_hash, _run_id(deps.wandb_run), deps.git_commit,
             )
+            metrics["perf/checkpoint_s"] = time.monotonic() - checkpoint_started
 
-        # LAST: a checkpoint just written above describes the pre-shift
-        # buffer state, which the next resume reproduces by collecting
-        # n_steps fresh observations.
+        deps.wandb_run.log(metrics)
+
+        # LAST: a checkpoint above describes the pre-shift buffer state,
+        # which the next resume reproduces by collecting n_steps fresh
+        # observations.
         buffer.shift()
         update += 1
 

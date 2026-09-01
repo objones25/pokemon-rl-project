@@ -330,6 +330,31 @@ def test_the_split_grad_norms_match_an_independent_differentiation_of_the_same_t
     )
 
 
+def test_grad_norm_max_captures_the_largest_minibatch_norm_not_just_the_last(
+    monkeypatch,
+) -> None:
+    """train/grad_norm is overwritten every minibatch, so it reports only the
+    LAST minibatch of the update -- a spike three minibatches earlier that a
+    later, smaller-gradient minibatch happens to overwrite is invisible in
+    that value. grad_norm_max exists to catch exactly that: the real
+    clip_grad_norm_ still runs (so gradients are genuinely computed and
+    clipped), but its reported return value is overridden with a controlled,
+    non-monotonic sequence whose maximum is NOT the last call."""
+    harness = _update_harness(monkeypatch, n_envs=4, minibatch_envs=2, n_epochs=2)
+    real_clip = torch.nn.utils.clip_grad_norm_
+    scripted = iter([1.0, 5.0, 2.0, 0.5])
+
+    def fake_clip(parameters, max_norm):
+        real_clip(parameters, max_norm)
+        return next(scripted)
+
+    monkeypatch.setattr(torch.nn.utils, "clip_grad_norm_", fake_clip)
+
+    stats = run_update(**harness.kwargs())
+
+    assert (stats.grad_norm, stats.grad_norm_max) == pytest.approx((0.5, 5.0))
+
+
 def test_gae_receives_the_reward_earned_by_each_trained_slots_own_action(monkeypatch) -> None:
     """compute_gae's delta_t = reward[t] + gamma*V[t+1] - V[t] is only correct
     when reward[t] is r(o_t, a_t). The rollout writes slot t as (o_t, a_t,

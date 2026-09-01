@@ -85,6 +85,7 @@ def rollout_metrics(
     clip_fire_rate: float,
     respawns: int,
     stats: list[dict],
+    respawns_delta: int = 0,
 ) -> dict[str, float]:
     """Flat scalar dict, ready for wandb.log and for a JSON-lines record.
 
@@ -92,6 +93,12 @@ def rollout_metrics(
     are counted across the union of all envs, not summed per env: two envs that
     walked the same route have explored one route, and summing would report
     twice the exploration that happened.
+
+    `respawns` is cumulative since the worker process started (it survives
+    resume, via SubprocessBackend's own checkpoint state) -- a burst of
+    respawns in one update only shows up as a slope change in that monotonic
+    curve. `respawns_delta` is this update's own count, so a crash loop is a
+    visible spike rather than a slope a human has to notice.
 
     Assumes `stats` is non-empty: `max(...)`/`sum(...) / len(stats)` below
     would raise on an empty list. EnvConfig validates n_envs >= 1, and `stats`
@@ -104,7 +111,8 @@ def rollout_metrics(
         "reward/mean": float(step.reward.mean()),
         "reward/max": float(step.reward.max()),
         "env/clip_fire_rate": float(clip_fire_rate),
-        "env/worker_respawns": float(respawns),
+        "env/worker_respawns_total": float(respawns),
+        "env/worker_respawns_delta": float(respawns_delta),
         "env/episodes_finished": float(step.done.sum()),
         "progress/badges_max": float(max(entry["badges"] for entry in stats)),
         "progress/badges_mean": float(

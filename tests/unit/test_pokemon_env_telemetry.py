@@ -146,7 +146,38 @@ def test_rollout_metrics_surfaces_worker_respawns() -> None:
         _vec_step(4), components={}, clip_fire_rate=0.0, respawns=3, stats=_empty_stats(4)
     )
 
-    assert metrics["env/worker_respawns"] == pytest.approx(3.0)
+    assert metrics["env/worker_respawns_total"] == pytest.approx(3.0)
+
+
+def test_rollout_metrics_surfaces_the_per_update_respawn_delta_separately_from_the_total() -> None:
+    """worker_respawns_total is cumulative since the worker process started
+    (it survives resume), so a burst of respawns in one update only shows up
+    as a slope change in a monotonic curve -- easy to miss. The delta makes
+    that update's own burst a visible spike instead."""
+    metrics = rollout_metrics(
+        _vec_step(4),
+        components={},
+        clip_fire_rate=0.0,
+        respawns=10,
+        stats=_empty_stats(4),
+        respawns_delta=2,
+    )
+
+    assert (metrics["env/worker_respawns_total"], metrics["env/worker_respawns_delta"]) == (
+        pytest.approx(10.0),
+        pytest.approx(2.0),
+    )
+
+
+def test_rollout_metrics_defaults_the_respawn_delta_to_zero_when_not_given() -> None:
+    """Every other rollout_metrics caller (the smoke test, older-style
+    positional calls) does not track a delta -- it must not become a required
+    argument."""
+    metrics = rollout_metrics(
+        _vec_step(4), components={}, clip_fire_rate=0.0, respawns=0, stats=_empty_stats(4)
+    )
+
+    assert metrics["env/worker_respawns_delta"] == pytest.approx(0.0)
 
 
 def test_two_coordinates_one_tile_apart_do_not_collide_in_the_heatmap() -> None:
