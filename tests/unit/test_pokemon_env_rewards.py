@@ -145,6 +145,64 @@ def test_healing_is_ignored_when_party_size_changed(fake_emulator, accumulator) 
     assert result.components["heal"] == pytest.approx(0.0)
 
 
+def test_a_single_modest_heal_earns_its_full_uncapped_value(
+    fake_emulator, accumulator
+) -> None:
+    """A genuine, unremarkable recovery must still be rewarded exactly as
+    before -- the cap exists for repeated farming past the ceiling, not for
+    an ordinary single heal nowhere near it."""
+    fake_emulator.memory[ram.PARTY_MAX_HP_BASE + 1] = 100
+    fake_emulator.memory[ram.PARTY_HP_BASE + 1] = 0
+    # Matches last_hp_fraction=0.0 from reset() exactly (0 == 0, not >), so
+    # this step registers no gain -- the heal measured below is isolated to
+    # the second step alone.
+    accumulator.step(fake_emulator)
+    fake_emulator.memory[ram.PARTY_HP_BASE + 1] = 30
+
+    result = accumulator.step(fake_emulator)
+
+    # heal_weight(0.5) * delta(0.3)^2 = 0.045, well under the 0.2 ceiling.
+    assert result.components["heal"] == pytest.approx(0.045)
+
+
+def test_repeated_deposit_withdraw_healing_cycles_are_capped_not_farmable(
+    fake_emulator, accumulator
+) -> None:
+    """The exact exploit this module's docstring says every component
+    defends against ('the deposit/withdraw exploit section 4 names') --
+    except _update_healing's raw accumulator has no ceiling, so unlike every
+    other component, repeated cycles here keep paying forever. A real
+    training run hit this: reward/heal grew past every other reward
+    component combined over ~9M steps while badges stayed at zero. After
+    enough cycles, the heal component must stop growing."""
+    fake_emulator.memory[ram.PARTY_MAX_HP_BASE + 1] = 100
+    for _ in range(50):
+        fake_emulator.memory[ram.PARTY_HP_BASE + 1] = 1
+        accumulator.step(fake_emulator)
+        fake_emulator.memory[ram.PARTY_HP_BASE + 1] = 100
+        result = accumulator.step(fake_emulator)
+
+    assert result.components["heal"] == pytest.approx(0.2)
+
+
+def test_the_heal_contribution_ceiling_does_not_scale_with_heal_weight(
+    fake_emulator,
+) -> None:
+    """The ceiling bounds heal's contribution to `total` directly, not the
+    raw total_healing accumulator -- so retuning heal_weight later cannot
+    silently raise how much healing can ever be worth relative to a badge."""
+    acc = RewardAccumulator(EnvConfig(heal_weight=5.0))
+    acc.reset(fake_emulator)
+    fake_emulator.memory[ram.PARTY_MAX_HP_BASE + 1] = 100
+    for _ in range(50):
+        fake_emulator.memory[ram.PARTY_HP_BASE + 1] = 1
+        acc.step(fake_emulator)
+        fake_emulator.memory[ram.PARTY_HP_BASE + 1] = 100
+        result = acc.step(fake_emulator)
+
+    assert result.components["heal"] == pytest.approx(0.2)
+
+
 def test_base_event_flags_captured_at_reset_earn_nothing(fake_emulator) -> None:
     """init.state already has flags set. Without subtracting the baseline the
     agent is paid on step one for progress it did not make."""

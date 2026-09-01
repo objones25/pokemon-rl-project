@@ -22,6 +22,25 @@ from pokemon_env import ram
 from pokemon_env.config import EnvConfig
 from pokemon_env.emulator import Emulator
 
+# heal is the one component this module's own docstring is wrong about:
+# "every component is a running maximum or a monotone count, so cycles pay
+# nothing" holds for badges/events/coords (each bounded by finite game
+# state) but not for _update_healing's raw total_healing, which grows once
+# per HP recovery with no limit on how many deposit/withdraw HP cycles one
+# episode can contain. A real training run hit exactly this: reward/heal
+# grew past every other reward component combined over ~9M steps in one
+# episode while badges stayed at zero -- the policy had found repeated
+# damage/heal cycling was strictly easier reward than actual progress.
+#
+# Capped here, on the WEIGHTED contribution rather than the raw
+# accumulator, so retuning heal_weight later cannot silently raise how much
+# healing can ever be worth. 0.2 -- a fifth of one badge at this config's
+# default badge_weight=1.0 -- still rewards genuine recovery without ever
+# letting it compete with real progress. Once total_healing's weighted
+# value crosses this, repeated cycles pay the same nothing every other
+# component's cycles already do, restoring the invariant above.
+_HEAL_CONTRIBUTION_CEILING = 0.2
+
 
 @dataclass(frozen=True)
 class RewardBreakdown:
@@ -96,7 +115,9 @@ class RewardAccumulator:
 
         components = {
             "badges": self._config.badge_weight * badge_count,
-            "heal": self._config.heal_weight * self._state.total_healing,
+            "heal": min(
+                self._config.heal_weight * self._state.total_healing, _HEAL_CONTRIBUTION_CEILING
+            ),
             "explore": self._config.explore_weight * self._state.explore_sum,
             "events": self._config.event_weight * self._event_score(mem, event_flag_count),
             "levels": self._config.level_weight * ram.level_score(mem),
