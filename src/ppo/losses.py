@@ -27,6 +27,18 @@ class LossOutput:
     clip_fraction: float
     approx_kl: float
     max_abs_ratio_dev: float
+    # The full (B, T) tensor `max_abs_ratio_dev` is reduced from, detached.
+    # Exposed so a caller can pool it across every minibatch of an update
+    # and take percentiles -- the scalar max alone cannot distinguish "one
+    # outlier token" from "broad drift across the batch," and reporting
+    # only the LAST minibatch's max (as this project did before) hides
+    # every other minibatch's tokens entirely.
+    abs_ratio_dev: torch.Tensor
+    # Mean of the per-position largest action probability -- entropy's
+    # sharper, directly comparable companion: mean entropy can look
+    # moderate while most individual states already have one action near-
+    # certain (rl-agent-expert's stability guidance names this explicitly).
+    max_action_prob: float
 
 
 def ppo_losses(
@@ -57,8 +69,10 @@ def ppo_losses(
     with torch.no_grad():
         # Schulman's low-variance estimator, the same one SB3 reports.
         approx_kl = float(((ratio - 1.0) - log_ratio).mean())
-        clip_fraction = float(((ratio - 1.0).abs() > config.clip_range).float().mean())
-        max_abs_ratio_dev = float((ratio - 1.0).abs().max())
+        abs_ratio_dev = (ratio - 1.0).abs()
+        clip_fraction = float((abs_ratio_dev > config.clip_range).float().mean())
+        max_abs_ratio_dev = float(abs_ratio_dev.max())
+        max_action_prob = float(log_probabilities.exp().max(dim=-1).values.mean())
 
     return LossOutput(
         policy=policy_loss,
@@ -68,4 +82,6 @@ def ppo_losses(
         clip_fraction=clip_fraction,
         approx_kl=approx_kl,
         max_abs_ratio_dev=max_abs_ratio_dev,
+        abs_ratio_dev=abs_ratio_dev,
+        max_action_prob=max_action_prob,
     )

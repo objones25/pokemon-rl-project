@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+
 import pytest
 import torch
 
@@ -113,6 +115,75 @@ def test_the_total_adds_the_scaled_value_loss_and_subtracts_the_scaled_entropy()
     )
 
     assert output.total.item() == pytest.approx(2.493068528, abs=1e-7)
+
+
+def test_abs_ratio_dev_is_the_full_per_position_deviation_not_just_its_max() -> None:
+    """Callers pool this tensor across a whole update's minibatches to
+    distinguish a few outlier tokens from broad drift (percentiles), which
+    the scalar max_abs_ratio_dev alone cannot -- so the full tensor, not
+    just its reduction, must be exposed."""
+    logits = torch.zeros(1, 2, 2)
+    action = torch.zeros(1, 2, dtype=torch.int64)
+    # Position 0: ratio = e^1, |ratio-1| = e-1. Position 1: ratio = 1, |ratio-1| = 0.
+    logprob_old = torch.log_softmax(logits, dim=-1)[..., 0] - torch.tensor([[1.0, 0.0]])
+
+    output = ppo_losses(
+        logits, torch.zeros(1, 2), action, logprob_old,
+        advantage=torch.ones(1, 2), value_target=torch.zeros(1, 2), config=_config(),
+    )
+
+    assert output.abs_ratio_dev.squeeze(0).tolist() == pytest.approx(
+        [math.e - 1.0, 0.0], abs=1e-5
+    )
+
+
+def test_abs_ratio_dev_has_the_same_shape_as_the_batch() -> None:
+    logits = torch.randn(3, 5, 7)
+    action = torch.zeros(3, 5, dtype=torch.int64)
+    logprob_old = torch.log_softmax(logits, dim=-1).gather(-1, action.unsqueeze(-1)).squeeze(-1)
+
+    output = ppo_losses(
+        logits, torch.zeros(3, 5), action, logprob_old,
+        advantage=torch.ones(3, 5), value_target=torch.zeros(3, 5), config=_config(),
+    )
+
+    assert output.abs_ratio_dev.shape == (3, 5)
+
+
+def test_abs_ratio_devs_max_matches_the_scalar_max_abs_ratio_dev() -> None:
+    """Both come from the same underlying tensor -- a consistency check
+    that the scalar reduction and the tensor exposed for pooling never
+    silently diverge (e.g. one computed pre-clip and the other post)."""
+    torch.manual_seed(1)
+    logits = torch.randn(2, 4, 3)
+    action = torch.randint(0, 3, (2, 4))
+    logprob_old = torch.log_softmax(logits, dim=-1).gather(-1, action.unsqueeze(-1)).squeeze(
+        -1
+    ) - torch.rand(2, 4)
+
+    output = ppo_losses(
+        logits, torch.zeros(2, 4), action, logprob_old,
+        advantage=torch.ones(2, 4), value_target=torch.zeros(2, 4), config=_config(),
+    )
+
+    assert float(output.abs_ratio_dev.max()) == pytest.approx(output.max_abs_ratio_dev)
+
+
+def test_max_action_prob_is_the_mean_per_position_largest_probability() -> None:
+    """Mean of per-position max probability, matching how entropy itself is
+    a mean of per-position entropy -- a directly comparable, sharper
+    companion: entropy can look moderate on average while most individual
+    states already have one action near-certain (rl-agent-expert guidance)."""
+    logits = torch.tensor([[[0.0, 0.0], [0.0, math.log(3.0)]]])  # pos0 max=0.5, pos1 max=0.75
+    action = torch.zeros(1, 2, dtype=torch.int64)
+    logprob_old = torch.log_softmax(logits, dim=-1)[..., 0]
+
+    output = ppo_losses(
+        logits, torch.zeros(1, 2), action, logprob_old,
+        advantage=torch.zeros(1, 2), value_target=torch.zeros(1, 2), config=_config(),
+    )
+
+    assert output.max_action_prob == pytest.approx(0.625, abs=1e-6)
 
 
 def test_the_entropy_of_a_uniform_two_way_logit_is_log_two() -> None:

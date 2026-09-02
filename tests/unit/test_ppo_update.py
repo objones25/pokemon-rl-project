@@ -57,19 +57,44 @@ def _install_ppo_losses_spy(policy: RecurrentTransformerPolicy, monkeypatch) -> 
 
 
 def _install_compute_gae_spy(monkeypatch) -> dict:
-    """Records the tensors run_update hands to compute_gae, so a test can pin
-    what GAE actually consumed rather than only the numbers that fall out of
-    it. Same monkeypatch-and-restore discipline as the ppo_losses spy."""
+    """Records the tensors run_update hands to compute_gae, and what it
+    returns, so a test can pin what GAE actually consumed AND produced
+    rather than only the numbers that survive run_update's own subsequent
+    (in-place) normalization. Same monkeypatch-and-restore discipline as
+    the ppo_losses spy."""
     real_compute_gae = update_module.compute_gae
     state: dict = {}
 
     def spy(reward, value, episode_id, gamma, gae_lambda):
         state["reward"] = reward.clone()
         state["value"] = value.clone()
-        return real_compute_gae(reward, value, episode_id, gamma, gae_lambda)
+        advantage, returns = real_compute_gae(reward, value, episode_id, gamma, gae_lambda)
+        state["advantage"] = advantage.clone()
+        state["returns"] = returns.clone()
+        return advantage, returns
 
     monkeypatch.setattr("ppo.update.compute_gae", spy)
     return state
+
+
+def _install_ppo_losses_result_spy(monkeypatch) -> list:
+    """Records every LossOutput ppo_losses actually returns, in call order,
+    without altering behavior at all. Lets a test independently recompute
+    an aggregate (mean, percentile) from the exact values run_update saw,
+    checking run_update's OWN aggregation logic rather than re-deriving the
+    expected numbers by some other route."""
+    real_ppo_losses = update_module.ppo_losses
+    results: list = []
+
+    def spy(logits, value, action, logprob_old, advantage, value_target, config):
+        result = real_ppo_losses(
+            logits, value, action, logprob_old, advantage, value_target, config
+        )
+        results.append(result)
+        return result
+
+    monkeypatch.setattr("ppo.update.ppo_losses", spy)
+    return results
 
 
 def _install_ppo_losses_kl_override(monkeypatch, *, trigger_at_call: int, kl_value: float) -> dict:
@@ -79,9 +104,11 @@ def _install_ppo_losses_kl_override(monkeypatch, *, trigger_at_call: int, kl_val
     call's LossOutput (the real policy/value/entropy tensors, with a live
     autograd graph) is untouched. Lets a test control exactly which
     minibatch trips the target_kl threshold without faking the forward
-    pass or the invariant that (epoch 1, minibatch 1) always has ratio 1."""
+    pass or the invariant that (epoch 1, minibatch 1) always has ratio 1.
+    Every call's (possibly-overridden) result is also recorded, so a test
+    can independently recompute an aggregate that should include it."""
     real_ppo_losses = update_module.ppo_losses
-    state: dict = {"call_count": 0}
+    state: dict = {"call_count": 0, "results": []}
 
     def fake(logits, value, action, logprob_old, advantage, value_target, config):
         state["call_count"] += 1
@@ -90,6 +117,7 @@ def _install_ppo_losses_kl_override(monkeypatch, *, trigger_at_call: int, kl_val
         )
         if state["call_count"] == trigger_at_call:
             result = replace(result, approx_kl=kl_value)
+        state["results"].append(result)
         return result
 
     monkeypatch.setattr("ppo.update.ppo_losses", fake)
@@ -400,6 +428,116 @@ def test_target_kl_none_disables_early_stopping_regardless_of_approx_kl(monkeypa
     stats = run_update(**harness.kwargs())
 
     assert (stats.target_kl_triggered, harness.optimizer.step_calls) == (False, 6)
+
+
+def test_approx_kl_mean_and_clip_fraction_mean_average_every_processed_minibatch(
+    monkeypatch,
+) -> None:
+    """Matches stable-baselines3's own convention (mean over every
+    minibatch processed this update) rather than this project's prior
+    last-minibatch-only value, which SB3's own source shows is a step down
+    from standard practice -- and which, once target_kl exists, can even
+    describe a rejected step. Computed independently from the same
+    real LossOutputs run_update saw, not re-derived from run_update's own
+    internal state."""
+    harness = _update_harness(monkeypatch, n_envs=4, minibatch_envs=2, n_epochs=3)
+    results = _install_ppo_losses_result_spy(monkeypatch)
+
+    stats = run_update(**harness.kwargs())
+
+    expected_kl = sum(r.approx_kl for r in results) / len(results)
+    expected_clip = sum(r.clip_fraction for r in results) / len(results)
+    assert (stats.approx_kl_mean, stats.clip_fraction_mean) == pytest.approx(
+        (expected_kl, expected_clip)
+    )
+
+
+def test_ratio_abs_dev_percentiles_and_max_are_pooled_across_every_minibatch(
+    monkeypatch,
+) -> None:
+    """The scalar max alone (the pre-existing max_abs_ratio_dev, still
+    last-minibatch-only) cannot distinguish a handful of outlier tokens
+    from broad drift across the whole update -- these pool every
+    processed minibatch's |ratio-1| tensor first."""
+    harness = _update_harness(monkeypatch, n_envs=4, minibatch_envs=2, n_epochs=3)
+    results = _install_ppo_losses_result_spy(monkeypatch)
+
+    stats = run_update(**harness.kwargs())
+
+    pooled = torch.cat([r.abs_ratio_dev.flatten() for r in results])
+    assert (
+        stats.ratio_abs_dev_p50,
+        stats.ratio_abs_dev_p95,
+        stats.ratio_abs_dev_p99,
+        stats.max_abs_ratio_dev_update,
+    ) == pytest.approx(
+        (
+            float(torch.quantile(pooled, 0.50)),
+            float(torch.quantile(pooled, 0.95)),
+            float(torch.quantile(pooled, 0.99)),
+            float(pooled.max()),
+        )
+    )
+
+
+def test_a_target_kl_rejected_minibatch_counts_toward_approx_kl_mean(monkeypatch) -> None:
+    """Matches SB3's own convention exactly: the triggering minibatch's
+    approx_kl describes what the update observed, not just what it
+    applied, so it counts toward the aggregate too -- SB3 appends to its
+    own approx_kl list BEFORE checking the threshold and breaking."""
+    harness = _update_harness(monkeypatch, n_envs=4, minibatch_envs=2, n_epochs=3, target_kl=0.02)
+    state = _install_ppo_losses_kl_override(monkeypatch, trigger_at_call=3, kl_value=0.05)
+
+    stats = run_update(**harness.kwargs())
+
+    assert len(state["results"]) == 3  # epoch 0's 2 completed + the rejecting 3rd
+    expected = sum(r.approx_kl for r in state["results"]) / len(state["results"])
+    assert stats.approx_kl_mean == pytest.approx(expected)
+
+
+def test_max_action_prob_reflects_the_last_computed_minibatch(monkeypatch) -> None:
+    """Same convention as loss/entropy itself -- the last-computed
+    minibatch's value, not an update-wide aggregate, for consistency with
+    its existing sibling metric."""
+    harness = _update_harness(monkeypatch, n_envs=4, minibatch_envs=2, n_epochs=2)
+    results = _install_ppo_losses_result_spy(monkeypatch)
+
+    stats = run_update(**harness.kwargs())
+
+    assert stats.max_action_prob == pytest.approx(results[-1].max_action_prob)
+
+
+def test_raw_advantage_stats_describe_the_pre_normalization_tensor(monkeypatch) -> None:
+    """Captured via a real compute_gae call, independent of run_update's
+    own in-place normalization -- a bug that computed these from the
+    ALREADY-normalized tensor (mean ~0, std ~1 always, regardless of the
+    real distribution) would still pass a shape check but fail this."""
+    harness = _update_harness(monkeypatch, n_envs=4, minibatch_envs=2)
+    gae_state = _install_compute_gae_spy(monkeypatch)
+
+    stats = run_update(**harness.kwargs())
+
+    raw = gae_state["advantage"]
+    abs_flat = raw.abs().flatten()
+    total_abs = float(abs_flat.sum())
+    top1_frac = float(abs_flat.max()) / total_abs
+    k = max(1, abs_flat.numel() // 100)
+    top1pct_frac = float(torch.topk(abs_flat, k).values.sum()) / total_abs
+    assert (
+        stats.raw_advantage_mean,
+        stats.raw_advantage_std,
+        stats.raw_advantage_abs_max,
+        stats.raw_advantage_top1_frac,
+        stats.raw_advantage_top1pct_frac,
+    ) == pytest.approx(
+        (
+            float(raw.mean()),
+            float(raw.std()),
+            float(abs_flat.max()),
+            top1_frac,
+            top1pct_frac,
+        )
+    )
 
 
 def test_advantages_are_normalized_once_over_the_whole_update_batch(monkeypatch) -> None:

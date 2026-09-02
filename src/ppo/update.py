@@ -69,6 +69,46 @@ class UpdateStats:
     # step was skipped for a different reason (corrupt gradients, not an
     # intentional trust-region stop).
     minibatches_completed: int
+    # approx_kl/clip_fraction above are the LAST-computed minibatch only --
+    # which, whenever target_kl_triggered is True, can be a REJECTED step
+    # never applied to the weights. These instead average every minibatch
+    # that ran (finite loss, whether or not target_kl went on to reject
+    # it), matching stable-baselines3's own convention exactly: SB3
+    # appends each minibatch's approx_kl to its aggregate BEFORE checking
+    # target_kl and breaking, so a rejected step still counts toward what
+    # the update observed.
+    approx_kl_mean: float
+    clip_fraction_mean: float
+    # Percentiles and the true max of |ratio-1|, POOLED across every
+    # processed minibatch's full (B, T) tensor -- not just the last
+    # minibatch's max (max_abs_ratio_dev above, unchanged for backward
+    # compatibility). This is what actually distinguishes "a few outlier
+    # tokens" from "broad drift across the batch": p50/p95 staying low
+    # while p99/max spike is the outlier-token shape seen in every live
+    # run so far; all four moving together would be broad drift instead.
+    ratio_abs_dev_p50: float
+    ratio_abs_dev_p95: float
+    ratio_abs_dev_p99: float
+    max_abs_ratio_dev_update: float
+    # Mean of the per-position largest action probability, last-computed
+    # minibatch -- same convention as loss/entropy itself. Entropy's
+    # sharper companion: mean entropy can look moderate while most
+    # individual states already have one action near-certain.
+    max_action_prob: float
+    # The advantage distribution BEFORE run_update's own in-place
+    # normalization overwrites it (advantage = (advantage - mean) / std).
+    # That normalization can make a single extreme transition survive as a
+    # many-sigma outlier while simultaneously deflating everyone else's
+    # std, so the raw, pre-normalization shape is what actually tests
+    # whether a handful of transitions are driving an update's instability.
+    raw_advantage_mean: float
+    raw_advantage_std: float
+    raw_advantage_abs_max: float
+    # Fraction of total |advantage| mass from the single largest-magnitude
+    # transition, and from the top 1% of transitions by magnitude --
+    # directly answers "is this update dominated by a few outliers."
+    raw_advantage_top1_frac: float
+    raw_advantage_top1pct_frac: float
 
 
 def run_update(
@@ -127,6 +167,26 @@ def run_update(
         reward, value_old * scaler.scale, episode_id, config.gamma, config.gae_lambda
     )
 
+    # Captured BEFORE normalization overwrites `advantage` below: that
+    # normalization can let a single extreme transition survive as a
+    # many-sigma outlier while simultaneously deflating everyone else's
+    # std toward it, so only the raw distribution actually shows whether a
+    # handful of transitions dominate this update.
+    raw_advantage_mean = float(advantage.mean())
+    raw_advantage_std = float(advantage.std())
+    abs_advantage = advantage.abs().flatten()
+    raw_advantage_abs_max = float(abs_advantage.max())
+    total_abs_advantage = float(abs_advantage.sum())
+    if total_abs_advantage > 0.0:
+        raw_advantage_top1_frac = raw_advantage_abs_max / total_abs_advantage
+        top1pct_count = max(1, abs_advantage.numel() // 100)
+        raw_advantage_top1pct_frac = (
+            float(torch.topk(abs_advantage, top1pct_count).values.sum()) / total_abs_advantage
+        )
+    else:
+        raw_advantage_top1_frac = 0.0
+        raw_advantage_top1pct_frac = 0.0
+
     # Once, over the whole update batch -- not per minibatch. Per-minibatch
     # normalization would make each minibatch's targets depend on which envs
     # happened to land in it.
@@ -148,6 +208,14 @@ def run_update(
     grad_norm_max = 0.0
     policy_grad_norm = 0.0
     value_grad_norm = 0.0
+    # Every finite-loss minibatch's approx_kl/clip_fraction/abs_ratio_dev,
+    # appended BEFORE the target_kl check below -- so a rejected minibatch
+    # (never applied) still contributes to these aggregates, matching
+    # SB3's own convention of recording what the update observed rather
+    # than only what it applied.
+    approx_kl_values: list[float] = []
+    clip_fraction_values: list[float] = []
+    abs_ratio_dev_chunks: list[torch.Tensor] = []
     for epoch in range(config.n_epochs):
         for index, envs in enumerate(minibatches):
             chunk = buffer.chunk(envs)
@@ -198,6 +266,10 @@ def run_update(
                     )
                 continue
 
+            approx_kl_values.append(loss.approx_kl)
+            clip_fraction_values.append(loss.clip_fraction)
+            abs_ratio_dev_chunks.append(loss.abs_ratio_dev)
+
             # Checked BEFORE backward()/step(), matching stable-baselines3:
             # a minibatch that would move the policy past the trust region
             # never has that move applied, not even partially. Stops the
@@ -236,6 +308,18 @@ def run_update(
             break
 
     assert first_dev is not None and last is not None  # n_epochs >= 1, so the loop always runs
+    if approx_kl_values:
+        approx_kl_mean = sum(approx_kl_values) / len(approx_kl_values)
+        clip_fraction_mean = sum(clip_fraction_values) / len(clip_fraction_values)
+        pooled_abs_ratio_dev = torch.cat([chunk.flatten() for chunk in abs_ratio_dev_chunks])
+    else:
+        # Every minibatch in this update was non-finite, short of the abort
+        # threshold (max_nan_minibatches_per_update) -- degrade exactly the
+        # way `last`/`first_dev` above already do: describe the last thing
+        # actually computed rather than crash on an empty pool.
+        approx_kl_mean = last.approx_kl
+        clip_fraction_mean = last.clip_fraction
+        pooled_abs_ratio_dev = last.abs_ratio_dev.flatten()
     return UpdateStats(
         policy_loss=float(last.policy.detach()),
         value_loss=float(last.value.detach()),
@@ -245,6 +329,18 @@ def run_update(
         approx_kl=last.approx_kl,
         max_abs_ratio_dev_epoch1_mb1=first_dev,
         max_abs_ratio_dev=last.max_abs_ratio_dev,
+        approx_kl_mean=approx_kl_mean,
+        clip_fraction_mean=clip_fraction_mean,
+        ratio_abs_dev_p50=float(torch.quantile(pooled_abs_ratio_dev, 0.50)),
+        ratio_abs_dev_p95=float(torch.quantile(pooled_abs_ratio_dev, 0.95)),
+        ratio_abs_dev_p99=float(torch.quantile(pooled_abs_ratio_dev, 0.99)),
+        max_abs_ratio_dev_update=float(pooled_abs_ratio_dev.max()),
+        max_action_prob=last.max_action_prob,
+        raw_advantage_mean=raw_advantage_mean,
+        raw_advantage_std=raw_advantage_std,
+        raw_advantage_abs_max=raw_advantage_abs_max,
+        raw_advantage_top1_frac=raw_advantage_top1_frac,
+        raw_advantage_top1pct_frac=raw_advantage_top1pct_frac,
         explained_variance=explained,
         staleness_logprob_l1=staleness,
         skipped_minibatches=skipped,

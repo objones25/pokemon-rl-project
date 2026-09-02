@@ -108,6 +108,11 @@ def _stub_run_update(
             explained_variance=0.0, staleness_logprob_l1=0.0, skipped_minibatches=0,
             grad_norm=0.0, grad_norm_max=0.0, policy_grad_norm=0.0, value_grad_norm=0.0,
             target_kl_triggered=completed <= 1, minibatches_completed=completed,
+            approx_kl_mean=approx_kl, clip_fraction_mean=0.0,
+            ratio_abs_dev_p50=0.0, ratio_abs_dev_p95=0.0, ratio_abs_dev_p99=0.0,
+            max_abs_ratio_dev_update=epoch1_dev, max_action_prob=0.0,
+            raw_advantage_mean=0.0, raw_advantage_std=0.0, raw_advantage_abs_max=0.0,
+            raw_advantage_top1_frac=0.0, raw_advantage_top1pct_frac=0.0,
         )
 
     return _run_update

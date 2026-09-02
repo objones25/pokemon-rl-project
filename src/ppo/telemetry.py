@@ -32,6 +32,7 @@ STEP_METRICS: dict[str, str] = {
     "model/*": "train/update",
     "perf/*": "train/update",
     "system/*": "train/update",
+    "advantage/*": "train/update",
 }
 
 
@@ -80,12 +81,34 @@ def update_metrics(
         "loss/value": stats.value_loss,
         "loss/entropy": stats.entropy,
         "loss/total": stats.total_loss,
+        "loss/max_action_prob": stats.max_action_prob,
         "ratio/max_abs_dev_epoch1_mb1": stats.max_abs_ratio_dev_epoch1_mb1,
         "ratio/max_abs_dev": stats.max_abs_ratio_dev,
         "ratio/clip_fraction": stats.clip_fraction,
         "ratio/approx_kl": stats.approx_kl,
+        # The two above are the LAST-computed minibatch only -- these
+        # instead aggregate every minibatch the update actually processed
+        # (mean over all of them, SB3's own convention; percentiles/true
+        # max pooled from their full per-position tensors), so a target_kl-
+        # rejected minibatch's outsized value can no longer stand in for
+        # the whole update, and p50/p95 vs p99/max together distinguish a
+        # few outlier tokens from broad drift.
+        "ratio/approx_kl_mean": stats.approx_kl_mean,
+        "ratio/clip_fraction_mean": stats.clip_fraction_mean,
+        "ratio/abs_dev_p50": stats.ratio_abs_dev_p50,
+        "ratio/abs_dev_p95": stats.ratio_abs_dev_p95,
+        "ratio/abs_dev_p99": stats.ratio_abs_dev_p99,
+        "ratio/max_abs_dev_update": stats.max_abs_ratio_dev_update,
         "staleness/logprob_l1": stats.staleness_logprob_l1,
         "value/explained_variance": stats.explained_variance,
+        # The distribution BEFORE run_update's own in-place normalization,
+        # which can otherwise let one extreme transition survive as a
+        # many-sigma outlier while deflating everyone else's std toward it.
+        "advantage/raw_mean": stats.raw_advantage_mean,
+        "advantage/raw_std": stats.raw_advantage_std,
+        "advantage/raw_abs_max": stats.raw_advantage_abs_max,
+        "advantage/top1_frac": stats.raw_advantage_top1_frac,
+        "advantage/top1pct_frac": stats.raw_advantage_top1pct_frac,
         "perf/rollout_s": float(rollout_s),
         "perf/update_s": float(update_s),
         "perf/iteration_s": float(iteration_s),
