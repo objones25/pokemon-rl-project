@@ -24,6 +24,11 @@ configs/templates/approved/_preview.png
 RUNPOD_SETUP.md
 wandb/
 
+# Live PPO run log and metrics reference -- working notes kept locally,
+# not committed.
+docs/ppo-experiment-history.md
+docs/ppo-training-metrics.md
+
 # Generated emulator save states. ROM-derived, so never committed -- see
 # src/pokemon_env/init_state.py.
 artifacts/
