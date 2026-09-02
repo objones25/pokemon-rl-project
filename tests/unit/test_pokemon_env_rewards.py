@@ -176,12 +176,14 @@ def test_repeated_deposit_withdraw_healing_cycles_are_capped_not_farmable(
     component combined over ~9M steps while badges stayed at zero. After
     enough cycles, the heal component must stop growing."""
     fake_emulator.memory[ram.PARTY_MAX_HP_BASE + 1] = 100
+    result = None
     for _ in range(50):
         fake_emulator.memory[ram.PARTY_HP_BASE + 1] = 1
         accumulator.step(fake_emulator)
         fake_emulator.memory[ram.PARTY_HP_BASE + 1] = 100
         result = accumulator.step(fake_emulator)
 
+    assert result is not None  # range(50) always runs at least once
     assert result.components["heal"] == pytest.approx(0.2)
 
 
@@ -194,12 +196,14 @@ def test_the_heal_contribution_ceiling_does_not_scale_with_heal_weight(
     acc = RewardAccumulator(EnvConfig(heal_weight=5.0))
     acc.reset(fake_emulator)
     fake_emulator.memory[ram.PARTY_MAX_HP_BASE + 1] = 100
+    result = None
     for _ in range(50):
         fake_emulator.memory[ram.PARTY_HP_BASE + 1] = 1
         acc.step(fake_emulator)
         fake_emulator.memory[ram.PARTY_HP_BASE + 1] = 100
         result = acc.step(fake_emulator)
 
+    assert result is not None  # range(50) always runs at least once
     assert result.components["heal"] == pytest.approx(0.2)
 
 

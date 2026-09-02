@@ -103,6 +103,7 @@ class FakeBackend:
 
     def recv(self) -> StepResult:
         result, self._pending = self._pending, None
+        assert result is not None, "recv() called without a prior send_reset()/send_step()"
         return result
 
     def state_dict(self) -> dict:

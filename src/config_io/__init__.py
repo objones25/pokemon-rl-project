@@ -7,14 +7,15 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import fields
 from pathlib import Path
-from typing import TypeVar
+from typing import TYPE_CHECKING
 
 import yaml
 
-T = TypeVar("T")
+if TYPE_CHECKING:
+    from _typeshed import DataclassInstance
 
 
-def load_dataclass_config(
+def load_dataclass_config[T: DataclassInstance](
     cls: type[T], path: str | Path, *, coerce: dict[str, Callable] | None = None
 ) -> T:
     """Loads `path` as YAML, rejects any key that isn't a field of `cls`, and
