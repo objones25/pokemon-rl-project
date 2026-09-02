@@ -239,6 +239,7 @@ def _run_training(deps: PPODeps, config: PPOConfig, max_updates: int | None) -> 
     logger.info("warmup_complete", extra={"steps": buffer.write_cursor})
 
     best: dict[str, float] = {}
+    consecutive_stalled = 0
     while max_updates is None or update < start_update + max_updates:
         if deps.device.type == "cuda":
             torch.cuda.reset_peak_memory_stats()
@@ -253,10 +254,12 @@ def _run_training(deps: PPODeps, config: PPOConfig, max_updates: int | None) -> 
         rollout_s = time.monotonic() - rollout_started
         global_step += config.n_steps * deps.env_config.n_envs
 
-        # All three abort paths -- the epoch-1 ratio invariant, the approx_kl
-        # threshold, and run_update's own NaN-storm abort -- log with
-        # exc_info before propagating: this is a 48-hour unattended run, and
-        # the difference between "died at hour 30 on the ratio invariant" and
+        # All four abort paths -- the epoch-1 ratio invariant, the
+        # approx_kl threshold (target_kl disabled) or consecutive-stall
+        # count (target_kl enabled, see _check_abort_conditions), and
+        # run_update's own NaN-storm abort -- log with exc_info before
+        # propagating: this is a 48-hour unattended run, and the
+        # difference between "died at hour 30 on the ratio invariant" and
         # "died at hour 30 on KL" is the whole diagnosis. The exception
         # itself still propagates untouched.
         update_started = time.monotonic()
@@ -265,7 +268,7 @@ def _run_training(deps: PPODeps, config: PPOConfig, max_updates: int | None) -> 
                 deps.policy, deps.optimizer, deps.scheduler, buffer, scaler, config,
                 deps.policy_config, deps.env_config.n_envs, deps.device, deps.autocast_dtype,
             )
-            _check_abort_conditions(stats, config)
+            consecutive_stalled = _check_abort_conditions(stats, config, consecutive_stalled)
         except (AssertionError, RuntimeError):
             logger.exception(
                 "training_aborted",
@@ -335,9 +338,11 @@ def _run_training(deps: PPODeps, config: PPOConfig, max_updates: int | None) -> 
     logger.info("training_finished", extra={"update": update, "global_step": global_step})
 
 
-def _check_abort_conditions(stats, config: PPOConfig) -> None:
-    """The two conditions that stop the run. Extracted so the caller can wrap
-    both in one handler that logs with a traceback before re-raising."""
+def _check_abort_conditions(stats, config: PPOConfig, consecutive_stalled: int) -> int:
+    """The conditions that stop the run. Extracted so the caller can wrap
+    both in one handler that logs with a traceback before re-raising.
+    Returns the (possibly reset or incremented) consecutive-stalled-update
+    counter the caller must pass back in on the next call."""
     # An assert, not a metric: after recomputing pi_old the policy has not
     # changed at (epoch 1, minibatch 1), so any deviation is a real bug.
     assert stats.max_abs_ratio_dev_epoch1_mb1 < 1e-5, (
@@ -345,11 +350,38 @@ def _check_abort_conditions(stats, config: PPOConfig) -> None:
         f"{stats.max_abs_ratio_dev_epoch1_mb1}; pi_old was not recomputed from "
         "the current weights"
     )
-    if abs(stats.approx_kl) > config.abort_approx_kl:
+
+    if config.target_kl is None:
+        if abs(stats.approx_kl) > config.abort_approx_kl:
+            raise RuntimeError(
+                f"approx_kl {stats.approx_kl} exceeded {config.abort_approx_kl}; "
+                "aborting with the checkpoint intact"
+            )
+        return 0
+
+    # With target_kl set, stats.approx_kl is ppo.update.run_update's
+    # LAST-COMPUTED minibatch, which -- whenever target_kl_triggered is
+    # True -- was rejected before backward()/step() and never applied. Its
+    # magnitude describes what the update would have done, not what the
+    # weights actually did, so comparing it against abort_approx_kl would
+    # alarm on a mechanism that already did its job. Every APPLIED
+    # minibatch, by construction, already satisfied
+    # approx_kl <= 1.5*target_kl at the moment it applied, so
+    # abort_approx_kl would be comparing that (small) number against a
+    # threshold it was never going to reach anyway. Track sustained
+    # inability to progress instead: minibatches_completed stuck at its
+    # invariant-guaranteed floor of 1 for max_consecutive_stalled_updates
+    # updates in a row means training has genuinely stalled.
+    if stats.minibatches_completed <= 1:
+        consecutive_stalled += 1
+    else:
+        consecutive_stalled = 0
+    if consecutive_stalled >= config.max_consecutive_stalled_updates:
         raise RuntimeError(
-            f"approx_kl {stats.approx_kl} exceeded {config.abort_approx_kl}; "
-            "aborting with the checkpoint intact"
+            f"minibatches_completed stayed at its floor for {consecutive_stalled} "
+            "consecutive updates; aborting with the checkpoint intact"
         )
+    return consecutive_stalled
 
 
 def _record_best(best: dict[str, float], env_metrics: dict[str, float]) -> None:

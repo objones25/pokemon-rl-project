@@ -61,6 +61,13 @@ class PPOConfig:
     # semantics are portable rather than project-specific.
     target_kl: float | None = None
     abort_approx_kl: float = 0.5
+    # Only consulted when target_kl is set (see _check_abort_conditions in
+    # trainer.py): once every minibatch of an update past the invariant-
+    # guaranteed first one is being rejected, minibatches_completed sits at
+    # its floor of 1. That many updates in a row means training has
+    # genuinely stalled, not just occasionally probed near the trust
+    # region -- inert (never read) when target_kl is None.
+    max_consecutive_stalled_updates: int = 10
     max_nan_minibatches_per_update: int = 3
     seed: int = 0
     frozen_encoder_repo_id: str = "objones25/pokemon-contrastive-encoder"
@@ -108,6 +115,11 @@ class PPOConfig:
             raise ValueError(f"lr_floor_ratio={self.lr_floor_ratio} must lie in [0, 1]")
         if self.target_kl is not None and self.target_kl <= 0.0:
             raise ValueError(f"target_kl={self.target_kl} must be > 0, or None to disable")
+        if self.max_consecutive_stalled_updates < 1:
+            raise ValueError(
+                f"max_consecutive_stalled_updates={self.max_consecutive_stalled_updates} "
+                "must be at least 1"
+            )
 
     def validate_against_n_envs(self, n_envs: int) -> None:
         """n_envs lives on EnvConfig, so the divisibility check cannot run in

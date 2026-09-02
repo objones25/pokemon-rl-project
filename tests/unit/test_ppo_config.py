@@ -164,3 +164,20 @@ def test_config_accepts_a_positive_target_kl() -> None:
     config = PPOConfig(frozen_encoder_revision=PINNED_ENCODER_REVISION, target_kl=0.02)
 
     assert config.target_kl == pytest.approx(0.02)
+
+
+@pytest.mark.parametrize("max_consecutive_stalled_updates", [0, -1])
+def test_config_rejects_a_non_positive_max_consecutive_stalled_updates(
+    max_consecutive_stalled_updates: int,
+) -> None:
+    with pytest.raises(ValueError, match="max_consecutive_stalled_updates=.* must be at least 1"):
+        PPOConfig(
+            frozen_encoder_revision=PINNED_ENCODER_REVISION,
+            max_consecutive_stalled_updates=max_consecutive_stalled_updates,
+        )
+
+
+def test_max_consecutive_stalled_updates_defaults_to_ten() -> None:
+    config = PPOConfig(frozen_encoder_revision=PINNED_ENCODER_REVISION)
+
+    assert config.max_consecutive_stalled_updates == 10

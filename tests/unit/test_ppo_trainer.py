@@ -67,14 +67,24 @@ class _TrainerHarness:
     n_steps: int
 
 
-def _stub_run_update(*, approx_kl: float, epoch1_dev: float, forced_nan_abort: bool = False):
+def _stub_run_update(
+    *,
+    approx_kl: float,
+    epoch1_dev: float,
+    forced_nan_abort: bool = False,
+    # A single int is returned on every call; a list is consumed one value
+    # per call (the last entry repeats once exhausted), so a test can
+    # script a stall-then-recover-then-stall sequence across updates.
+    minibatches_completed: int | list[int] = 24,
+):
     """A stand-in for `run_update` that skips the real forward/backward
     pass entirely, so the KL-abort and epoch-1-invariant tests can force an
-    exact value onto exactly the two fields the trainer inspects -- wired in
+    exact value onto exactly the fields the trainer inspects -- wired in
     through `PPODeps.run_update`, never `mock.patch`. `forced_nan_abort`
     instead raises the same `RuntimeError` `run_update`'s own NaN-storm abort
     raises, at the default `max_nan_minibatches_per_update` threshold, so a
     test can prove that abort path reaches `run_training`'s log handler too."""
+    calls = {"count": 0}
 
     def _run_update(
         policy, optimizer, scheduler, buffer, scaler, config, policy_config,
@@ -85,13 +95,19 @@ def _stub_run_update(*, approx_kl: float, epoch1_dev: float, forced_nan_abort: b
                 "non-finite loss in 3 minibatches of one update; aborting "
                 "rather than stepping on corrupt gradients"
             )
+        if isinstance(minibatches_completed, list):
+            index = min(calls["count"], len(minibatches_completed) - 1)
+            completed = minibatches_completed[index]
+        else:
+            completed = minibatches_completed
+        calls["count"] += 1
         return UpdateStats(
             policy_loss=0.0, value_loss=0.0, entropy=0.0, total_loss=0.0,
             clip_fraction=0.0, approx_kl=approx_kl,
             max_abs_ratio_dev_epoch1_mb1=epoch1_dev, max_abs_ratio_dev=epoch1_dev,
             explained_variance=0.0, staleness_logprob_l1=0.0, skipped_minibatches=0,
             grad_norm=0.0, grad_norm_max=0.0, policy_grad_norm=0.0, value_grad_norm=0.0,
-            target_kl_triggered=False, minibatches_completed=0,
+            target_kl_triggered=completed <= 1, minibatches_completed=completed,
         )
 
     return _run_update
@@ -105,12 +121,15 @@ def _trainer_harness(
     forced_approx_kl: float | None = None,
     forced_epoch1_dev: float | None = None,
     forced_nan_abort: bool = False,
+    forced_minibatches_completed: int | list[int] | None = None,
+    target_kl: float | None = None,
+    max_consecutive_stalled_updates: int = 10,
 ) -> _TrainerHarness:
     """A tiny real policy (matching the other ppo/ harnesses' shapes) plus a
     `FakeVecEnv`/`FakeLatentEncoder` and a `FakeExperimentRun`. `run_update`
     defaults to the real one; `forced_approx_kl`/`forced_epoch1_dev`/
-    `forced_nan_abort` swap in `_stub_run_update` instead, through
-    `PPODeps.run_update`."""
+    `forced_nan_abort`/`forced_minibatches_completed` swap in
+    `_stub_run_update` instead, through `PPODeps.run_update`."""
     torch.manual_seed(0)
     policy_config = PolicyConfig(
         d_model=32, n_layers=2, n_heads=2, head_dim=16, n_kv_heads=1,
@@ -125,6 +144,8 @@ def _trainer_harness(
         checkpoint_dir=str(tmp_path),
         checkpoint_every_updates=checkpoint_every_updates,
         artifact_every_updates=artifact_every_updates,
+        target_kl=target_kl,
+        max_consecutive_stalled_updates=max_consecutive_stalled_updates,
     )
     policy = RecurrentTransformerPolicy(policy_config, torch.zeros(8), torch.ones(8))
     optimizer = torch.optim.AdamW(policy.parameters(), lr=1e-3)
@@ -133,11 +154,19 @@ def _trainer_harness(
     wandb_run = FakeExperimentRun()
 
     run_update_dep = run_update
-    if forced_approx_kl is not None or forced_epoch1_dev is not None or forced_nan_abort:
+    if (
+        forced_approx_kl is not None
+        or forced_epoch1_dev is not None
+        or forced_nan_abort
+        or forced_minibatches_completed is not None
+    ):
         run_update_dep = _stub_run_update(
             approx_kl=0.0 if forced_approx_kl is None else forced_approx_kl,
             epoch1_dev=0.0 if forced_epoch1_dev is None else forced_epoch1_dev,
             forced_nan_abort=forced_nan_abort,
+            minibatches_completed=(
+                24 if forced_minibatches_completed is None else forced_minibatches_completed
+            ),
         )
 
     deps = PPODeps(
@@ -215,6 +244,82 @@ def test_the_epoch_one_ratio_invariant_is_asserted_not_merely_logged(tmp_path) -
 
     with pytest.raises(AssertionError, match="epoch-1 minibatch-1 ratio"):
         run_training(harness.deps, max_updates=1)
+
+
+def test_a_rejected_minibatchs_approx_kl_does_not_abort_the_run_when_target_kl_is_set(
+    tmp_path,
+) -> None:
+    """With target_kl enabled, a large approx_kl on the LAST-COMPUTED
+    minibatch can describe one target_kl rejected -- never applied -- and
+    no longer means the weights just moved that far. abort_approx_kl's old
+    check must not fire off that value once target_kl is active, even
+    when the value (1.0) would have aborted immediately under the old
+    (target_kl=None) behavior in test_an_approx_kl_above_the_threshold_
+    aborts_the_run above."""
+    harness = _trainer_harness(
+        tmp_path, forced_approx_kl=1.0, target_kl=0.02, forced_minibatches_completed=24
+    )
+
+    run_training(harness.deps, max_updates=2)
+
+    # Both updates ran to completion (logged) rather than aborting partway.
+    assert len(harness.wandb_run.logged) == 2
+
+
+def test_updates_stalled_below_the_consecutive_threshold_do_not_abort(tmp_path) -> None:
+    """minibatches_completed=1 (only the invariant-guaranteed first
+    minibatch ever applies) on every update, but for fewer updates than
+    max_consecutive_stalled_updates -- training continues."""
+    harness = _trainer_harness(
+        tmp_path,
+        target_kl=0.02,
+        max_consecutive_stalled_updates=3,
+        forced_minibatches_completed=1,
+    )
+
+    run_training(harness.deps, max_updates=2)
+
+    assert len(harness.wandb_run.logged) == 2
+
+
+def test_updates_stalled_at_or_past_the_consecutive_threshold_abort(tmp_path) -> None:
+    harness = _trainer_harness(
+        tmp_path,
+        target_kl=0.02,
+        max_consecutive_stalled_updates=3,
+        forced_minibatches_completed=1,
+    )
+
+    with pytest.raises(RuntimeError, match="minibatches_completed stayed at its floor"):
+        run_training(harness.deps, max_updates=3)
+
+
+def test_a_recovered_update_resets_the_consecutive_stall_counter(tmp_path) -> None:
+    """Two stalls, then one healthy update, then three more stalls: with
+    max_consecutive_stalled_updates=3, the counter must reset at the
+    healthy update rather than accumulate across it -- 5 updates (2 stalls
+    + 1 recovery + 2 more stalls) must not abort, since only 2 consecutive
+    stalls exist after the reset; the 6th (3 consecutive again) does."""
+    sequence = [1, 1, 24, 1, 1, 1]
+
+    not_yet_enough = _trainer_harness(
+        tmp_path / "not-yet-enough",
+        target_kl=0.02,
+        max_consecutive_stalled_updates=3,
+        forced_minibatches_completed=sequence,
+    )
+    run_training(not_yet_enough.deps, max_updates=5)
+
+    assert len(not_yet_enough.wandb_run.logged) == 5
+
+    hits_threshold = _trainer_harness(
+        tmp_path / "hits-threshold",
+        target_kl=0.02,
+        max_consecutive_stalled_updates=3,
+        forced_minibatches_completed=sequence,
+    )
+    with pytest.raises(RuntimeError, match="minibatches_completed stayed at its floor"):
+        run_training(hits_threshold.deps, max_updates=6)
 
 
 def test_metrics_are_logged_once_per_update(tmp_path) -> None:

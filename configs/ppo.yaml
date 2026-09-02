@@ -51,19 +51,40 @@ warmup_steps: 100
 lr_decay_steps: 6000
 lr_floor_ratio: 0.1
 # Per-minibatch early stopping (SB3's target_kl convention exactly: the
-# actual cutoff is 1.5x this value). Every run so far (i3eojhl2, 2oubkma4,
-# 3h04igwb, 3o1fui88; 2026-09-01/02) let a whole update's 3 epochs run to
-# completion even as ratio/max_abs_dev spiked into the hundreds mid-update
-# -- this stops taking further minibatches THIS UPDATE the moment one
-# minibatch's own approx_kl crosses 0.03, rather than only aborting the
-# entire run after the damage compounds across a full update (that is
-# abort_approx_kl's job, unchanged, still 0.5). 0.02 matches the range
-# where every run's ratio/approx_kl was still climbing but hadn't yet
-# spiked in its healthy early phase (~0.01-0.05 range, e.g. run 4 updates
-# 0-90). Unlike ent_coef/lr_decay_steps, this is a new mechanism rather
-# than a retuned input, so its effect on divergence timing should be far
-# less ambiguous than the last two experiments.
+# actual cutoff is 1.5x this value). Every run before this (i3eojhl2,
+# 2oubkma4, 3h04igwb, 3o1fui88; 2026-09-01/02) let a whole update's 3
+# epochs run to completion even as ratio/max_abs_dev spiked into the
+# hundreds mid-update -- this stops taking further minibatches THIS
+# UPDATE the moment one minibatch's own approx_kl crosses 0.03, rather
+# than only aborting the entire run after the damage compounds across a
+# full update. 0.02 matches the range where every run's ratio/approx_kl
+# was still climbing but hadn't yet spiked in its healthy early phase
+# (~0.01-0.05 range, e.g. run 4 updates 0-90).
+#
+# Result (run 5, wandb 02auc1ar): worked as designed -- survived to update
+# 225 (past run 3's 190), with target_kl_triggered firing on 30
+# consecutive updates near the end while training kept going, rejecting
+# ever-more minibatches per update as entropy fell (loss/entropy dipped to
+# 0.58 by the end; attn/logit_max and model/residual_norm both stayed flat
+# the whole run, ruling out an activation blowup as the mechanism). The
+# run still eventually died on abort_approx_kl -- but that check was
+# reading the REJECTED minibatch's own approx_kl (never applied, by
+# definition of target_kl having just rejected it), which overstates
+# actual drift once target_kl exists. Fixed alongside this: see
+# max_consecutive_stalled_updates below.
 target_kl: 0.02
+# Only consulted when target_kl is set. abort_approx_kl (still 0.5,
+# unchanged) is skipped entirely in that mode -- every APPLIED minibatch,
+# by construction, already satisfied approx_kl <= 1.5*target_kl at the
+# moment it applied, so comparing the last-COMPUTED (possibly rejected)
+# minibatch's approx_kl against 0.5 was alarming on a mechanism that had
+# already done its job (see run 5's postmortem above). This instead
+# aborts once minibatches_completed has sat at its invariant-guaranteed
+# floor of 1 for this many updates in a row -- sustained inability to
+# progress, not one rejected probe's magnitude. 10 is PPOConfig's own
+# default; named explicitly here since it's a new safety-relevant knob,
+# not yet validated against a real run.
+max_consecutive_stalled_updates: 10
 seed: 0
 # The resolved commit of objones25/pokemon-contrastive-encoder, not `main`:
 # a branch head resolves at download time, so a push to that repo would change
