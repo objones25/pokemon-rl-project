@@ -1,5 +1,5 @@
 # Defaults live in PPOConfig; this file records the values this project runs
-# with. gamma/ent_coef match PWhiddy/PokemonRedExperiments v2; gae_lambda,
+# with. gamma matches PWhiddy/PokemonRedExperiments v2; gae_lambda,
 # clip_range, vf_coef and max_grad_norm are stable-baselines3 PPO defaults.
 #
 # checkpoint_every_updates and hub_snapshot_every_updates are provisional:
@@ -11,7 +11,18 @@ minibatch_envs: 8
 gamma: 0.997
 gae_lambda: 0.95
 clip_range: 0.2
-ent_coef: 0.01
+# 0.01 (PWhiddy v2's value) let entropy fall from ln(7)=1.95 to ~1.0-1.2 by
+# update ~130 in two consecutive live runs (2026-09-01, wandb runs i3eojhl2
+# and 2oubkma4), well before any badge -- both runs then aborted on
+# approx_kl within a handful of updates of each other despite very
+# different reward compositions (one with an unfixed heal-farming exploit,
+# one without), which points at the entropy collapse itself, not reward
+# shape, as the shared driver. Doubled here as the first of two variables
+# being tried one at a time -- an LR decay schedule is the second, tried
+# only if this alone does not hold. Re-tune against whatever the next run's
+# own entropy curve shows, per this project's convention that these weights
+# need empirical tuning, not a fixed prior.
+ent_coef: 0.02
 vf_coef: 0.5
 max_grad_norm: 0.5
 lr: 0.0003
