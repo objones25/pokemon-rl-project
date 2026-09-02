@@ -117,3 +117,32 @@ def test_validate_against_n_envs_succeeds_when_divisible() -> None:
     config = PPOConfig(frozen_encoder_revision=PINNED_ENCODER_REVISION, minibatch_envs=8)
 
     assert config.validate_against_n_envs(64) is None
+
+
+def test_config_rejects_a_negative_lr_decay_steps() -> None:
+    with pytest.raises(ValueError, match="lr_decay_steps=-1 must be at least 0"):
+        PPOConfig(frozen_encoder_revision=PINNED_ENCODER_REVISION, lr_decay_steps=-1)
+
+
+@pytest.mark.parametrize("lr_floor_ratio", [-0.1, 1.1])
+def test_config_rejects_an_lr_floor_ratio_outside_zero_one(lr_floor_ratio: float) -> None:
+    with pytest.raises(ValueError, match="lr_floor_ratio=.* must lie in \\[0, 1\\]"):
+        PPOConfig(frozen_encoder_revision=PINNED_ENCODER_REVISION, lr_floor_ratio=lr_floor_ratio)
+
+
+@pytest.mark.parametrize("lr_floor_ratio", [0.0, 1.0])
+def test_config_accepts_lr_floor_ratio_at_either_boundary(lr_floor_ratio: float) -> None:
+    config = PPOConfig(
+        frozen_encoder_revision=PINNED_ENCODER_REVISION, lr_floor_ratio=lr_floor_ratio
+    )
+
+    assert config.lr_floor_ratio == pytest.approx(lr_floor_ratio)
+
+
+def test_lr_decay_steps_and_floor_ratio_default_to_decay_disabled() -> None:
+    """0 decay steps is the sentinel the scheduler reads as "stay constant
+    past warmup" -- existing configs/tests that don't mention these fields
+    must keep behaving exactly as before this feature existed."""
+    config = PPOConfig(frozen_encoder_revision=PINNED_ENCODER_REVISION)
+
+    assert (config.lr_decay_steps, config.lr_floor_ratio) == (0, 0.1)

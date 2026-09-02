@@ -18,15 +18,33 @@ clip_range: 0.2
 # different reward compositions (one with an unfixed heal-farming exploit,
 # one without), which points at the entropy collapse itself, not reward
 # shape, as the shared driver. Doubled here as the first of two variables
-# being tried one at a time -- an LR decay schedule is the second, tried
-# only if this alone does not hold. Re-tune against whatever the next run's
-# own entropy curve shows, per this project's convention that these weights
+# tried one at a time. Result (run 3, wandb 3h04igwb): held entropy
+# noticeably higher (~1.25-1.35 vs ~1.0-1.2 at the equivalent point) and
+# survived to update 190 instead of ~135 -- a real, measurable improvement,
+# but the same approx_kl abort recurred anyway. LR decay (below) is the
+# second variable, held constant here rather than raised further so its
+# own effect stays isolated. Re-tune against whatever the next run's own
+# entropy curve shows, per this project's convention that these weights
 # need empirical tuning, not a fixed prior.
 ent_coef: 0.02
 vf_coef: 0.5
 max_grad_norm: 0.5
 lr: 0.0003
 warmup_steps: 100
+# Optimizer-step units, same as warmup_steps, starting the moment warmup
+# ends: cosine decay from lr to lr*lr_floor_ratio, then held at the floor
+# forever (never reaches exactly 0 -- a live run has no fixed length,
+# max_updates=None by default, and freezing lr at 0 past the horizon would
+# silently stop all learning with no error). n_epochs=3 * (n_envs=64 /
+# minibatch_envs=8) = 24 optimizer steps per update, so 6000 steps is ~250
+# updates -- chosen so a run repeating run 3's ~190-update trajectory
+# (2026-09-01, wandb 3h04igwb, the ent_coef=0.02 attempt) has already
+# decayed to ~22% of peak lr (cosine progress 0.76) by the point it
+# previously diverged, not just barely started decaying. Not yet validated
+# against a real run -- the next one is what tests whether this actually
+# holds the line past update ~190.
+lr_decay_steps: 6000
+lr_floor_ratio: 0.1
 seed: 0
 # The resolved commit of objones25/pokemon-contrastive-encoder, not `main`:
 # a branch head resolves at download time, so a push to that repo would change

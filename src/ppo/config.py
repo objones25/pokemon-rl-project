@@ -40,6 +40,17 @@ class PPOConfig:
     max_grad_norm: float = 0.5
     lr: float = 3e-4
     warmup_steps: int = 100
+    # 0 (disabled) by default -- decay is opt-in via configs/ppo.yaml so any
+    # existing PPOConfig(...) call keeps the pre-decay warmup-then-constant
+    # behavior unless it explicitly asks for a horizon. Counted in the same
+    # optimizer-step units as warmup_steps, starting the moment warmup ends.
+    lr_decay_steps: int = 0
+    # Cosine decay never reaches exactly 0: an unbounded live run
+    # (max_updates=None is the default `pokemon-ppo train` path) will run
+    # past whatever horizon lr_decay_steps names, and freezing at lr=0 would
+    # silently stop all learning with no error and no abort -- a worse
+    # failure mode than any of the ones this schedule exists to prevent.
+    lr_floor_ratio: float = 0.1
     abort_approx_kl: float = 0.5
     max_nan_minibatches_per_update: int = 3
     seed: int = 0
@@ -82,6 +93,10 @@ class PPOConfig:
             raise ValueError(f"minibatch_envs={self.minibatch_envs} must be at least 1")
         if not 0.0 < self.gamma < 1.0:
             raise ValueError(f"gamma={self.gamma} must lie in (0, 1)")
+        if self.lr_decay_steps < 0:
+            raise ValueError(f"lr_decay_steps={self.lr_decay_steps} must be at least 0")
+        if not 0.0 <= self.lr_floor_ratio <= 1.0:
+            raise ValueError(f"lr_floor_ratio={self.lr_floor_ratio} must lie in [0, 1]")
 
     def validate_against_n_envs(self, n_envs: int) -> None:
         """n_envs lives on EnvConfig, so the divisibility check cannot run in

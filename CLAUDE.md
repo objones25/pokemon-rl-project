@@ -182,7 +182,7 @@ pytest 9.1.1 with strict config in `pyproject.toml` (`strict_config`,
 `strict_markers`, `strict_xfail`, `strict_parametrization_ids`,
 `filterwarnings = error`, **branch coverage floor 93%**). Keep those gates and
 ratchet the floor up; a floor you have to lower is worse than none. Current
-state: 749 passing, 94.97% coverage, 14 deselected `slow`.
+state: 758 passing, 94.99% coverage, 14 deselected `slow`.
 
 - **Prove each new test can fail.** Break the code it covers (invert a condition,
   return a wrong constant), confirm red, revert — and say which test you verified

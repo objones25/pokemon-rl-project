@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import math
 import os
 import subprocess
 from collections.abc import Callable
@@ -110,16 +111,33 @@ def _resolve_device() -> torch.device:
     return torch.accelerator.current_accelerator(check_available=True) or torch.device("cpu")
 
 
-def _warmup_then_constant(warmup_steps: int) -> Callable[[int], float]:
-    """PPOConfig.warmup_steps: linear ramp from 0 to 1 over `warmup_steps`
-    scheduler.step() calls, then held constant at 1.0 -- this project's only
-    scheduler shape (design spec's PPOConfig table: "Linear, then
-    constant")."""
+def _warmup_then_cosine_decay(
+    warmup_steps: int, decay_steps: int, floor_ratio: float
+) -> Callable[[int], float]:
+    """PPOConfig.{warmup_steps,lr_decay_steps,lr_floor_ratio}: linear ramp
+    from 0 to 1 over `warmup_steps` scheduler.step() calls, then -- if
+    `decay_steps` > 0 -- cosine decay from 1.0 to `floor_ratio` over the next
+    `decay_steps` calls, then held at `floor_ratio` forever after.
+
+    `decay_steps=0` reproduces the project's original warmup-then-constant
+    shape exactly (design spec's PPOConfig table: "Linear, then constant") --
+    decay is opt-in, not a replacement.
+
+    Holds at a nonzero floor rather than decaying to 0 on purpose: a live
+    `pokemon-ppo train` run has no fixed step count (max_updates=None by
+    default) and will typically run past whatever horizon `decay_steps`
+    names. Reaching lr=0 and staying there would silently freeze all
+    learning with no error and no abort -- worse than any instability this
+    schedule exists to prevent."""
 
     def _factor(step: int) -> float:
-        if warmup_steps <= 0:
+        if step < warmup_steps:
+            return (step + 1) / warmup_steps
+        if decay_steps <= 0:
             return 1.0
-        return min(1.0, (step + 1) / warmup_steps)
+        progress = min((step - warmup_steps) / decay_steps, 1.0)
+        cosine = 0.5 * (1.0 + math.cos(math.pi * progress))
+        return floor_ratio + (1.0 - floor_ratio) * cosine
 
     return _factor
 
@@ -214,7 +232,10 @@ def _run_train(args: argparse.Namespace) -> None:
     policy = RecurrentTransformerPolicy(policy_config, latent_mean, latent_std).to(device)
     optimizer = torch.optim.AdamW(policy.parameters(), lr=ppo_config.lr, eps=1e-5)
     scheduler = torch.optim.lr_scheduler.LambdaLR(
-        optimizer, _warmup_then_constant(ppo_config.warmup_steps)
+        optimizer,
+        _warmup_then_cosine_decay(
+            ppo_config.warmup_steps, ppo_config.lr_decay_steps, ppo_config.lr_floor_ratio
+        ),
     )
 
     vec_env, frame_buffer = build_subprocess_vec_env(env_config)

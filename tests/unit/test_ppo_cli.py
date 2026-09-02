@@ -16,7 +16,7 @@ from ppo.cli import (
     _gpu_name,
     _load_run_id,
     _persist_run_id,
-    _warmup_then_constant,
+    _warmup_then_cosine_decay,
     build_parser,
     main,
 )
@@ -85,25 +85,56 @@ def test_gpu_name_returns_the_cuda_device_name_for_a_cuda_device(monkeypatch) ->
     assert _gpu_name(torch.device("cuda")) == "NVIDIA A100"
 
 
-# --- _warmup_then_constant -------------------------------------------------
+# --- _warmup_then_cosine_decay ----------------------------------------------
 
 
-def test_warmup_then_constant_ramps_linearly_inside_the_warmup_window() -> None:
-    factor = _warmup_then_constant(4)
+def test_warmup_then_cosine_decay_ramps_linearly_inside_the_warmup_window() -> None:
+    factor = _warmup_then_cosine_decay(warmup_steps=4, decay_steps=10, floor_ratio=0.1)
 
     assert factor(0) == pytest.approx(0.25)
 
 
-def test_warmup_then_constant_holds_at_one_past_the_warmup_window() -> None:
-    factor = _warmup_then_constant(4)
+def test_warmup_then_cosine_decay_with_zero_decay_steps_holds_at_one_past_warmup() -> None:
+    """decay_steps=0 is the sentinel for "decay disabled" -- must reproduce
+    the pre-decay warmup-then-constant behavior exactly."""
+    factor = _warmup_then_cosine_decay(warmup_steps=4, decay_steps=0, floor_ratio=0.1)
 
     assert factor(10) == pytest.approx(1.0)
 
 
-def test_warmup_then_constant_with_zero_warmup_steps_is_constant_from_the_start() -> None:
-    factor = _warmup_then_constant(0)
+def test_warmup_then_cosine_decay_is_constant_with_zero_warmup_and_zero_decay() -> None:
+    factor = _warmup_then_cosine_decay(warmup_steps=0, decay_steps=0, floor_ratio=0.1)
 
     assert factor(0) == pytest.approx(1.0)
+
+
+def test_warmup_then_cosine_decay_is_continuous_at_the_warmup_boundary() -> None:
+    """The last warmup step and the first decay step must agree exactly, or
+    the learning rate visibly jumps at the transition."""
+    factor = _warmup_then_cosine_decay(warmup_steps=4, decay_steps=10, floor_ratio=0.1)
+
+    assert (factor(3), factor(4)) == (pytest.approx(1.0), pytest.approx(1.0))
+
+
+def test_warmup_then_cosine_decay_follows_a_cosine_not_a_linear_curve() -> None:
+    """At the exact halfway point of the decay window, a cosine curve and a
+    linear one coincide by symmetry (both give the midpoint) -- that point
+    alone cannot tell the two shapes apart, and would stay green under a
+    linear implementation. One third of the way through is a clean,
+    non-symmetric point instead: cos(pi/3) = 0.5 exactly, giving
+    0.1 + 0.9 * 0.5*(1+0.5) = 0.775 -- a linear ramp would give
+    0.1 + 0.9 * (1 - 1/3) = 0.7 at the same point."""
+    factor = _warmup_then_cosine_decay(warmup_steps=4, decay_steps=12, floor_ratio=0.1)
+
+    assert factor(8) == pytest.approx(0.775)
+
+
+def test_warmup_then_cosine_decay_holds_at_the_floor_ratio_past_the_decay_window() -> None:
+    """An unbounded live run outlasting its planned horizon must not go
+    below the floor or start climbing back up -- it holds, forever."""
+    factor = _warmup_then_cosine_decay(warmup_steps=4, decay_steps=10, floor_ratio=0.1)
+
+    assert (factor(14), factor(1000)) == (pytest.approx(0.1), pytest.approx(0.1))
 
 
 # --- run-id persistence ------------------------------------------------
