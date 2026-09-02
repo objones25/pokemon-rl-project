@@ -36,6 +36,8 @@ def _stats_kwargs(**overrides: object) -> dict:
         "grad_norm_max": 1.5,
         "policy_grad_norm": 0.6,
         "value_grad_norm": 0.4,
+        "target_kl_triggered": False,
+        "minibatches_completed": 24,
     }
     stats_overrides = {key: value for key, value in overrides.items() if key in stats_field_names}
     top_overrides = {
@@ -120,6 +122,8 @@ def test_update_metrics_maps_every_stats_field_without_transposition() -> None:
         grad_norm_max=21.0,
         policy_grad_norm=13.0,
         value_grad_norm=14.0,
+        target_kl_triggered=True,
+        minibatches_completed=24,
     )
 
     metrics = update_metrics(
@@ -146,6 +150,8 @@ def test_update_metrics_maps_every_stats_field_without_transposition() -> None:
             "train/policy_grad_norm": 13.0,
             "train/value_grad_norm": 14.0,
             "train/skipped_minibatches": 11.0,
+            "train/minibatches_completed": 24.0,
+            "train/target_kl_triggered": 1.0,
             "train/return_scale": 22.0,
             "loss/policy": 1.0,
             "loss/value": 2.0,

@@ -51,6 +51,15 @@ class PPOConfig:
     # silently stop all learning with no error and no abort -- a worse
     # failure mode than any of the ones this schedule exists to prevent.
     lr_floor_ratio: float = 0.1
+    # None (default) disables per-minibatch early stopping entirely --
+    # opt-in via configs/ppo.yaml, same pattern as lr_decay_steps, so no
+    # existing PPOConfig(...) call's behavior changes unless it asks for
+    # this. When set, run_update stops taking further minibatches within
+    # the SAME update (not the whole run -- that is abort_approx_kl's job)
+    # the moment one minibatch's own approx_kl exceeds 1.5x this value,
+    # matching stable-baselines3's target_kl convention exactly so the
+    # semantics are portable rather than project-specific.
+    target_kl: float | None = None
     abort_approx_kl: float = 0.5
     max_nan_minibatches_per_update: int = 3
     seed: int = 0
@@ -97,6 +106,8 @@ class PPOConfig:
             raise ValueError(f"lr_decay_steps={self.lr_decay_steps} must be at least 0")
         if not 0.0 <= self.lr_floor_ratio <= 1.0:
             raise ValueError(f"lr_floor_ratio={self.lr_floor_ratio} must lie in [0, 1]")
+        if self.target_kl is not None and self.target_kl <= 0.0:
+            raise ValueError(f"target_kl={self.target_kl} must be > 0, or None to disable")
 
     def validate_against_n_envs(self, n_envs: int) -> None:
         """n_envs lives on EnvConfig, so the divisibility check cannot run in

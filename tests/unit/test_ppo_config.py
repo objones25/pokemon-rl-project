@@ -146,3 +146,21 @@ def test_lr_decay_steps_and_floor_ratio_default_to_decay_disabled() -> None:
     config = PPOConfig(frozen_encoder_revision=PINNED_ENCODER_REVISION)
 
     assert (config.lr_decay_steps, config.lr_floor_ratio) == (0, 0.1)
+
+
+@pytest.mark.parametrize("target_kl", [0.0, -0.02])
+def test_config_rejects_a_non_positive_target_kl(target_kl: float) -> None:
+    with pytest.raises(ValueError, match="target_kl=.* must be > 0, or None to disable"):
+        PPOConfig(frozen_encoder_revision=PINNED_ENCODER_REVISION, target_kl=target_kl)
+
+
+def test_target_kl_defaults_to_disabled() -> None:
+    config = PPOConfig(frozen_encoder_revision=PINNED_ENCODER_REVISION)
+
+    assert config.target_kl is None
+
+
+def test_config_accepts_a_positive_target_kl() -> None:
+    config = PPOConfig(frozen_encoder_revision=PINNED_ENCODER_REVISION, target_kl=0.02)
+
+    assert config.target_kl == pytest.approx(0.02)

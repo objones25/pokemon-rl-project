@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import pytest
 import torch
@@ -69,6 +69,30 @@ def _install_compute_gae_spy(monkeypatch) -> dict:
         return real_compute_gae(reward, value, episode_id, gamma, gae_lambda)
 
     monkeypatch.setattr("ppo.update.compute_gae", spy)
+    return state
+
+
+def _install_ppo_losses_kl_override(monkeypatch, *, trigger_at_call: int, kl_value: float) -> dict:
+    """Wraps the real ppo_losses so ONE specific call, counted 1-indexed
+    across the whole update (every epoch's every minibatch, not reset per
+    epoch), reports a forced `approx_kl` -- everything else about that
+    call's LossOutput (the real policy/value/entropy tensors, with a live
+    autograd graph) is untouched. Lets a test control exactly which
+    minibatch trips the target_kl threshold without faking the forward
+    pass or the invariant that (epoch 1, minibatch 1) always has ratio 1."""
+    real_ppo_losses = update_module.ppo_losses
+    state: dict = {"call_count": 0}
+
+    def fake(logits, value, action, logprob_old, advantage, value_target, config):
+        state["call_count"] += 1
+        result = real_ppo_losses(
+            logits, value, action, logprob_old, advantage, value_target, config
+        )
+        if state["call_count"] == trigger_at_call:
+            result = replace(result, approx_kl=kl_value)
+        return result
+
+    monkeypatch.setattr("ppo.update.ppo_losses", fake)
     return state
 
 
@@ -166,6 +190,7 @@ def _update_harness(
     # which hides whether value_old is converted back out of normalized units
     # before being mixed with raw rewards.
     return_scale: float = 1.0,
+    target_kl: float | None = None,
 ) -> _UpdateHarness:
     torch.manual_seed(0)
     device = torch.device("cpu")
@@ -186,6 +211,7 @@ def _update_harness(
         n_epochs=n_epochs,
         minibatch_envs=minibatch_envs,
         max_nan_minibatches_per_update=max_nan,
+        target_kl=target_kl,
     )
     policy = RecurrentTransformerPolicy(policy_config, torch.zeros(8), torch.ones(8))
     buffer = RolloutBuffer(config, policy_config, n_envs, device)
@@ -302,6 +328,78 @@ def test_too_many_non_finite_minibatches_abort_the_update(monkeypatch) -> None:
 
     with pytest.raises(RuntimeError, match="non-finite loss in 3 minibatches"):
         run_update(**harness.kwargs())
+
+
+def test_a_minibatch_exceeding_the_target_kl_threshold_stops_the_update_early(
+    monkeypatch,
+) -> None:
+    """The threshold is 1.5x target_kl, matching SB3's own convention.
+    Triggered on the 3rd of 6 calls (epoch 1's first minibatch, not epoch
+    0 -- (epoch 1, minibatch 1)'s ratio is invariantly 1 by construction,
+    so it could never trigger this on its own) -- only the first 2 calls'
+    minibatches (epoch 0's two) should have taken an optimizer step."""
+    harness = _update_harness(monkeypatch, n_envs=4, minibatch_envs=2, n_epochs=3, target_kl=0.02)
+    _install_ppo_losses_kl_override(monkeypatch, trigger_at_call=3, kl_value=0.05)
+
+    run_update(**harness.kwargs())
+
+    assert harness.optimizer.step_calls == 2
+
+
+def test_the_triggering_minibatch_itself_does_not_take_an_optimizer_step(monkeypatch) -> None:
+    """The threshold is checked BEFORE backward()/step(), matching SB3: an
+    update that would move the policy too far never has that move applied,
+    not even partially."""
+    harness = _update_harness(monkeypatch, n_envs=4, minibatch_envs=2, n_epochs=1, target_kl=0.02)
+    _install_ppo_losses_kl_override(monkeypatch, trigger_at_call=1, kl_value=0.05)
+
+    run_update(**harness.kwargs())
+
+    assert harness.optimizer.step_calls == 0
+
+
+def test_stats_report_that_target_kl_stopped_the_update(monkeypatch) -> None:
+    harness = _update_harness(monkeypatch, n_envs=4, minibatch_envs=2, n_epochs=3, target_kl=0.02)
+    _install_ppo_losses_kl_override(monkeypatch, trigger_at_call=3, kl_value=0.05)
+
+    stats = run_update(**harness.kwargs())
+
+    assert (stats.target_kl_triggered, stats.minibatches_completed) == (True, 2)
+
+
+def test_stats_report_no_early_stop_when_every_minibatch_stays_under_threshold(
+    monkeypatch,
+) -> None:
+    harness = _update_harness(monkeypatch, n_envs=4, minibatch_envs=2, n_epochs=3, target_kl=0.02)
+
+    stats = run_update(**harness.kwargs())
+
+    assert (stats.target_kl_triggered, stats.minibatches_completed) == (False, 6)
+
+
+def test_a_minibatch_at_exactly_the_threshold_does_not_trigger(monkeypatch) -> None:
+    """Strictly greater-than, matching SB3: exactly 1.5x target_kl is still
+    within budget."""
+    harness = _update_harness(monkeypatch, n_envs=4, minibatch_envs=2, n_epochs=3, target_kl=0.02)
+    _install_ppo_losses_kl_override(monkeypatch, trigger_at_call=3, kl_value=0.03)
+
+    stats = run_update(**harness.kwargs())
+
+    assert (stats.target_kl_triggered, harness.optimizer.step_calls) == (False, 6)
+
+
+def test_target_kl_none_disables_early_stopping_regardless_of_approx_kl(monkeypatch) -> None:
+    """None (the default) must reproduce the pre-early-stopping behavior
+    exactly -- every existing PPOConfig(...) call keeps working unchanged
+    unless it opts in."""
+    harness = _update_harness(
+        monkeypatch, n_envs=4, minibatch_envs=2, n_epochs=3, target_kl=None
+    )
+    _install_ppo_losses_kl_override(monkeypatch, trigger_at_call=3, kl_value=100.0)
+
+    stats = run_update(**harness.kwargs())
+
+    assert (stats.target_kl_triggered, harness.optimizer.step_calls) == (False, 6)
 
 
 def test_advantages_are_normalized_once_over_the_whole_update_batch(monkeypatch) -> None:

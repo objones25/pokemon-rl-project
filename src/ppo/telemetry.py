@@ -73,6 +73,8 @@ def update_metrics(
         "train/policy_grad_norm": stats.policy_grad_norm,
         "train/value_grad_norm": stats.value_grad_norm,
         "train/skipped_minibatches": float(stats.skipped_minibatches),
+        "train/minibatches_completed": float(stats.minibatches_completed),
+        "train/target_kl_triggered": float(stats.target_kl_triggered),
         "train/return_scale": float(return_scale),
         "loss/policy": stats.policy_loss,
         "loss/value": stats.value_loss,

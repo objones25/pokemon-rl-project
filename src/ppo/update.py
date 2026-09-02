@@ -58,6 +58,17 @@ class UpdateStats:
     # grad_norm alone cannot show it. Measured once, at (epoch 1, minibatch 1).
     policy_grad_norm: float
     value_grad_norm: float
+    # Whether a minibatch's own approx_kl exceeded 1.5x config.target_kl and
+    # stopped the update before every epoch/minibatch ran. False whenever
+    # target_kl is None (the default -- disabled).
+    target_kl_triggered: bool
+    # How many minibatches actually took an optimizer step, out of the
+    # n_epochs * (n_envs // minibatch_envs) that a full update would run --
+    # less than that whenever target_kl_triggered is True. Distinct from
+    # skipped_minibatches, which counts non-finite-loss minibatches whose
+    # step was skipped for a different reason (corrupt gradients, not an
+    # intentional trust-region stop).
+    minibatches_completed: int
 
 
 def run_update(
@@ -131,6 +142,8 @@ def run_update(
     first_dev: float | None = None
     last = None
     skipped = 0
+    completed = 0
+    target_kl_triggered = False
     grad_norm = 0.0
     grad_norm_max = 0.0
     policy_grad_norm = 0.0
@@ -185,6 +198,27 @@ def run_update(
                     )
                 continue
 
+            # Checked BEFORE backward()/step(), matching stable-baselines3:
+            # a minibatch that would move the policy past the trust region
+            # never has that move applied, not even partially. Stops the
+            # WHOLE update (remaining minibatches of this epoch, and every
+            # later epoch) rather than just this one minibatch -- an update
+            # already trending this far off pi_old only gets worse over the
+            # epochs/minibatches still to come, per every live run so far.
+            if config.target_kl is not None and loss.approx_kl > 1.5 * config.target_kl:
+                target_kl_triggered = True
+                logger.warning(
+                    "target_kl_early_stop",
+                    extra={
+                        "epoch": epoch,
+                        "minibatch": index,
+                        "approx_kl": loss.approx_kl,
+                        "threshold": 1.5 * config.target_kl,
+                        "minibatches_completed": completed,
+                    },
+                )
+                break
+
             if epoch == 0 and index == 0:
                 policy_grad_norm, value_grad_norm = _split_grad_norms(policy, loss, config)
 
@@ -196,6 +230,10 @@ def run_update(
             optimizer.step()
             if scheduler is not None:
                 scheduler.step()
+            completed += 1
+
+        if target_kl_triggered:
+            break
 
     assert first_dev is not None and last is not None  # n_epochs >= 1, so the loop always runs
     return UpdateStats(
@@ -214,6 +252,8 @@ def run_update(
         grad_norm_max=grad_norm_max,
         policy_grad_norm=policy_grad_norm,
         value_grad_norm=value_grad_norm,
+        target_kl_triggered=target_kl_triggered,
+        minibatches_completed=completed,
     )
 
 

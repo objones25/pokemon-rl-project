@@ -91,6 +91,7 @@ def _stub_run_update(*, approx_kl: float, epoch1_dev: float, forced_nan_abort: b
             max_abs_ratio_dev_epoch1_mb1=epoch1_dev, max_abs_ratio_dev=epoch1_dev,
             explained_variance=0.0, staleness_logprob_l1=0.0, skipped_minibatches=0,
             grad_norm=0.0, grad_norm_max=0.0, policy_grad_norm=0.0, value_grad_norm=0.0,
+            target_kl_triggered=False, minibatches_completed=0,
         )
 
     return _run_update
