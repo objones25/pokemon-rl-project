@@ -26,7 +26,41 @@ clip_range: 0.2
 # own effect stays isolated. Re-tune against whatever the next run's own
 # entropy curve shows, per this project's convention that these weights
 # need empirical tuning, not a fixed prior.
-ent_coef: 0.02
+#
+# Run 7 (2026-09-03, wandb r16u9ekw), still at 0.02: target_kl + the
+# stall-based abort (1aba5d9) both worked exactly as designed -- the run
+# didn't crash on a rejected minibatch's raw approx_kl, it correctly
+# detected 10 consecutive updates stuck at minibatches_completed==1 and
+# aborted with the checkpoint intact at update 247. loss/entropy still
+# fell the whole run (1.95 -> ~1.26-1.6 in the final 60 updates, same
+# range as runs 3-6 at this ent_coef), and the newly-added percentile
+# ratio diagnostics (ratio/abs_dev_p50 vs ratio/max_abs_dev_update) show
+# WHY minibatches keep getting rejected: p50 sits at ~1e-6-1e-2 (the
+# batch's 8192 (env, step) positions barely move) while max_abs_dev spikes
+# into the hundreds-to-thousands (e.g. update 240: max_abs_dev=9460.4,
+# approx_kl_mean=1.1505 -- (ratio-1-log(ratio)) for that ONE outlier
+# position alone is ~1.1538, i.e. it accounts for ~99.7% of that
+# minibatch's entire approx_kl). This is a single near-zero-probability
+# action's ratio exploding (log'(p)=1/p as p->0, per
+# rl-agent-expert/references/stability.md's entropy-collapse section),
+# not broad policy drift -- consistent with advantage/raw_std sitting at
+# ~0.002-0.04 (noise-floor scale) for nearly the entire run once the
+# critic fits well (value/explained_variance 0.7-0.95), so
+# `(advantage - mean) / (std + 1e-8)` has very little real signal left to
+# normalize and amplifies whatever noise remains. attn/logit_max (4.9-7.8)
+# and model/residual_norm (22.6-21.8) stayed healthy throughout, ruling
+# out an activation blowup as an alternative explanation.
+#
+# ent_coef doubled again (0.02 -> 0.04) as the next single-variable test,
+# per rl-agent-expert's ranked fix list for this exact symptom (entropy
+# already near zero when a large-KL step happens): raising ent_coef is
+# next in that list after target_kl-early-stopping/LR-decay/grad-clipping,
+# all of which are already in place here. This is not expected to stop
+# entropy from ever falling -- per that same reference, the point is
+# "not to fix the collapse directly, but to keep the policy recoverable"
+# for longer, i.e. keep enough mass on the tail actions that a normal
+# gradient step can't send one of them into the log'(p)=1/p regime.
+ent_coef: 0.04
 vf_coef: 0.5
 max_grad_norm: 0.5
 lr: 0.0003
