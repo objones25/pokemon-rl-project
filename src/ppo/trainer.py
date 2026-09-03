@@ -285,11 +285,13 @@ def _run_training(deps: PPODeps, config: PPOConfig, max_updates: int | None) -> 
             "vec_env.last_step is None after collect_rollout advanced the env"
         )
         respawns_total = _respawns(deps.vec_env)
+        env_stats = deps.vec_env.stats()
         env_metrics = rollout_metrics(
             last_step, deps.vec_env.last_components,
-            deps.vec_env.clip_fire_rate, respawns_total, deps.vec_env.stats(),
+            deps.vec_env.clip_fire_rate, respawns_total, env_stats,
             respawns_delta=respawns_total - respawns_before,
         )
+        env_metrics["env/stalled_frac"] = _stalled_env_fraction(env_stats, config.n_steps)
         metrics: dict = update_metrics(
             stats=stats,
             env_metrics=env_metrics,
@@ -445,6 +447,18 @@ def _visit_counts_as_image(heatmap: np.ndarray) -> np.ndarray:
     if peak == 0:
         return heatmap.astype(np.uint8)
     return (heatmap.astype(np.float32) * (255.0 / peak)).astype(np.uint8)
+
+
+def _stalled_env_fraction(stats: list[dict], n_steps: int) -> float:
+    """Fraction of envs whose steps_since_new_coord has reached n_steps --
+    they found zero new coordinates across the entire rollout just
+    collected. n_steps (a PPO rollout-length concept) is the threshold
+    rather than a fixed step count, which is why this lives here and not in
+    pokemon_env.telemetry.rollout_metrics alongside the raw mean/max: that
+    module owns env-only concepts, this owns what counts as a wasted
+    rollout for one env."""
+    stalled = sum(1 for entry in stats if entry["steps_since_new_coord"] >= n_steps)
+    return stalled / len(stats)
 
 
 def _respawns(vec_env) -> int:

@@ -134,6 +134,7 @@ class EnvSession:
             "event_flags": ram.event_flag_count(self._emulator),
             "step_count": self._step_count,
             "episode_lengths": lengths,
+            "steps_since_new_coord": self._rewards.steps_since_new_coord,
         }
 
     def state_dict(self) -> dict:

@@ -106,6 +106,7 @@ def rollout_metrics(
     unique_coords = {key for entry in stats for key in entry["coord_keys"]}
     unique_maps = {(key >> 16) & 0xFF for key in unique_coords}
     lengths = [length for entry in stats for length in entry["episode_lengths"]]
+    stalls = [entry["steps_since_new_coord"] for entry in stats]
 
     metrics = {
         "reward/mean": float(step.reward.mean()),
@@ -122,6 +123,8 @@ def rollout_metrics(
         "explore/unique_coords_total": float(len(unique_coords)),
         "explore/unique_maps": float(len(unique_maps)),
         "episode/length_mean": float(sum(lengths) / len(lengths)) if lengths else 0.0,
+        "env/steps_since_new_coord_mean": float(sum(stalls) / len(stalls)),
+        "env/steps_since_new_coord_max": float(max(stalls)),
     }
     for name, value in components.items():
         metrics[f"reward/{name}"] = float(value)

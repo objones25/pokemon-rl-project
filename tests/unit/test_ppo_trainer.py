@@ -15,7 +15,13 @@ from pokemon_env.config import EnvConfig
 from ppo import checkpoint as ppo_checkpoint
 from ppo.config import PPOConfig
 from ppo.normalizer import ReturnScaler
-from ppo.trainer import PPODeps, _record_best, _visit_counts_as_image, run_training
+from ppo.trainer import (
+    PPODeps,
+    _record_best,
+    _stalled_env_fraction,
+    _visit_counts_as_image,
+    run_training,
+)
 from ppo.update import UpdateStats, run_update
 from sequence_model.config import PolicyConfig
 from sequence_model.policy import RecurrentTransformerPolicy
@@ -129,6 +135,7 @@ def _trainer_harness(
     forced_minibatches_completed: int | list[int] | None = None,
     target_kl: float | None = None,
     max_consecutive_stalled_updates: int = 10,
+    steps_since_new_coord: int = 0,
 ) -> _TrainerHarness:
     """A tiny real policy (matching the other ppo/ harnesses' shapes) plus a
     `FakeVecEnv`/`FakeLatentEncoder` and a `FakeExperimentRun`. `run_update`
@@ -154,7 +161,12 @@ def _trainer_harness(
     )
     policy = RecurrentTransformerPolicy(policy_config, torch.zeros(8), torch.ones(8))
     optimizer = torch.optim.AdamW(policy.parameters(), lr=1e-3)
-    vec_env = FakeVecEnv(n_envs=_N_ENVS, aux_dim=policy_config.aux_state_dim, done_at_step=None)
+    vec_env = FakeVecEnv(
+        n_envs=_N_ENVS,
+        aux_dim=policy_config.aux_state_dim,
+        done_at_step=None,
+        steps_since_new_coord=steps_since_new_coord,
+    )
     encoder = FakeLatentEncoder(latent_dim=policy_config.latent_dim, device=torch.device("cpu"))
     wandb_run = FakeExperimentRun()
 
@@ -565,6 +577,29 @@ def test_respawn_total_and_delta_are_both_logged(tmp_path) -> None:
     assert (logged["env/worker_respawns_total"], logged["env/worker_respawns_delta"]) == (0.0, 0.0)
 
 
+def test_stalled_frac_is_logged_as_zero_when_every_env_is_still_exploring(tmp_path) -> None:
+    harness = _trainer_harness(tmp_path, steps_since_new_coord=0)
+
+    run_training(harness.deps, max_updates=1)
+    logged = harness.wandb_run.logged[0]
+
+    assert logged["env/stalled_frac"] == pytest.approx(0.0)
+
+
+def test_stalled_frac_is_logged_as_one_when_every_env_found_nothing_new_this_rollout(
+    tmp_path,
+) -> None:
+    """steps_since_new_coord reaching n_steps (_N_STEPS here) means the env
+    found zero new coordinates across the entire rollout just collected --
+    the menu-loop behaviour the contact sheet showed visually."""
+    harness = _trainer_harness(tmp_path, steps_since_new_coord=_N_STEPS)
+
+    run_training(harness.deps, max_updates=1)
+    logged = harness.wandb_run.logged[0]
+
+    assert logged["env/stalled_frac"] == pytest.approx(1.0)
+
+
 def test_the_running_bests_are_written_to_the_wandb_summary(tmp_path) -> None:
     """Set explicitly rather than left as last-value: W&B's summary column
     otherwise shows whatever the final update logged, which on a 48-hour run
@@ -681,3 +716,26 @@ def test_an_all_zero_visit_map_stays_all_zero_rather_than_dividing_by_its_peak()
     image = _visit_counts_as_image(counts)
 
     assert image.tolist() == [[0, 0], [0, 0]]
+
+
+def _stats_entry(steps_since_new_coord: int) -> dict:
+    return {"steps_since_new_coord": steps_since_new_coord}
+
+
+def test_stalled_env_fraction_counts_envs_that_found_nothing_new_this_rollout() -> None:
+    """An env whose steps_since_new_coord has reached n_steps contributed
+    zero new coordinates to the entire rollout just collected -- exactly the
+    menu-loop behaviour the contact sheet showed visually."""
+    stats = [_stats_entry(0), _stats_entry(500), _stats_entry(1024), _stats_entry(2000)]
+
+    fraction = _stalled_env_fraction(stats, n_steps=1024)
+
+    assert fraction == pytest.approx(0.5)
+
+
+def test_stalled_env_fraction_is_zero_when_every_env_found_new_ground() -> None:
+    stats = [_stats_entry(0), _stats_entry(100), _stats_entry(1023)]
+
+    fraction = _stalled_env_fraction(stats, n_steps=1024)
+
+    assert fraction == pytest.approx(0.0)

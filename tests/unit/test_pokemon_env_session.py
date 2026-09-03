@@ -121,6 +121,16 @@ def test_stats_reports_the_length_of_a_completed_episode() -> None:
     assert session.stats()["episode_lengths"] == [2]
 
 
+def test_stats_reports_steps_since_new_coord_for_an_env_that_stopped_exploring() -> None:
+    session = EnvSession(FakeEmulator(), EnvConfig(), init_state=b"")
+    session.reset()
+    session.step(0)  # discovers (0, 0, 0)
+    session.step(0)  # same coord again
+    session.step(0)  # same coord again
+
+    assert session.stats()["steps_since_new_coord"] == 2
+
+
 def test_stats_drains_the_episode_length_history_so_lengths_are_not_double_counted() -> None:
     session = EnvSession(FakeEmulator(), EnvConfig(max_steps=2), init_state=b"")
     session.reset()
