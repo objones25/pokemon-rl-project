@@ -81,15 +81,15 @@ def build_aux_state(
     raw[18] = 1.0 if ram.in_battle(mem) else 0.0
     raw[19] = ram.read_money(mem) / ram.MAX_MONEY
     raw[20:26] = [level / ram.MAX_LEVEL for level in ram.opponent_levels(mem)]
-    # Live slots only, and deliberately NOT ram.aggregate_hp_fraction, which
-    # sums all six. A stale full-health Pokemon in a vacated slot would
-    # otherwise mask the live one being nearly dead. That function is left
-    # alone because rewards.py's healing term is built on it -- changing it
-    # here would silently alter reward semantics, which is a separate
-    # decision from fixing what the policy observes.
-    live_hp = party_hp[:live]
-    live_max = sum(maximum for _, maximum in live_hp)
-    raw[26] = (sum(current for current, _ in live_hp) / live_max) if live_max else 0.0
+    # ram.live_party_hp_fraction re-reads party_size/party_hp rather than
+    # reusing the `live`/`party_hp` locals above -- a handful of extra
+    # single-byte reads, not the event_flag_count-scale cost that justifies
+    # threading a value through elsewhere in this module. rewards.py's heal
+    # reward and low-HP penalty use the same reader now (see
+    # docs/superpowers/specs/2026-09-05-battle-reward-redesign-design.md),
+    # so this observation and those reward terms agree on what "how hurt is
+    # my team" means.
+    raw[26] = ram.live_party_hp_fraction(mem)
 
     raw[27] = math.log1p(exploration.coords_seen) / math.log1p(_COORD_SATURATION)
     raw[28] = step_count / max_steps
