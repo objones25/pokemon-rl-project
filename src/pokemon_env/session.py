@@ -135,6 +135,7 @@ class EnvSession:
             "step_count": self._step_count,
             "episode_lengths": lengths,
             "steps_since_new_coord": self._rewards.steps_since_new_coord,
+            "blackout_count": self._rewards.blackout_count,
         }
 
     def state_dict(self) -> dict:

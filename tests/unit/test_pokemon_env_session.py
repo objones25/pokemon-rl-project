@@ -131,6 +131,19 @@ def test_stats_reports_steps_since_new_coord_for_an_env_that_stopped_exploring()
     assert session.stats()["steps_since_new_coord"] == 2
 
 
+def test_stats_reports_the_blackout_count(fake_emulator) -> None:
+    fake_emulator.memory[ram.PARTY_SIZE_ADDR] = 1
+    fake_emulator.memory[ram.PARTY_MAX_HP_BASE + 1] = 100
+    fake_emulator.memory[ram.PARTY_HP_BASE + 1] = 50
+    session = EnvSession(fake_emulator, EnvConfig(), init_state=b"")
+    session.reset()
+    fake_emulator.memory[ram.PARTY_HP_BASE + 1] = 0
+
+    session.step(0)
+
+    assert session.stats()["blackout_count"] == 1
+
+
 def test_stats_drains_the_episode_length_history_so_lengths_are_not_double_counted() -> None:
     session = EnvSession(FakeEmulator(), EnvConfig(max_steps=2), init_state=b"")
     session.reset()

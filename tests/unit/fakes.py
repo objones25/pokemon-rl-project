@@ -75,12 +75,14 @@ class FakeBackend:
         event_flags: int = 0,
         step_count: int = 0,
         steps_since_new_coord: int = 0,
+        blackout_count: int = 0,
     ) -> None:
         self._coord_keys = coord_keys
         self._badges = badges
         self._event_flags = event_flags
         self._step_count = step_count
         self._steps_since_new_coord = steps_since_new_coord
+        self._blackout_count = blackout_count
         self._pending: StepResult | None = None
 
     def _result(self) -> StepResult:
@@ -125,6 +127,7 @@ class FakeBackend:
             "step_count": self._step_count,
             "episode_lengths": [],
             "steps_since_new_coord": self._steps_since_new_coord,
+            "blackout_count": self._blackout_count,
         }
 
 
@@ -216,12 +219,14 @@ class FakeVecEnv:
         reward: float = 0.0,
         reward_from_action: bool = False,
         steps_since_new_coord: int = 0,
+        blackout_count: int = 0,
     ) -> None:
         self.n_envs = n_envs
         self._aux_dim = aux_dim
         self._done_at_step = done_at_step
         self._reward = reward
         self._steps_since_new_coord = steps_since_new_coord
+        self._blackout_count = blackout_count
         # A constant reward makes the buffer's reward slot indistinguishable
         # from every other reward slot, so no test could see which action a
         # stored reward actually pays for. With reward_from_action, step()
@@ -295,7 +300,7 @@ class FakeVecEnv:
     def stats(self) -> list[dict]:
         """One dict per env, matching `FakeBackend.stats()`'s shape --
         `rollout_metrics` reads `coord_keys`/`badges`/`event_flags`/
-        `episode_lengths`/`steps_since_new_coord` from every entry."""
+        `episode_lengths`/`steps_since_new_coord`/`blackout_count` from every entry."""
         return [
             {
                 "coord_keys": [],
@@ -304,6 +309,7 @@ class FakeVecEnv:
                 "step_count": self.step_calls,
                 "episode_lengths": [],
                 "steps_since_new_coord": self._steps_since_new_coord,
+                "blackout_count": self._blackout_count,
             }
             for _ in range(self.n_envs)
         ]
