@@ -335,8 +335,16 @@ def test_the_win_that_earns_a_badge_is_attributed_to_the_old_tier(fake_emulator)
     """If the badge flag and the fainting edge land on the exact same
     step, that win must still count as the old tier's Nth win, not reset
     itself out of existence -- proven by checking the tier only resets
-    for whatever comes NEXT."""
-    win_accumulator = RewardAccumulator(EnvConfig(battle_win_weight=0.5))
+    for whatever comes NEXT.
+
+    badge_weight=0.0 isolates battle_won's reward from the badge's own:
+    _update_badge_tier reads ram.badge_count directly, unaffected by
+    badge_weight, so this doesn't change what tier-reset behavior is
+    under test -- it only removes components["badges"]'s own +1.0 jump
+    (which would otherwise land on the exact same step as the win, since
+    the badge flag is deliberately set there too, and clip .reward to a
+    contaminated 1.0 instead of the intended 0.5 signal)."""
+    win_accumulator = RewardAccumulator(EnvConfig(battle_win_weight=0.5, badge_weight=0.0))
     win_accumulator.reset(fake_emulator)
     fake_emulator.memory[ram.IN_BATTLE_ADDR] = 1
     _set_opponent_hp(fake_emulator, current=10, max_hp=10)
