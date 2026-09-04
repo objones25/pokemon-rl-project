@@ -10,3 +10,16 @@ heal_weight: 0.5
 explore_weight: 0.3
 event_weight: 0.1
 level_weight: 0.05
+# Run 9 (2026-09-04, wandb p1hwysh2, docs/ppo-experiment-history.md) found
+# env/stalled_frac reaching 0.94 -- the large majority of envs sitting in a
+# menu for thousands of steps at zero cost, since every other component here
+# is a non-negative bonus. explore_weight/sqrt(k) paid ~0.0055 per new
+# coordinate around this run's k~3000, and healthy early exploration found a
+# new coordinate roughly every 15 steps -- 0.002/step keeps a genuinely
+# exploring policy net-positive across that cadence while making a
+# multi-thousand-step stall clearly costly (26,000 stalled steps this run
+# would cost -52, dwarfing anything achievable while stuck). First guess,
+# not yet validated by a live run -- re-tune against whatever the next run's
+# own env/stalled_frac and reward/idle trajectory show, same as every other
+# weight in this file.
+idle_penalty_weight: 0.002

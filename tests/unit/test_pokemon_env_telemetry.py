@@ -175,6 +175,33 @@ def test_rollout_metrics_reports_the_worst_case_steps_since_new_coord() -> None:
     assert metrics["env/steps_since_new_coord_max"] == pytest.approx(9000.0)
 
 
+def test_rollout_metrics_counts_episodes_finished_anywhere_in_the_rollout() -> None:
+    """step.done reflects only the LAST step of the 1024-step rollout just
+    collected -- an env that finished an episode mid-rollout and was already
+    autoreset by the time the rollout ended would show done=False there even
+    though a real episode completed. episode_lengths (drained by
+    EnvSession.stats() across the whole rollout) is the field that actually
+    knows this happened, which is why episodes_finished must come from
+    summing it rather than from the final VecStep."""
+    step = _vec_step(3)
+    assert not step.done.any(), "done must be all-False to prove this isn't reading it"
+    stats = [
+        {
+            "coord_keys": [],
+            "badges": 0,
+            "event_flags": 0,
+            "step_count": 0,
+            "episode_lengths": lengths,
+            "steps_since_new_coord": 0,
+        }
+        for lengths in ([10], [], [20, 30])
+    ]
+
+    metrics = rollout_metrics(step, components={}, clip_fire_rate=0.0, respawns=0, stats=stats)
+
+    assert metrics["env/episodes_finished"] == pytest.approx(3.0)
+
+
 def test_rollout_metrics_surfaces_the_clip_fire_rate() -> None:
     """Above roughly 0.1% the weights are miscalibrated and achievement
     ordering is being flattened."""

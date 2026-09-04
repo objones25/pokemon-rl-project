@@ -35,3 +35,13 @@ def test_config_defaults_match_the_reference_implementation() -> None:
     config = EnvConfig()
 
     assert (config.n_envs, config.action_freq, config.max_steps) == (64, 24, 163_840)
+
+
+def test_idle_penalty_weight_defaults_to_zero() -> None:
+    """Opt-in like target_kl/lr_decay_steps: a new tunable reward term
+    defaults off so every existing default-EnvConfig test keeps its current
+    behavior, and configs/pokemon_env.yaml is what actually turns it on for
+    a real run."""
+    config = EnvConfig()
+
+    assert config.idle_penalty_weight == pytest.approx(0.0)

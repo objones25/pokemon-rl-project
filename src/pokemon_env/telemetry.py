@@ -114,7 +114,7 @@ def rollout_metrics(
         "env/clip_fire_rate": float(clip_fire_rate),
         "env/worker_respawns_total": float(respawns),
         "env/worker_respawns_delta": float(respawns_delta),
-        "env/episodes_finished": float(step.done.sum()),
+        "env/episodes_finished": float(sum(len(entry["episode_lengths"]) for entry in stats)),
         "progress/badges_max": float(max(entry["badges"] for entry in stats)),
         "progress/badges_mean": float(
             sum(entry["badges"] for entry in stats) / len(stats)

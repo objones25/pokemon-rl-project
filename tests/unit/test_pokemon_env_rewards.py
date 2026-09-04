@@ -88,6 +88,83 @@ def test_coordinates_are_not_recorded_during_battle(fake_emulator, accumulator) 
     assert (result.reward, accumulator.coords_seen) == (pytest.approx(0.0), 0)
 
 
+def test_a_step_that_finds_no_new_coordinate_pays_the_idle_penalty(fake_emulator) -> None:
+    """The 2026-09-04 investigation (docs/ppo-experiment-history.md, run 9)
+    found the majority of envs stuck in menus for thousands of steps with
+    zero cost. idle_penalty_weight is the fix -- applied outside the
+    monotone-gain formula, since that formula floors every step at 0 and
+    cannot express a cost (see RewardAccumulator.step)."""
+    idle_accumulator = RewardAccumulator(EnvConfig(idle_penalty_weight=0.01))
+    idle_accumulator.reset(fake_emulator)
+    _set_coord(fake_emulator, 5, 5, 1)
+    idle_accumulator.step(fake_emulator)  # discovers (5, 5, 1)
+    _set_coord(fake_emulator, 6, 6, 1)
+    idle_accumulator.step(fake_emulator)  # discovers (6, 6, 1)
+    _set_coord(fake_emulator, 5, 5, 1)
+
+    revisit = idle_accumulator.step(fake_emulator)  # no new coordinate
+
+    assert revisit.reward == pytest.approx(-0.01)
+
+
+def test_the_idle_penalty_does_not_apply_the_step_a_new_coordinate_is_found(
+    fake_emulator,
+) -> None:
+    idle_accumulator = RewardAccumulator(EnvConfig(idle_penalty_weight=0.01))
+    idle_accumulator.reset(fake_emulator)
+    _set_coord(fake_emulator, 5, 5, 1)
+
+    result = idle_accumulator.step(fake_emulator)
+
+    assert result.reward == pytest.approx(0.30)
+
+
+def test_the_idle_penalty_does_not_apply_during_battle(fake_emulator) -> None:
+    """Battle turns never move the player -- position bytes are stale there
+    (see _update_exploration) -- so they always look like a step with no new
+    coordinate. Penalizing them would tax the agent for fighting, exactly
+    the opposite of what this project wants."""
+    idle_accumulator = RewardAccumulator(EnvConfig(idle_penalty_weight=0.01))
+    idle_accumulator.reset(fake_emulator)
+    fake_emulator.memory[ram.IN_BATTLE_ADDR] = 1
+
+    result = idle_accumulator.step(fake_emulator)
+
+    assert result.reward == pytest.approx(0.0)
+
+
+def test_the_idle_penalty_is_reported_as_its_own_reward_component(fake_emulator) -> None:
+    """Observability first: a term that suppresses reward must be visible on
+    its own W&B panel (reward/idle), not silently folded into the total."""
+    idle_accumulator = RewardAccumulator(EnvConfig(idle_penalty_weight=0.01))
+    idle_accumulator.reset(fake_emulator)
+    _set_coord(fake_emulator, 5, 5, 1)
+    idle_accumulator.step(fake_emulator)
+    _set_coord(fake_emulator, 6, 6, 1)
+    idle_accumulator.step(fake_emulator)
+    _set_coord(fake_emulator, 5, 5, 1)
+
+    revisit = idle_accumulator.step(fake_emulator)
+
+    assert revisit.components["idle"] == pytest.approx(-0.01)
+
+
+def test_the_idle_penalty_does_not_suppress_a_genuine_gain_in_the_same_step(
+    fake_emulator,
+) -> None:
+    """A badge earned while not standing on new ground must still pay in
+    full -- the idle penalty is a separate, additive term, not something
+    that erodes max_total or the gain computation itself."""
+    idle_accumulator = RewardAccumulator(EnvConfig(idle_penalty_weight=0.01))
+    idle_accumulator.reset(fake_emulator)
+    idle_accumulator.step(fake_emulator)  # registers (0, 0, 0) as seen
+    fake_emulator.memory[ram.BADGES_ADDR] = 0b0000_0001
+
+    result = idle_accumulator.step(fake_emulator)  # same coordinate again, plus a badge
+
+    assert result.reward == pytest.approx(1.00 - 0.01)
+
+
 def test_a_badge_earns_exactly_the_clip_cap(fake_emulator, accumulator) -> None:
     """In-battle isolates the badge component from the first-coordinate
     exploration credit that the all-zero fake memory would otherwise fire
@@ -119,8 +196,13 @@ def test_a_step_crossing_several_components_clips_to_exactly_one(
 
 
 def test_reward_is_never_negative_when_progress_is_lost(fake_emulator, accumulator) -> None:
-    """Section 4 forbids penalties. Losing a badge (an impossible-but-cheap
-    guard) must earn 0, not a negative number."""
+    """Section 4's positive-delta rule is about not paying for reversible
+    cycles (deposit/withdraw, badge loss), not a blanket ban on any negative
+    reward -- idle_penalty_weight (tested separately) is a deliberate,
+    bounded exception to that, since idling can never be profitably
+    reversed. Losing a badge (an impossible-but-cheap guard) must still
+    earn 0 under the monotone-gain formula, not a negative number, with
+    idle_penalty_weight at its default of 0."""
     fake_emulator.memory[ram.BADGES_ADDR] = 0b0000_0001
     accumulator.step(fake_emulator)
     fake_emulator.memory[ram.BADGES_ADDR] = 0b0000_0000
@@ -253,6 +335,67 @@ def test_coord_keys_returns_every_visited_coordinate_key(fake_emulator) -> None:
     accumulator.step(fake_emulator)
 
     assert accumulator.coord_keys() == [ram.coord_key(3, 4, 38)]
+
+
+def test_reset_persists_exploration_across_an_episode_boundary(
+    fake_emulator, accumulator
+) -> None:
+    """Run 9 (docs/ppo-experiment-history.md) found all 64 envs autoreset in
+    perfect lockstep every 163,840 steps -- wiping seen_coords on every one
+    of those resets means the decaying explore bonus pays full price again
+    for the same starting area every ~160 updates, forever, instead of
+    pushing toward genuinely new ground across the run. A coordinate seen in
+    the episode before a reset must still count as seen after it -- which
+    also proves max_total was correctly rebased to the persisted explore
+    contribution, not left at 0: a stale 0 baseline would manufacture a
+    reward here that nothing actually earned."""
+    _set_coord(fake_emulator, 5, 5, 1)
+    accumulator.step(fake_emulator)
+    accumulator.reset(fake_emulator)
+
+    revisit = accumulator.step(fake_emulator)  # (5, 5, 1) again, from a fresh episode
+
+    assert revisit.reward == pytest.approx(0.0)
+
+
+def test_reset_still_pays_full_price_for_ground_new_to_the_whole_run(
+    fake_emulator, accumulator
+) -> None:
+    """The decaying 1/sqrt(k) bonus must keep counting from where the prior
+    episode left off, not restart at k=1 -- otherwise every reset cheapens
+    what "new" is worth instead of the run converging on real exploration."""
+    _set_coord(fake_emulator, 1, 1, 1)
+    accumulator.step(fake_emulator)
+    _set_coord(fake_emulator, 2, 2, 1)
+    accumulator.step(fake_emulator)
+    _set_coord(fake_emulator, 3, 3, 1)
+    accumulator.step(fake_emulator)
+    accumulator.reset(fake_emulator)
+    _set_coord(fake_emulator, 4, 4, 1)
+
+    fourth_ever = accumulator.step(fake_emulator)
+
+    assert fourth_ever.reward == pytest.approx(0.30 / math.sqrt(4))
+
+
+def test_reset_still_clears_badges_and_healing_like_the_real_emulator_reload_does(
+    fake_emulator, accumulator
+) -> None:
+    """Only exploration persists. Badges/HP/party come back from
+    EnvSession.reset()'s real emulator.load_state(init_state) at their
+    init-state values every episode -- carrying max_total over as well would
+    make a fresh episode need to out-earn every badge the last one banked
+    just to see reward again."""
+    fake_emulator.memory[ram.BADGES_ADDR] = 0b0000_0001
+    accumulator.step(fake_emulator)  # episode 1 earns the badge
+    accumulator.reset(fake_emulator)
+    fake_emulator.memory[ram.BADGES_ADDR] = 0b0000_0000  # the real reload would clear this too
+    accumulator.step(fake_emulator)  # baseline step: badges back to 0, matches max_total
+
+    fake_emulator.memory[ram.BADGES_ADDR] = 0b0000_0001
+    fresh_badge = accumulator.step(fake_emulator)  # earning the "same" badge again in episode 2
+
+    assert fresh_badge.reward == pytest.approx(1.00)
 
 
 def test_a_restored_accumulator_still_pays_for_genuinely_new_ground(

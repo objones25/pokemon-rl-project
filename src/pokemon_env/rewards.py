@@ -99,11 +99,36 @@ class RewardAccumulator:
 
     def reset(self, mem: Emulator) -> None:
         """Captures the event flags init.state already has set, so the agent
-        is not paid on step one for progress it did not make."""
+        is not paid on step one for progress it did not make.
+
+        Exploration (seen_coords/seen_maps/explore_sum) persists across this
+        reset; everything else does not. EnvSession.reset() is one code path
+        for both the very first cold start and every later autoreset at
+        max_steps, and the emulator genuinely reloads init_state on both --
+        badges/HP/party/events really do come back to their init values, so
+        max_total (which those feed into) must reset with them, or a fresh
+        episode would need to out-earn every badge the last one banked just
+        to see reward again. Exploration is different: the coordinates
+        themselves are still the same physical tiles, seen for real, so
+        forgetting them on every one of the ~160-update resets this project's
+        fixed max_steps produces (run 9, docs/ppo-experiment-history.md) pays
+        the decaying 1/sqrt(k) bonus at full price for the same starting
+        area every time instead of ever converging on genuinely new ground.
+
+        max_total is rebased to exactly the persisted explore contribution
+        (not left at 0) -- otherwise the fresh episode's `total` would sit
+        above a stale 0 baseline and manufacture a reward on step one that
+        nothing there actually earned."""
+        explore_weight = self._config.explore_weight
+        persisted_explore_sum = self._state.explore_sum
         self._state = _State(
             base_event_flags=ram.event_flag_count(mem),
             last_hp_fraction=ram.aggregate_hp_fraction(mem),
             last_party_size=ram.party_size(mem),
+            max_total=explore_weight * persisted_explore_sum,
+            explore_sum=persisted_explore_sum,
+            seen_coords=self._state.seen_coords,
+            seen_maps=self._state.seen_maps,
         )
 
     def step(self, mem: Emulator) -> RewardBreakdown:
@@ -126,10 +151,26 @@ class RewardAccumulator:
 
         gain = max(0.0, total - self._state.max_total)
         self._state.max_total = max(self._state.max_total, total)
+
+        # A genuinely separate, additive term -- not folded into `components`
+        # above, because `total`/`gain`/`max_total` must stay computed from
+        # only the monotone components. Section 4's positive-delta rule is
+        # about never paying for a reversible cycle (deposit/withdraw,
+        # badge loss); it says nothing against a per-step cost that can
+        # never be profitably reversed, and the architecture plan's own
+        # clip range for the advantage estimator is [-1, 1], not [0, 1].
+        # Skipped in battle: position bytes are stale there (see
+        # _update_exploration), so every battle turn would otherwise look
+        # like a step with no new coordinate and tax the agent for fighting.
+        idle_penalty = (
+            self._config.idle_penalty_weight
+            if self._state.steps_since_new_coord > 0 and not ram.in_battle(mem)
+            else 0.0
+        )
         return RewardBreakdown(
-            reward=min(gain, 1.0),
+            reward=min(gain, 1.0) - idle_penalty,
             clipped=gain > 1.0,
-            components=components,
+            components={**components, "idle": -idle_penalty},
             badge_count=badge_count,
             event_flag_count=event_flag_count,
         )

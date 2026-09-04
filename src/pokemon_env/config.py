@@ -28,6 +28,11 @@ class EnvConfig:
     explore_weight: float = 0.30
     event_weight: float = 0.10
     level_weight: float = 0.05
+    # Opt-in like target_kl/lr_decay_steps: 0.0 disables it, reproducing the
+    # old no-penalty behavior exactly. configs/pokemon_env.yaml sets the real
+    # value; see rewards.py's RewardAccumulator.step for what it penalizes
+    # and why it has to sit outside the monotone-gain formula.
+    idle_penalty_weight: float = 0.0
 
     def __post_init__(self) -> None:
         release_frames = self.action_freq - self.press_frames - 1
