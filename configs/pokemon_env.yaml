@@ -13,16 +13,18 @@ level_weight: 0.05
 # Run 9 (2026-09-04, wandb p1hwysh2, docs/ppo-experiment-history.md) found
 # env/stalled_frac reaching 0.94 -- the large majority of envs sitting in a
 # menu for thousands of steps at zero cost, since every other component here
-# is a non-negative bonus. explore_weight/sqrt(k) paid ~0.0055 per new
-# coordinate around this run's k~3000, and healthy early exploration found a
-# new coordinate roughly every 15 steps -- 0.002/step keeps a genuinely
-# exploring policy net-positive across that cadence while making a
-# multi-thousand-step stall clearly costly (26,000 stalled steps this run
-# would cost -52, dwarfing anything achievable while stuck). First guess,
-# not yet validated by a live run -- re-tune against whatever the next run's
-# own env/stalled_frac and reward/idle trajectory show, same as every other
-# weight in this file.
-idle_penalty_weight: 0.002
+# is a non-negative bonus. Originally set to 0.002 with a claim that this
+# kept healthy exploration net-positive -- wrong: explore_weight/sqrt(k)
+# paid ~0.0055 per discovery around run 9's k~3000, and a ~15-step gap
+# between discoveries cost 15*0.002=0.03 in idle penalty, net *negative*
+# even while exploring well. Halved to 0.001 on request -- 15*0.001=0.015 is
+# still net-negative against that same 0.0055, just less so (about 2.7x
+# rather than ~5.5x). Still costly enough that a multi-thousand-step stall
+# (26,000 steps in run 9) pays -26, dwarfing anything achievable while
+# stuck. Not a full fix -- the next real tuning pass should either lower
+# this further or raise explore_weight/change the decay, and should be
+# checked against reward/idle and reward/explore together, not idle alone.
+idle_penalty_weight: 0.001
 # Run 10 (2026-09-04, wandb w0sovi4c) found the idle-penalty fix above
 # backfired: since battle was exempt from it, 63 of 64 envs converged on
 # sitting at the FIGHT menu forever -- the one remaining zero-cost, zero-
