@@ -13,17 +13,24 @@ level_weight: 0.05
 # Run 9 (2026-09-04, wandb p1hwysh2, docs/ppo-experiment-history.md) found
 # env/stalled_frac reaching 0.94 -- the large majority of envs sitting in a
 # menu for thousands of steps at zero cost, since every other component here
-# is a non-negative bonus. Originally set to 0.002 with a claim that this
-# kept healthy exploration net-positive -- wrong: explore_weight/sqrt(k)
-# paid ~0.0055 per discovery around run 9's k~3000, and a ~15-step gap
-# between discoveries cost 15*0.002=0.03 in idle penalty, net *negative*
-# even while exploring well. Halved to 0.001 on request -- 15*0.001=0.015 is
-# still net-negative against that same 0.0055, just less so (about 2.7x
-# rather than ~5.5x). Still costly enough that a multi-thousand-step stall
-# (26,000 steps in run 9) pays -26, dwarfing anything achievable while
-# stuck. Not a full fix -- the next real tuning pass should either lower
-# this further or raise explore_weight/change the decay, and should be
-# checked against reward/idle and reward/explore together, not idle alone.
+# is a non-negative bonus. Originally shipped with a 0-grace trigger (any
+# step without a new coordinate) and a claim that 0.002 kept healthy
+# exploration net-positive -- wrong, and not just mistuned: explore_weight/
+# sqrt(k) decays toward 0 as k grows while a flat per-step penalty does
+# not, so a 0-grace trigger makes continued exploration net-negative
+# eventually regardless of idle_penalty_weight's magnitude (run 9's own
+# numbers already crossed that line at 0.002 -- 15*0.002=0.03 against a
+# ~0.0055 discovery reward). Halving to 0.001 on request only slowed this
+# down (~2.7x negative instead of ~5.5x), so the actual fix is structural,
+# not a magnitude change: RewardAccumulator.step now only applies this once
+# steps_since_new_coord passes _OVERWORLD_STALL_GRACE_STEPS (1000, matching
+# aux_state.py's own _STUCK_SATURATION), so ordinary walking between two
+# known points -- even for hundreds of steps -- costs nothing at all, and
+# this weight only ever taxes a genuine, sustained stall (26,000 steps in
+# run 9, dwarfing this grace window). Left at 0.001 (not restored to 0.002)
+# since it no longer needs to compete with explore_weight at all -- purely
+# a deterrent against pathological stalling now, worth re-tuning up if the
+# next run shows it is too weak a deterrent.
 idle_penalty_weight: 0.001
 # Run 10 (2026-09-04, wandb w0sovi4c) found the idle-penalty fix above
 # backfired: since battle was exempt from it, 63 of 64 envs converged on

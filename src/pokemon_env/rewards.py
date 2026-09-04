@@ -52,14 +52,32 @@ _DAMAGE_CONTRIBUTION_CEILING = 0.2
 # can decrease as well as increase. Capped on the weighted contribution.
 _CATCH_CONTRIBUTION_CEILING = 0.3
 
-# How many steps a stalled battle gets before it counts as idling, same
-# weight as the overworld's steps_since_new_coord trigger. A real turn is
-# several env-steps of menu navigation (open FIGHT, pick a move) before HP
-# actually moves; a 0-grace trigger here would tax the mechanical overhead
-# of fighting, not genuine stalling. Run 9's discovered exploit sat at this
-# for tens of thousands of steps (docs/ppo-experiment-history.md) -- 8 is
-# nowhere near that scale.
+# How many steps a stalled battle gets before it counts as idling. A real
+# turn is several env-steps of menu navigation (open FIGHT, pick a move)
+# before HP actually moves; a 0-grace trigger here would tax the mechanical
+# overhead of fighting, not genuine stalling. Run 9's discovered exploit sat
+# at this for tens of thousands of steps (docs/ppo-experiment-history.md) --
+# 8 is nowhere near that scale.
 _BATTLE_STALL_GRACE_STEPS = 8
+
+# How many steps of walking without a NEW coordinate the overworld gets
+# before it counts as idling. A 0-grace trigger (this project's original
+# design) is structurally broken, not just mistuned: explore_weight/sqrt(k)
+# decays toward 0 as k grows while a flat per-step penalty does not, so
+# ANY nonzero idle_penalty_weight eventually makes continued exploration
+# net-negative even when the agent is behaving perfectly -- confirmed
+# directly, not just in theory: run 9's own numbers put a healthy discovery
+# every ~15 steps at ~0.0055 reward against 15 steps of 0.002 penalty
+# (0.03), already net-negative at the very weight this project shipped
+# with. Persistent cross-episode exploration (this project's other recent
+# change) makes this worse over a run's lifetime, not better: later
+# episodes must walk back through already-fully-seen ground to reach the
+# frontier, which is legitimate progress that finds nothing new for a
+# while. 1000 matches aux_state.py's own _STUCK_SATURATION -- the same
+# point where the model's "how stuck am I" observation already reads
+# maximally stuck -- so the reward penalty and the model's own perception
+# of stalling now agree on what counts as stalled.
+_OVERWORLD_STALL_GRACE_STEPS = 1000
 
 
 @dataclass(frozen=True)
@@ -209,15 +227,20 @@ class RewardAccumulator:
         # never be profitably reversed, and the architecture plan's own
         # clip range for the advantage estimator is [-1, 1], not [0, 1].
         #
-        # Two trigger conditions, not one: a stalled position outside battle
-        # (unchanged from before) or a stalled battle (new -- run 9 found
-        # the entire population sitting at the FIGHT menu forever once
-        # position-based idling was penalized, since battle was the only
-        # place left exempt. See docs/ppo-experiment-history.md, run 10).
+        # Two trigger conditions, each with its own grace window: a stalled
+        # position outside battle, or a stalled battle (run 9 found the
+        # entire population sitting at the FIGHT menu forever once
+        # position-based idling was penalized with no grace, since battle
+        # was the only place left exempt -- docs/ppo-experiment-history.md,
+        # run 10). The overworld grace window (_OVERWORLD_STALL_GRACE_STEPS)
+        # was added after that: a 0-grace trigger there fights
+        # explore_weight/sqrt(k)'s own decay and is net-negative for
+        # healthy exploration regardless of idle_penalty_weight's
+        # magnitude, not just at the value this project first shipped.
         idle_penalty = (
             self._config.idle_penalty_weight
             if (
-                (not in_battle and self._state.steps_since_new_coord > 0)
+                (not in_battle and self._state.steps_since_new_coord > _OVERWORLD_STALL_GRACE_STEPS)
                 or (in_battle and self._state.steps_since_battle_progress > _BATTLE_STALL_GRACE_STEPS)
             )
             else 0.0

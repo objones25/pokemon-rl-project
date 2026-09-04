@@ -88,23 +88,42 @@ def test_coordinates_are_not_recorded_during_battle(fake_emulator, accumulator) 
     assert (result.reward, accumulator.coords_seen) == (pytest.approx(0.0), 0)
 
 
-def test_a_step_that_finds_no_new_coordinate_pays_the_idle_penalty(fake_emulator) -> None:
-    """The 2026-09-04 investigation (docs/ppo-experiment-history.md, run 9)
-    found the majority of envs stuck in menus for thousands of steps with
-    zero cost. idle_penalty_weight is the fix -- applied outside the
-    monotone-gain formula, since that formula floors every step at 0 and
-    cannot express a cost (see RewardAccumulator.step)."""
+def test_walking_over_known_ground_pays_no_idle_penalty_within_the_grace_window(
+    fake_emulator,
+) -> None:
+    """A 0-grace trigger is structurally broken, not just mistuned:
+    explore_weight/sqrt(k) decays toward 0 as k grows while a flat per-step
+    penalty does not, so it eventually makes healthy exploration
+    net-negative regardless of idle_penalty_weight's magnitude -- confirmed
+    against run 9's own numbers, not just in theory (docs/ppo-experiment-
+    history.md). The grace window means genuinely normal walking between
+    two already-known points -- even for hundreds of steps -- costs
+    nothing."""
     idle_accumulator = RewardAccumulator(EnvConfig(idle_penalty_weight=0.01))
     idle_accumulator.reset(fake_emulator)
     _set_coord(fake_emulator, 5, 5, 1)
     idle_accumulator.step(fake_emulator)  # discovers (5, 5, 1)
-    _set_coord(fake_emulator, 6, 6, 1)
-    idle_accumulator.step(fake_emulator)  # discovers (6, 6, 1)
+
+    results = [idle_accumulator.step(fake_emulator) for _ in range(500)]  # revisits, well within grace
+
+    assert all(result.reward == pytest.approx(0.0) for result in results)
+
+
+def test_a_stall_well_past_the_grace_window_pays_the_idle_penalty(fake_emulator) -> None:
+    """The 2026-09-04 investigation (docs/ppo-experiment-history.md, run 9)
+    found the majority of envs stuck in menus for thousands of steps with
+    zero cost. idle_penalty_weight is the fix -- applied outside the
+    monotone-gain formula, since that formula floors every step at 0 and
+    cannot express a cost (see RewardAccumulator.step) -- once a stall
+    genuinely outlasts the grace window."""
+    idle_accumulator = RewardAccumulator(EnvConfig(idle_penalty_weight=0.01))
+    idle_accumulator.reset(fake_emulator)
     _set_coord(fake_emulator, 5, 5, 1)
+    idle_accumulator.step(fake_emulator)  # discovers (5, 5, 1)
 
-    revisit = idle_accumulator.step(fake_emulator)  # no new coordinate
+    results = [idle_accumulator.step(fake_emulator) for _ in range(1002)]  # past the 1000-step grace
 
-    assert revisit.reward == pytest.approx(-0.01)
+    assert results[-1].reward == pytest.approx(-0.01)
 
 
 def test_the_idle_penalty_does_not_apply_the_step_a_new_coordinate_is_found(
@@ -139,28 +158,27 @@ def test_the_idle_penalty_is_reported_as_its_own_reward_component(fake_emulator)
     idle_accumulator = RewardAccumulator(EnvConfig(idle_penalty_weight=0.01))
     idle_accumulator.reset(fake_emulator)
     _set_coord(fake_emulator, 5, 5, 1)
-    idle_accumulator.step(fake_emulator)
-    _set_coord(fake_emulator, 6, 6, 1)
-    idle_accumulator.step(fake_emulator)
-    _set_coord(fake_emulator, 5, 5, 1)
+    idle_accumulator.step(fake_emulator)  # discovers (5, 5, 1)
 
-    revisit = idle_accumulator.step(fake_emulator)
+    results = [idle_accumulator.step(fake_emulator) for _ in range(1002)]  # past the grace window
 
-    assert revisit.components["idle"] == pytest.approx(-0.01)
+    assert results[-1].components["idle"] == pytest.approx(-0.01)
 
 
 def test_the_idle_penalty_does_not_suppress_a_genuine_gain_in_the_same_step(
     fake_emulator,
 ) -> None:
-    """A badge earned while not standing on new ground must still pay in
-    full -- the idle penalty is a separate, additive term, not something
-    that erodes max_total or the gain computation itself."""
+    """A badge earned while genuinely stalled (past the grace window) must
+    still pay in full -- the idle penalty is a separate, additive term, not
+    something that erodes max_total or the gain computation itself."""
     idle_accumulator = RewardAccumulator(EnvConfig(idle_penalty_weight=0.01))
     idle_accumulator.reset(fake_emulator)
     idle_accumulator.step(fake_emulator)  # registers (0, 0, 0) as seen
+    for _ in range(1001):
+        idle_accumulator.step(fake_emulator)  # same coordinate, past the grace window
     fake_emulator.memory[ram.BADGES_ADDR] = 0b0000_0001
 
-    result = idle_accumulator.step(fake_emulator)  # same coordinate again, plus a badge
+    result = idle_accumulator.step(fake_emulator)  # still stalled, plus a badge
 
     assert result.reward == pytest.approx(1.00 - 0.01)
 
