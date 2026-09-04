@@ -152,12 +152,6 @@ def test_read_money_decodes_binary_coded_decimal(fake_emulator) -> None:
     assert ram.read_money(fake_emulator) == 123456
 
 
-def test_aggregate_hp_fraction_is_zero_when_max_hp_is_zero(fake_emulator) -> None:
-    """All-zero memory is the pre-game state. Dividing by a zero max would
-    produce nan, which propagates silently through the whole aux vector."""
-    assert ram.aggregate_hp_fraction(fake_emulator) == pytest.approx(0.0)
-
-
 def test_enemy_mon_hp_addresses_match_the_verified_ram_map() -> None:
     """Not in PWhiddy/PokemonRedExperiments (this project's usual cited
     source) -- their reward never needed the live opponent's HP. Verified
@@ -182,15 +176,6 @@ def test_opponent_hp_fraction_divides_current_by_max(fake_emulator) -> None:
     fake_emulator.memory[ram.ENEMY_MON_MAX_HP_ADDR + 1] = 14
 
     assert ram.opponent_hp_fraction(fake_emulator) == pytest.approx(9 / 14)
-
-
-def test_aggregate_hp_fraction_sums_across_the_party(fake_emulator) -> None:
-    fake_emulator.memory[ram.PARTY_HP_BASE + 1] = 30
-    fake_emulator.memory[ram.PARTY_MAX_HP_BASE + 1] = 60
-    fake_emulator.memory[ram.PARTY_HP_BASE + ram.PARTY_STRIDE + 1] = 10
-    fake_emulator.memory[ram.PARTY_MAX_HP_BASE + ram.PARTY_STRIDE + 1] = 40
-
-    assert ram.aggregate_hp_fraction(fake_emulator) == pytest.approx(0.4)
 
 
 def test_live_party_hp_fraction_is_zero_when_party_is_empty(fake_emulator) -> None:

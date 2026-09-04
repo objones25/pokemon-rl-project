@@ -577,12 +577,19 @@ def test_healing_is_ignored_when_party_size_changed(fake_emulator, accumulator) 
     assert result.components["heal"] == pytest.approx(0.0)
 
 
-def test_a_single_modest_heal_earns_its_full_uncapped_value(
-    fake_emulator, accumulator
-) -> None:
+def test_a_single_modest_heal_earns_its_full_uncapped_value(fake_emulator) -> None:
     """A genuine, unremarkable recovery must still be rewarded exactly as
     before -- the cap exists for repeated farming past the ceiling, not for
-    an ordinary single heal nowhere near it."""
+    an ordinary single heal nowhere near it.
+
+    PARTY_SIZE_ADDR is set to 1 BEFORE reset() -- exactly like a real
+    init.state -- since live_party_hp_fraction (unlike the old
+    aggregate_hp_fraction) reads only live slots, and FakeEmulator's
+    default party_size of 0 would read every slot's HP as 0 regardless of
+    what this test writes to PARTY_HP_BASE."""
+    fake_emulator.memory[ram.PARTY_SIZE_ADDR] = 1
+    accumulator = RewardAccumulator(EnvConfig())
+    accumulator.reset(fake_emulator)
     fake_emulator.memory[ram.PARTY_MAX_HP_BASE + 1] = 100
     fake_emulator.memory[ram.PARTY_HP_BASE + 1] = 0
     # Matches last_hp_fraction=0.0 from reset() exactly (0 == 0, not >), so
@@ -598,7 +605,7 @@ def test_a_single_modest_heal_earns_its_full_uncapped_value(
 
 
 def test_repeated_deposit_withdraw_healing_cycles_are_capped_not_farmable(
-    fake_emulator, accumulator
+    fake_emulator,
 ) -> None:
     """The exact exploit this module's docstring says every component
     defends against ('the deposit/withdraw exploit section 4 names') --
@@ -606,7 +613,16 @@ def test_repeated_deposit_withdraw_healing_cycles_are_capped_not_farmable(
     other component, repeated cycles here keep paying forever. A real
     training run hit this: reward/heal grew past every other reward
     component combined over ~9M steps while badges stayed at zero. After
-    enough cycles, the heal component must stop growing."""
+    enough cycles, the heal component must stop growing.
+
+    PARTY_SIZE_ADDR is set to 1 BEFORE reset() -- see
+    test_a_single_modest_heal_earns_its_full_uncapped_value's docstring for
+    why live_party_hp_fraction needs this where aggregate_hp_fraction did
+    not. HP dips to 1, not 0, each cycle, so it never trips blackout
+    detection."""
+    fake_emulator.memory[ram.PARTY_SIZE_ADDR] = 1
+    accumulator = RewardAccumulator(EnvConfig())
+    accumulator.reset(fake_emulator)
     fake_emulator.memory[ram.PARTY_MAX_HP_BASE + 1] = 100
     result = None
     for _ in range(50):
@@ -624,7 +640,13 @@ def test_the_heal_contribution_ceiling_does_not_scale_with_heal_weight(
 ) -> None:
     """The ceiling bounds heal's contribution to `total` directly, not the
     raw total_healing accumulator -- so retuning heal_weight later cannot
-    silently raise how much healing can ever be worth relative to a badge."""
+    silently raise how much healing can ever be worth relative to a badge.
+
+    PARTY_SIZE_ADDR is set to 1 BEFORE reset() -- see
+    test_a_single_modest_heal_earns_its_full_uncapped_value's docstring for
+    why live_party_hp_fraction needs this where aggregate_hp_fraction did
+    not."""
+    fake_emulator.memory[ram.PARTY_SIZE_ADDR] = 1
     acc = RewardAccumulator(EnvConfig(heal_weight=5.0))
     acc.reset(fake_emulator)
     fake_emulator.memory[ram.PARTY_MAX_HP_BASE + 1] = 100
@@ -637,6 +659,83 @@ def test_the_heal_contribution_ceiling_does_not_scale_with_heal_weight(
 
     assert result is not None  # range(50) always runs at least once
     assert result.components["heal"] == pytest.approx(0.2)
+
+
+def test_hp_dropping_to_zero_is_counted_as_a_blackout(fake_emulator) -> None:
+    fake_emulator.memory[ram.PARTY_SIZE_ADDR] = 1
+    fake_emulator.memory[ram.PARTY_MAX_HP_BASE + 1] = 100
+    fake_emulator.memory[ram.PARTY_HP_BASE + 1] = 50
+    accumulator = RewardAccumulator(EnvConfig())
+    accumulator.reset(fake_emulator)
+    fake_emulator.memory[ram.PARTY_HP_BASE + 1] = 0
+
+    accumulator.step(fake_emulator)
+
+    assert accumulator.blackout_count == 1
+
+
+def test_hp_staying_at_zero_does_not_double_count_the_blackout(fake_emulator) -> None:
+    fake_emulator.memory[ram.PARTY_SIZE_ADDR] = 1
+    fake_emulator.memory[ram.PARTY_MAX_HP_BASE + 1] = 100
+    fake_emulator.memory[ram.PARTY_HP_BASE + 1] = 50
+    accumulator = RewardAccumulator(EnvConfig())
+    accumulator.reset(fake_emulator)
+    fake_emulator.memory[ram.PARTY_HP_BASE + 1] = 0
+    accumulator.step(fake_emulator)
+
+    accumulator.step(fake_emulator)  # still 0 -- simulates the black-screen animation
+
+    assert accumulator.blackout_count == 1
+
+
+def test_the_blackout_recovery_heal_earns_no_heal_credit(fake_emulator) -> None:
+    heal_accumulator = RewardAccumulator(EnvConfig(heal_weight=1.0))
+    fake_emulator.memory[ram.PARTY_SIZE_ADDR] = 1
+    fake_emulator.memory[ram.PARTY_MAX_HP_BASE + 1] = 100
+    fake_emulator.memory[ram.PARTY_HP_BASE + 1] = 50
+    heal_accumulator.reset(fake_emulator)
+    fake_emulator.memory[ram.PARTY_HP_BASE + 1] = 0
+    heal_accumulator.step(fake_emulator)  # blackout
+    fake_emulator.memory[ram.PARTY_HP_BASE + 1] = 100  # forced full heal at the Center
+
+    recovery = heal_accumulator.step(fake_emulator)
+
+    assert recovery.components["heal"] == pytest.approx(0.0)
+
+
+def test_a_later_genuine_heal_earns_credit_normally_after_the_exemption_is_spent(
+    fake_emulator,
+) -> None:
+    heal_accumulator = RewardAccumulator(EnvConfig(heal_weight=1.0))
+    fake_emulator.memory[ram.PARTY_SIZE_ADDR] = 1
+    fake_emulator.memory[ram.PARTY_MAX_HP_BASE + 1] = 100
+    fake_emulator.memory[ram.PARTY_HP_BASE + 1] = 50
+    heal_accumulator.reset(fake_emulator)
+    fake_emulator.memory[ram.PARTY_HP_BASE + 1] = 0
+    heal_accumulator.step(fake_emulator)  # blackout
+    fake_emulator.memory[ram.PARTY_HP_BASE + 1] = 100
+    heal_accumulator.step(fake_emulator)  # the exempted recovery
+    fake_emulator.memory[ram.PARTY_HP_BASE + 1] = 60  # took damage
+    heal_accumulator.step(fake_emulator)
+    fake_emulator.memory[ram.PARTY_HP_BASE + 1] = 90  # a real, later heal
+
+    genuine_heal = heal_accumulator.step(fake_emulator)
+
+    assert genuine_heal.components["heal"] == pytest.approx(0.3 * 0.3)
+
+
+def test_blackout_count_persists_across_an_episode_boundary(fake_emulator) -> None:
+    accumulator = RewardAccumulator(EnvConfig())
+    fake_emulator.memory[ram.PARTY_SIZE_ADDR] = 1
+    fake_emulator.memory[ram.PARTY_MAX_HP_BASE + 1] = 100
+    fake_emulator.memory[ram.PARTY_HP_BASE + 1] = 50
+    accumulator.reset(fake_emulator)
+    fake_emulator.memory[ram.PARTY_HP_BASE + 1] = 0
+    accumulator.step(fake_emulator)  # blackout, count -> 1
+
+    accumulator.reset(fake_emulator)  # a fresh episode -- badges/heal/etc. all reset
+
+    assert accumulator.blackout_count == 1
 
 
 def test_base_event_flags_captured_at_reset_earn_nothing(fake_emulator) -> None:

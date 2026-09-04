@@ -111,6 +111,8 @@ class _State:
     # is the value that makes the very first in-battle read never look like
     # a spurious drop.
     last_opponent_hp_fraction: float = 1.0
+    blackout_count: int = 0
+    pending_blackout_recovery: bool = False
     steps_since_new_coord: int = 0
     steps_since_battle_progress: int = 0
     seen_coords: set[int] = field(default_factory=set)
@@ -146,23 +148,24 @@ class RewardAccumulator:
     def steps_since_new_coord(self) -> int:
         return self._state.steps_since_new_coord
 
+    @property
+    def blackout_count(self) -> int:
+        return self._state.blackout_count
+
     def reset(self, mem: Emulator) -> None:
         """Captures the event flags init.state already has set, so the agent
         is not paid on step one for progress it did not make.
 
-        Exploration (seen_coords/seen_maps/explore_sum) persists across this
-        reset; everything else does not. EnvSession.reset() is one code path
-        for both the very first cold start and every later autoreset at
-        max_steps, and the emulator genuinely reloads init_state on both --
-        badges/HP/party/events really do come back to their init values, so
-        max_total (which those feed into) must reset with them, or a fresh
-        episode would need to out-earn every badge the last one banked just
-        to see reward again. Exploration is different: the coordinates
-        themselves are still the same physical tiles, seen for real, so
-        forgetting them on every one of the ~160-update resets this project's
-        fixed max_steps produces (run 9, docs/ppo-experiment-history.md) pays
-        the decaying 1/sqrt(k) bonus at full price for the same starting
-        area every time instead of ever converging on genuinely new ground.
+        Exploration (seen_coords/seen_maps/explore_sum) and blackout_count
+        persist across this reset; everything else does not. blackout_count
+        is pure telemetry describing the policy's risk behavior across the
+        whole training run -- the same category env/worker_respawns_total is
+        already in -- not reward-affecting state that needs to match a
+        genuine game-state reset, unlike badges/HP/party/events, which
+        really do come back to their init values because the emulator
+        genuinely reloads init_state on every reset (cold start and every
+        later autoreset alike). EnvSession.reset() is one code path for both
+        the very first cold start and every later autoreset at max_steps.
 
         max_total is rebased to exactly the persisted explore contribution
         (not left at 0) -- otherwise the fresh episode's `total` would sit
@@ -170,12 +173,14 @@ class RewardAccumulator:
         nothing there actually earned."""
         explore_weight = self._config.explore_weight
         persisted_explore_sum = self._state.explore_sum
+        persisted_blackout_count = self._state.blackout_count
         self._state = _State(
             base_event_flags=ram.event_flag_count(mem),
-            last_hp_fraction=ram.aggregate_hp_fraction(mem),
+            last_hp_fraction=ram.live_party_hp_fraction(mem),
             last_party_size=ram.party_size(mem),
             max_total=explore_weight * persisted_explore_sum,
             explore_sum=persisted_explore_sum,
+            blackout_count=persisted_blackout_count,
             seen_coords=self._state.seen_coords,
             seen_maps=self._state.seen_maps,
         )
@@ -274,11 +279,28 @@ class RewardAccumulator:
     def _update_healing(self, mem: Emulator, party_size: int) -> None:
         """Squared, so a full heal is worth far more than a trickle. Skipped
         when party size changed: HP fraction rises when a healthy Pokemon
-        joins, and crediting that would pay for catching things twice."""
-        current = ram.aggregate_hp_fraction(mem)
-        if current > self._state.last_hp_fraction and party_size == self._state.last_party_size:
-            delta = current - self._state.last_hp_fraction
-            self._state.total_healing += delta * delta
+        joins, and crediting that would pay for catching things twice.
+
+        Also detects a blackout (live-party HP hitting exactly 0 after
+        being above 0) and excludes the forced full-heal that follows one
+        from this credit -- see docs/superpowers/specs/
+        2026-09-05-battle-reward-redesign-design.md Part 3. The exemption
+        consumes on ANY current > last transition while pending, regardless
+        of party_size, so it can't get stuck open by an unrelated
+        party-size change landing on the exact recovery step -- an earlier
+        draft of this logic had exactly that bug, gating the flag's
+        clearing on the same party_size check the ordinary heal-crediting
+        path needs."""
+        current = ram.live_party_hp_fraction(mem)
+        if current == 0.0 and self._state.last_hp_fraction > 0.0:
+            self._state.blackout_count += 1
+            self._state.pending_blackout_recovery = True
+        elif current > self._state.last_hp_fraction:
+            if self._state.pending_blackout_recovery:
+                self._state.pending_blackout_recovery = False
+            elif party_size == self._state.last_party_size:
+                delta = current - self._state.last_hp_fraction
+                self._state.total_healing += delta * delta
         self._state.last_hp_fraction = current
 
     def _update_exploration(self, mem: Emulator, in_battle: bool) -> None:
@@ -374,6 +396,8 @@ class RewardAccumulator:
             "last_hp_fraction": self._state.last_hp_fraction,
             "last_party_size": self._state.last_party_size,
             "last_opponent_hp_fraction": self._state.last_opponent_hp_fraction,
+            "blackout_count": self._state.blackout_count,
+            "pending_blackout_recovery": self._state.pending_blackout_recovery,
             "steps_since_new_coord": self._state.steps_since_new_coord,
             "steps_since_battle_progress": self._state.steps_since_battle_progress,
             "seen_coords": sorted(self._state.seen_coords),
@@ -394,6 +418,8 @@ class RewardAccumulator:
             last_hp_fraction=state["last_hp_fraction"],
             last_party_size=state["last_party_size"],
             last_opponent_hp_fraction=state["last_opponent_hp_fraction"],
+            blackout_count=state["blackout_count"],
+            pending_blackout_recovery=state["pending_blackout_recovery"],
             steps_since_new_coord=state["steps_since_new_coord"],
             steps_since_battle_progress=state["steps_since_battle_progress"],
             seen_coords=set(state["seen_coords"]),
