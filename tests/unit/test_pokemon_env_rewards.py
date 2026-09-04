@@ -165,6 +165,245 @@ def test_the_idle_penalty_does_not_suppress_a_genuine_gain_in_the_same_step(
     assert result.reward == pytest.approx(1.00 - 0.01)
 
 
+def _set_opponent_hp(emulator, current: int, max_hp: int) -> None:
+    """Helper, not a test. Both fields are u16 big-endian; only the low byte
+    is set since these tests never need values above 255."""
+    emulator.memory[ram.ENEMY_MON_HP_ADDR + 1] = current
+    emulator.memory[ram.ENEMY_MON_MAX_HP_ADDR + 1] = max_hp
+
+
+def test_idle_penalty_does_not_apply_within_the_battle_stall_grace_window(
+    fake_emulator,
+) -> None:
+    """A real battle turn takes several env-steps of menu navigation (open
+    FIGHT, pick a move) before HP actually changes -- a 0-grace trigger
+    exactly like the overworld one would tax an agent for the mechanical
+    overhead of fighting, not just for genuinely stalling."""
+    idle_accumulator = RewardAccumulator(EnvConfig(idle_penalty_weight=0.01))
+    idle_accumulator.reset(fake_emulator)
+    fake_emulator.memory[ram.IN_BATTLE_ADDR] = 1
+    _set_opponent_hp(fake_emulator, current=10, max_hp=10)
+    idle_accumulator.step(fake_emulator)
+
+    result = idle_accumulator.step(fake_emulator)  # HP unchanged, still within grace
+
+    assert result.reward == pytest.approx(0.0)
+
+
+def test_idle_penalty_applies_once_a_battle_stalls_past_the_grace_window(
+    fake_emulator,
+) -> None:
+    idle_accumulator = RewardAccumulator(EnvConfig(idle_penalty_weight=0.01))
+    idle_accumulator.reset(fake_emulator)
+    fake_emulator.memory[ram.IN_BATTLE_ADDR] = 1
+    _set_opponent_hp(fake_emulator, current=10, max_hp=10)
+
+    results = [idle_accumulator.step(fake_emulator) for _ in range(10)]  # past the grace window
+
+    assert results[-1].reward == pytest.approx(-0.01)
+
+
+def test_a_change_in_opponent_hp_resets_the_battle_stall_counter(fake_emulator) -> None:
+    idle_accumulator = RewardAccumulator(EnvConfig(idle_penalty_weight=0.01))
+    idle_accumulator.reset(fake_emulator)
+    fake_emulator.memory[ram.IN_BATTLE_ADDR] = 1
+    _set_opponent_hp(fake_emulator, current=10, max_hp=10)
+    for _ in range(10):
+        idle_accumulator.step(fake_emulator)  # now well past the grace window
+    _set_opponent_hp(fake_emulator, current=5, max_hp=10)
+    idle_accumulator.step(fake_emulator)  # HP just changed -- counter resets
+
+    result = idle_accumulator.step(fake_emulator)  # one step since, within grace again
+
+    assert result.reward == pytest.approx(0.0)
+
+
+def test_damage_dealt_pays_the_squared_hp_fraction_drop(fake_emulator) -> None:
+    """Mirrors _update_healing's own squared-delta shape exactly, applied to
+    the opponent's HP instead of the player's."""
+    damage_accumulator = RewardAccumulator(EnvConfig(damage_weight=0.1))
+    damage_accumulator.reset(fake_emulator)
+    fake_emulator.memory[ram.IN_BATTLE_ADDR] = 1
+    _set_opponent_hp(fake_emulator, current=10, max_hp=10)
+    damage_accumulator.step(fake_emulator)
+    _set_opponent_hp(fake_emulator, current=5, max_hp=10)
+
+    result = damage_accumulator.step(fake_emulator)
+
+    assert result.components["damage"] == pytest.approx(0.1 * 0.5**2)
+
+
+def test_damage_dealt_is_capped_like_heal(fake_emulator) -> None:
+    damage_accumulator = RewardAccumulator(EnvConfig(damage_weight=100.0))
+    damage_accumulator.reset(fake_emulator)
+    fake_emulator.memory[ram.IN_BATTLE_ADDR] = 1
+    _set_opponent_hp(fake_emulator, current=10, max_hp=10)
+    damage_accumulator.step(fake_emulator)
+    _set_opponent_hp(fake_emulator, current=0, max_hp=10)
+
+    result = damage_accumulator.step(fake_emulator)
+
+    assert result.components["damage"] == pytest.approx(0.2)
+
+
+def test_a_new_opponents_fresh_hp_is_not_recorded_as_damage(fake_emulator) -> None:
+    """HP rising -- a fainted opponent replaced by a fresh one -- must never
+    register as damage -- only a genuine drop does. Banks a real faint first
+    (total_damage=1.0) so the assertion actually distinguishes "unaffected"
+    from "always zero"."""
+    damage_accumulator = RewardAccumulator(EnvConfig(damage_weight=0.1))
+    damage_accumulator.reset(fake_emulator)
+    fake_emulator.memory[ram.IN_BATTLE_ADDR] = 1
+    _set_opponent_hp(fake_emulator, current=10, max_hp=10)
+    damage_accumulator.step(fake_emulator)
+    _set_opponent_hp(fake_emulator, current=0, max_hp=10)
+    damage_accumulator.step(fake_emulator)  # a real faint: total_damage becomes 1.0
+    _set_opponent_hp(fake_emulator, current=8, max_hp=8)  # a fresh opponent, full HP
+
+    result = damage_accumulator.step(fake_emulator)
+
+    assert result.components["damage"] == pytest.approx(0.1)
+
+
+def test_damage_is_not_recorded_outside_battle(fake_emulator) -> None:
+    """Position-style staleness guard: opponent HP bytes mean nothing once
+    the battle has ended."""
+    damage_accumulator = RewardAccumulator(EnvConfig(damage_weight=1.0))
+    damage_accumulator.reset(fake_emulator)
+    fake_emulator.memory[ram.IN_BATTLE_ADDR] = 1
+    _set_opponent_hp(fake_emulator, current=10, max_hp=10)
+    damage_accumulator.step(fake_emulator)
+    fake_emulator.memory[ram.IN_BATTLE_ADDR] = 0
+    _set_opponent_hp(fake_emulator, current=0, max_hp=10)
+
+    result = damage_accumulator.step(fake_emulator)
+
+    assert result.components["damage"] == pytest.approx(0.0)
+
+
+def test_a_fainted_opponent_earns_the_battle_win_bonus(fake_emulator) -> None:
+    win_accumulator = RewardAccumulator(EnvConfig(battle_win_weight=0.5))
+    win_accumulator.reset(fake_emulator)
+    fake_emulator.memory[ram.IN_BATTLE_ADDR] = 1
+    _set_opponent_hp(fake_emulator, current=10, max_hp=10)
+    win_accumulator.step(fake_emulator)
+    _set_opponent_hp(fake_emulator, current=0, max_hp=10)
+
+    result = win_accumulator.step(fake_emulator)
+
+    assert result.components["battle_won"] == pytest.approx(0.5)
+
+
+def test_the_battle_win_bonus_does_not_repeat_while_the_same_faint_persists(
+    fake_emulator,
+) -> None:
+    """The faint/switch animation holds the opponent at 0 HP for many
+    env-steps -- a rising-edge detector, not a level check, or every one of
+    those steps would pay the bonus again."""
+    win_accumulator = RewardAccumulator(EnvConfig(battle_win_weight=0.5))
+    win_accumulator.reset(fake_emulator)
+    fake_emulator.memory[ram.IN_BATTLE_ADDR] = 1
+    _set_opponent_hp(fake_emulator, current=10, max_hp=10)
+    win_accumulator.step(fake_emulator)
+    _set_opponent_hp(fake_emulator, current=0, max_hp=10)
+    win_accumulator.step(fake_emulator)  # the win, banked into max_total
+
+    still_fainted = win_accumulator.step(fake_emulator)  # opponent HP unchanged at 0
+
+    assert (still_fainted.reward, still_fainted.components["battle_won"]) == (
+        pytest.approx(0.0),
+        pytest.approx(0.5),  # unchanged from the win step -- not double-counted
+    )
+
+
+def test_a_second_battle_won_against_a_new_opponent_pays_again(fake_emulator) -> None:
+    """Same shape as a second badge: the monotone-gain formula only pays the
+    marginal increase, so the second win's own step earns battle_win_weight
+    again, not the cumulative total -- proving total_battles_won is a real
+    running count, not a one-shot flag consumed by the first win."""
+    win_accumulator = RewardAccumulator(EnvConfig(battle_win_weight=0.5))
+    win_accumulator.reset(fake_emulator)
+    fake_emulator.memory[ram.IN_BATTLE_ADDR] = 1
+    _set_opponent_hp(fake_emulator, current=10, max_hp=10)
+    win_accumulator.step(fake_emulator)
+    _set_opponent_hp(fake_emulator, current=0, max_hp=10)
+    win_accumulator.step(fake_emulator)  # first win, banked into max_total
+    _set_opponent_hp(fake_emulator, current=8, max_hp=8)  # a fresh opponent
+    win_accumulator.step(fake_emulator)
+    _set_opponent_hp(fake_emulator, current=0, max_hp=8)
+
+    second_win = win_accumulator.step(fake_emulator)
+
+    assert second_win.reward == pytest.approx(0.5)
+
+
+def test_catching_a_pokemon_pays_the_catch_bonus(fake_emulator) -> None:
+    """PARTY_SIZE_ADDR is set to the starting party (1, the starter) BEFORE
+    reset() -- exactly like a real init.state -- so reset() baselines
+    last_party_size at 1, not FakeEmulator's default 0. Baselining against
+    the synthetic 0 would count the starter itself as a catch."""
+    fake_emulator.memory[ram.PARTY_SIZE_ADDR] = 1
+    catch_accumulator = RewardAccumulator(EnvConfig(catch_weight=0.1))
+    catch_accumulator.reset(fake_emulator)
+    catch_accumulator.step(fake_emulator)
+    fake_emulator.memory[ram.PARTY_SIZE_ADDR] = 2
+
+    result = catch_accumulator.step(fake_emulator)
+
+    assert result.components["catch"] == pytest.approx(0.1)
+
+
+def test_the_catch_bonus_is_capped(fake_emulator) -> None:
+    fake_emulator.memory[ram.PARTY_SIZE_ADDR] = 1
+    catch_accumulator = RewardAccumulator(EnvConfig(catch_weight=100.0))
+    catch_accumulator.reset(fake_emulator)
+    catch_accumulator.step(fake_emulator)
+    fake_emulator.memory[ram.PARTY_SIZE_ADDR] = 2
+
+    result = catch_accumulator.step(fake_emulator)
+
+    assert result.components["catch"] == pytest.approx(0.3)
+
+
+def test_earning_money_pays_the_money_component(fake_emulator) -> None:
+    money_accumulator = RewardAccumulator(EnvConfig(money_weight=1.0))
+    money_accumulator.reset(fake_emulator)
+
+    result = money_accumulator.step(fake_emulator)
+
+    assert result.components["money"] == pytest.approx(0.0)
+
+
+def test_a_money_gain_pays_a_component_normalized_by_max_money(fake_emulator) -> None:
+    """Checked against components["money"] directly, not result.reward: any
+    weight big enough to make a $50 gain readable on its own would also
+    blow straight through the per-step clip(..., 0, 1) every component
+    shares -- this is the same normalization aux_state.py already uses."""
+    money_accumulator = RewardAccumulator(EnvConfig(money_weight=1.0))
+    money_accumulator.reset(fake_emulator)
+    money_accumulator.step(fake_emulator)  # banks the starting (zero) money
+    fake_emulator.memory[ram.MONEY_ADDRS[2]] = 0x50  # BCD 50
+
+    result = money_accumulator.step(fake_emulator)
+
+    assert result.components["money"] == pytest.approx(50.0 / ram.MAX_MONEY)
+
+
+def test_spending_money_never_produces_negative_reward(fake_emulator) -> None:
+    """total/gain/max_total's own max(0, ...) already protects this -- money
+    going down just means gain stays 0, the same as any other component
+    that regresses, never a negative contribution."""
+    money_accumulator = RewardAccumulator(EnvConfig(money_weight=1.0))
+    money_accumulator.reset(fake_emulator)
+    fake_emulator.memory[ram.MONEY_ADDRS[2]] = 0x50
+    money_accumulator.step(fake_emulator)
+    fake_emulator.memory[ram.MONEY_ADDRS[2]] = 0x10  # spent some
+
+    result = money_accumulator.step(fake_emulator)
+
+    assert result.reward == pytest.approx(0.0)
+
+
 def test_a_badge_earns_exactly_the_clip_cap(fake_emulator, accumulator) -> None:
     """In-battle isolates the badge component from the first-coordinate
     exploration credit that the all-zero fake memory would otherwise fire

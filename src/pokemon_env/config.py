@@ -33,6 +33,14 @@ class EnvConfig:
     # value; see rewards.py's RewardAccumulator.step for what it penalizes
     # and why it has to sit outside the monotone-gain formula.
     idle_penalty_weight: float = 0.0
+    # Opt-in like idle_penalty_weight above; configs/pokemon_env.yaml sets
+    # the real values. See rewards.py's RewardAccumulator for what each
+    # rewards and how each is guarded against the same reversible-cycle
+    # exploit heal_weight was capped for after run 1.
+    damage_weight: float = 0.0
+    battle_win_weight: float = 0.0
+    catch_weight: float = 0.0
+    money_weight: float = 0.0
 
     def __post_init__(self) -> None:
         release_frames = self.action_freq - self.press_frames - 1

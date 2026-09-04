@@ -154,7 +154,18 @@ def test_last_components_reports_the_mean_reward_breakdown_across_envs(
     two_badge_vec_env.step(np.zeros(3, dtype=np.int64))
 
     assert two_badge_vec_env.last_components == pytest.approx(
-        {"badges": 2.0, "events": 0.0, "explore": 0.3, "heal": 0.0, "levels": 0.0, "idle": 0.0}
+        {
+            "badges": 2.0,
+            "events": 0.0,
+            "explore": 0.3,
+            "heal": 0.0,
+            "levels": 0.0,
+            "damage": 0.0,
+            "battle_won": 0.0,
+            "catch": 0.0,
+            "money": 0.0,
+            "idle": 0.0,
+        }
     )
 
 

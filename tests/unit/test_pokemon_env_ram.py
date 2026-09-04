@@ -158,6 +158,32 @@ def test_aggregate_hp_fraction_is_zero_when_max_hp_is_zero(fake_emulator) -> Non
     assert ram.aggregate_hp_fraction(fake_emulator) == pytest.approx(0.0)
 
 
+def test_enemy_mon_hp_addresses_match_the_verified_ram_map() -> None:
+    """Not in PWhiddy/PokemonRedExperiments (this project's usual cited
+    source) -- their reward never needed the live opponent's HP. Verified
+    instead against pret/pokered's `battle_struct` macro (Species at offset
+    0, HP a `dw` at offset 1, Level at offset 14, MaxHP a `dw` at offset 15 --
+    `wEnemyMonSpecies` + those offsets lines up exactly with two independent
+    derivative RAM maps that both cite pret + DataCrystal), then confirmed
+    live: drove PyBoyEmulator from artifacts/init.state into a real wild
+    battle and watched 0xCFE6 fall 14 -> 9 -> 4 -> 0 in step with the fight,
+    with the battle ending the instant it hit 0."""
+    assert (ram.ENEMY_MON_HP_ADDR, ram.ENEMY_MON_MAX_HP_ADDR) == (0xCFE6, 0xCFF4)
+
+
+def test_opponent_hp_fraction_is_zero_when_max_hp_is_zero(fake_emulator) -> None:
+    """Outside battle these bytes are stale and often zero -- callers must
+    gate on ram.in_battle, but this function itself must not nan."""
+    assert ram.opponent_hp_fraction(fake_emulator) == pytest.approx(0.0)
+
+
+def test_opponent_hp_fraction_divides_current_by_max(fake_emulator) -> None:
+    fake_emulator.memory[ram.ENEMY_MON_HP_ADDR + 1] = 9
+    fake_emulator.memory[ram.ENEMY_MON_MAX_HP_ADDR + 1] = 14
+
+    assert ram.opponent_hp_fraction(fake_emulator) == pytest.approx(9 / 14)
+
+
 def test_aggregate_hp_fraction_sums_across_the_party(fake_emulator) -> None:
     fake_emulator.memory[ram.PARTY_HP_BASE + 1] = 30
     fake_emulator.memory[ram.PARTY_MAX_HP_BASE + 1] = 60

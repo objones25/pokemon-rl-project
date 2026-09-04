@@ -23,3 +23,36 @@ level_weight: 0.05
 # own env/stalled_frac and reward/idle trajectory show, same as every other
 # weight in this file.
 idle_penalty_weight: 0.002
+# Run 10 (2026-09-04, wandb w0sovi4c) found the idle-penalty fix above
+# backfired: since battle was exempt from it, 63 of 64 envs converged on
+# sitting at the FIGHT menu forever -- the one remaining zero-cost, zero-
+# progress state. Extended the same idle penalty into a stalled battle
+# (RewardAccumulator._update_battle_progress) and added the incentive that
+# was actually missing: nothing previously rewarded fighting, winning, or
+# catching at all, only badges/events/levels/healing.
+#
+# damage_weight mirrors heal_weight exactly (same squared-HP-fraction-delta
+# shape, same reversible-cycle risk -- a trainer can heal their own Pokemon
+# mid-battle -- so it shares heal's _DAMAGE_CONTRIBUTION_CEILING=0.2 cap).
+damage_weight: 0.5
+# A wild-battle win is worth half a badge, same raw scale as heal_weight.
+# Uncapped: unlike heal/catch, each win is against a genuinely new, never-
+# reversible opponent (you cannot re-fight the same fainted Pokemon), so it
+# does not reopen the cycle-farming problem those two are capped against.
+battle_win_weight: 0.5
+# Two catches already hit _CATCH_CONTRIBUTION_CEILING=0.3 (0.15 * 2) -- a
+# meaningful early boost that stops competing with real progress. Capped
+# for the same reason heal is: releasing a Pokemon via Bill's PC and
+# re-catching it would otherwise farm this the same way deposit/withdraw
+# farmed heal_weight before run 1's fix.
+catch_weight: 0.15
+# Normalized like aux_state.py's own money slot (money / MAX_MONEY), so a
+# realistic trainer-battle payout (tens to a few hundred dollars) reads as
+# a modest, comparable-to-other-components contribution: a $500 win pays
+# ~0.025 here. Wild encounters never pay money, hence damage/battle_won
+# above as the primary battle incentive and this as a secondary one for
+# trainer fights specifically.
+money_weight: 50.0
+# All four: first guesses, not yet validated by a live run -- re-tune
+# against the next run's reward/damage, reward/battle_won, reward/catch,
+# reward/money, and (most importantly) env/stalled_frac trajectories.

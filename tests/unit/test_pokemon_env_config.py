@@ -45,3 +45,15 @@ def test_idle_penalty_weight_defaults_to_zero() -> None:
     config = EnvConfig()
 
     assert config.idle_penalty_weight == pytest.approx(0.0)
+
+
+def test_battle_incentive_weights_default_to_zero() -> None:
+    """Same opt-in pattern: damage/battle_win/catch/money all default off."""
+    config = EnvConfig()
+
+    assert (
+        config.damage_weight,
+        config.battle_win_weight,
+        config.catch_weight,
+        config.money_weight,
+    ) == (0.0, 0.0, 0.0, 0.0)

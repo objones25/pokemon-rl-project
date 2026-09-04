@@ -41,6 +41,26 @@ from pokemon_env.emulator import Emulator
 # component's cycles already do, restoring the invariant above.
 _HEAL_CONTRIBUTION_CEILING = 0.2
 
+# Same reversible-cycle risk as heal, mirrored to the opponent's side: a
+# trainer can heal their own Pokemon mid-battle (some carry Potions), which
+# would otherwise let repeated chip-damage-then-enemy-heal cycles farm this
+# forever. Capped on the weighted contribution for the same reason heal is.
+_DAMAGE_CONTRIBUTION_CEILING = 0.2
+
+# A released-then-recaught Pokemon (via Bill's PC) would otherwise reopen
+# the identical cycle heal_weight was capped for after run 1 -- party_size
+# can decrease as well as increase. Capped on the weighted contribution.
+_CATCH_CONTRIBUTION_CEILING = 0.3
+
+# How many steps a stalled battle gets before it counts as idling, same
+# weight as the overworld's steps_since_new_coord trigger. A real turn is
+# several env-steps of menu navigation (open FIGHT, pick a move) before HP
+# actually moves; a 0-grace trigger here would tax the mechanical overhead
+# of fighting, not genuine stalling. Run 9's discovered exploit sat at this
+# for tens of thousands of steps (docs/ppo-experiment-history.md) -- 8 is
+# nowhere near that scale.
+_BATTLE_STALL_GRACE_STEPS = 8
+
 
 @dataclass(frozen=True)
 class RewardBreakdown:
@@ -60,10 +80,19 @@ class _State:
     max_total: float = 0.0
     explore_sum: float = 0.0
     total_healing: float = 0.0
+    total_damage: float = 0.0
+    total_battles_won: int = 0
+    total_catches: int = 0
     base_event_flags: int = 0
     last_hp_fraction: float = 0.0
     last_party_size: int = 0
+    # 1.0, not 0.0: a genuinely fresh opponent (wild encounter, or a
+    # trainer's next Pokemon switched in) always starts at full HP, so this
+    # is the value that makes the very first in-battle read never look like
+    # a spurious drop.
+    last_opponent_hp_fraction: float = 1.0
     steps_since_new_coord: int = 0
+    steps_since_battle_progress: int = 0
     seen_coords: set[int] = field(default_factory=set)
     seen_maps: set[int] = field(default_factory=set)
 
@@ -132,8 +161,17 @@ class RewardAccumulator:
         )
 
     def step(self, mem: Emulator) -> RewardBreakdown:
-        self._update_healing(mem)
-        self._update_exploration(mem)
+        # Read once, used by both _update_catches (against the OLD value)
+        # and _update_healing (whose own exemption needs the same OLD
+        # value) -- last_party_size is advanced exactly once, at the end of
+        # this method, after both have read it.
+        party_size = ram.party_size(mem)
+        in_battle = ram.in_battle(mem)
+
+        self._update_catches(party_size)
+        self._update_healing(mem, party_size)
+        self._update_exploration(mem, in_battle)
+        self._update_battle_progress(mem, in_battle)
 
         badge_count = ram.badge_count(mem)
         event_flag_count = ram.event_flag_count(mem)
@@ -146,11 +184,22 @@ class RewardAccumulator:
             "explore": self._config.explore_weight * self._state.explore_sum,
             "events": self._config.event_weight * self._event_score(mem, event_flag_count),
             "levels": self._config.level_weight * ram.level_score(mem),
+            "damage": min(
+                self._config.damage_weight * self._state.total_damage,
+                _DAMAGE_CONTRIBUTION_CEILING,
+            ),
+            "battle_won": self._config.battle_win_weight * self._state.total_battles_won,
+            "catch": min(
+                self._config.catch_weight * self._state.total_catches,
+                _CATCH_CONTRIBUTION_CEILING,
+            ),
+            "money": self._config.money_weight * (ram.read_money(mem) / ram.MAX_MONEY),
         }
         total = sum(components.values())
 
         gain = max(0.0, total - self._state.max_total)
         self._state.max_total = max(self._state.max_total, total)
+        self._state.last_party_size = party_size
 
         # A genuinely separate, additive term -- not folded into `components`
         # above, because `total`/`gain`/`max_total` must stay computed from
@@ -159,12 +208,18 @@ class RewardAccumulator:
         # badge loss); it says nothing against a per-step cost that can
         # never be profitably reversed, and the architecture plan's own
         # clip range for the advantage estimator is [-1, 1], not [0, 1].
-        # Skipped in battle: position bytes are stale there (see
-        # _update_exploration), so every battle turn would otherwise look
-        # like a step with no new coordinate and tax the agent for fighting.
+        #
+        # Two trigger conditions, not one: a stalled position outside battle
+        # (unchanged from before) or a stalled battle (new -- run 9 found
+        # the entire population sitting at the FIGHT menu forever once
+        # position-based idling was penalized, since battle was the only
+        # place left exempt. See docs/ppo-experiment-history.md, run 10).
         idle_penalty = (
             self._config.idle_penalty_weight
-            if self._state.steps_since_new_coord > 0 and not ram.in_battle(mem)
+            if (
+                (not in_battle and self._state.steps_since_new_coord > 0)
+                or (in_battle and self._state.steps_since_battle_progress > _BATTLE_STALL_GRACE_STEPS)
+            )
             else 0.0
         )
         return RewardBreakdown(
@@ -181,26 +236,33 @@ class RewardAccumulator:
             0,
         )
 
-    def _update_healing(self, mem: Emulator) -> None:
+    def _update_catches(self, party_size: int) -> None:
+        """A new Pokemon in the party, same monotone-count shape as
+        badges/events. Summed rather than incremented by 1, though only one
+        catch can happen per env-step in practice -- last_party_size is
+        advanced by the caller (step), once, after this and _update_healing
+        have both read the OLD value."""
+        if party_size > self._state.last_party_size:
+            self._state.total_catches += party_size - self._state.last_party_size
+
+    def _update_healing(self, mem: Emulator, party_size: int) -> None:
         """Squared, so a full heal is worth far more than a trickle. Skipped
         when party size changed: HP fraction rises when a healthy Pokemon
         joins, and crediting that would pay for catching things twice."""
         current = ram.aggregate_hp_fraction(mem)
-        size = ram.party_size(mem)
-        if current > self._state.last_hp_fraction and size == self._state.last_party_size:
+        if current > self._state.last_hp_fraction and party_size == self._state.last_party_size:
             delta = current - self._state.last_hp_fraction
             self._state.total_healing += delta * delta
         self._state.last_hp_fraction = current
-        self._state.last_party_size = size
 
-    def _update_exploration(self, mem: Emulator) -> None:
+    def _update_exploration(self, mem: Emulator, in_battle: bool) -> None:
         """Only outside battle -- in battle the position bytes are stale, so
         recording them credits tiles never actually walked.
 
         The k-th newly discovered coordinate earns 1/sqrt(k), section 4's
         'decaying scalar reward'. The reference implementation's flat 0.1
         does not decay."""
-        if ram.in_battle(mem):
+        if in_battle:
             self._state.steps_since_new_coord += 1
             return
 
@@ -215,6 +277,44 @@ class RewardAccumulator:
         self._state.explore_sum += 1.0 / math.sqrt(len(self._state.seen_coords))
         self._state.steps_since_new_coord = 0
 
+    def _update_battle_progress(self, mem: Emulator, in_battle: bool) -> None:
+        """Damage dealt (opponent HP fraction dropping, same squared-delta
+        shape as _update_healing) and a battle-won bonus (a rising->falling
+        edge at exactly 0, not a level check -- the faint/switch animation
+        holds the opponent at 0 HP for many env-steps, and a level check
+        would pay every one of them). steps_since_battle_progress is
+        steps_since_new_coord's battle-side twin, closing the loophole run
+        9 found: idle_penalty exempting battle turns meant sitting at the
+        FIGHT menu forever was the only place left that cost nothing.
+
+        Only meaningful in battle -- these bytes are stale otherwise, same
+        guard as _update_exploration's position check. max_hp == 0 means
+        the battle struct has not been populated yet (just-opened battle);
+        treated as no-progress-yet, not as a fainted opponent, or the
+        placeholder zero would misread as an instant win."""
+        if not in_battle:
+            self._state.steps_since_battle_progress = 0
+            return
+
+        max_hp = ram.read_u16_be(mem, ram.ENEMY_MON_MAX_HP_ADDR)
+        if max_hp == 0:
+            self._state.steps_since_battle_progress += 1
+            return
+
+        current = ram.read_u16_be(mem, ram.ENEMY_MON_HP_ADDR) / max_hp
+        last = self._state.last_opponent_hp_fraction
+        if current < last:
+            delta = last - current
+            self._state.total_damage += delta * delta
+            if current == 0.0:
+                self._state.total_battles_won += 1
+            self._state.steps_since_battle_progress = 0
+        elif current > last:
+            self._state.steps_since_battle_progress = 0
+        else:
+            self._state.steps_since_battle_progress += 1
+        self._state.last_opponent_hp_fraction = current
+
     def state_dict(self) -> dict:
         """Coordinates leave as a sorted list of ints, not a set: the
         checkpoint is loaded with torch.load(weights_only=True), which will
@@ -223,10 +323,15 @@ class RewardAccumulator:
             "max_total": self._state.max_total,
             "explore_sum": self._state.explore_sum,
             "total_healing": self._state.total_healing,
+            "total_damage": self._state.total_damage,
+            "total_battles_won": self._state.total_battles_won,
+            "total_catches": self._state.total_catches,
             "base_event_flags": self._state.base_event_flags,
             "last_hp_fraction": self._state.last_hp_fraction,
             "last_party_size": self._state.last_party_size,
+            "last_opponent_hp_fraction": self._state.last_opponent_hp_fraction,
             "steps_since_new_coord": self._state.steps_since_new_coord,
+            "steps_since_battle_progress": self._state.steps_since_battle_progress,
             "seen_coords": sorted(self._state.seen_coords),
             "seen_maps": sorted(self._state.seen_maps),
         }
@@ -236,10 +341,15 @@ class RewardAccumulator:
             max_total=state["max_total"],
             explore_sum=state["explore_sum"],
             total_healing=state["total_healing"],
+            total_damage=state["total_damage"],
+            total_battles_won=state["total_battles_won"],
+            total_catches=state["total_catches"],
             base_event_flags=state["base_event_flags"],
             last_hp_fraction=state["last_hp_fraction"],
             last_party_size=state["last_party_size"],
+            last_opponent_hp_fraction=state["last_opponent_hp_fraction"],
             steps_since_new_coord=state["steps_since_new_coord"],
+            steps_since_battle_progress=state["steps_since_battle_progress"],
             seen_coords=set(state["seen_coords"]),
             seen_maps=set(state["seen_maps"]),
         )

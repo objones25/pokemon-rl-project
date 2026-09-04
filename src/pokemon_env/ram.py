@@ -29,6 +29,17 @@ PARTY_LEVEL_BASE = 0xD18C
 PARTY_HP_BASE = 0xD16C
 PARTY_MAX_HP_BASE = 0xD18D
 OPPONENT_LEVEL_BASE = 0xD8C5
+# Not from PWhiddy/PokemonRedExperiments -- their reward never needed the
+# live opponent's HP. Verified against pret/pokered's `battle_struct` macro
+# (wEnemyMonSpecies + offset 1 = wEnemyMonHP, a `dw`; + offset 15 =
+# wEnemyMonMaxHP), cross-checked against two independent derivative RAM maps
+# citing pret + DataCrystal, then confirmed live against this project's own
+# ROM: drove PyBoyEmulator from artifacts/init.state into a real wild battle
+# and watched 0xCFE6 fall 14 -> 9 -> 4 -> 0 in step with the fight, ending
+# the battle the instant it hit 0. Stale outside battle, like position --
+# callers must gate on in_battle().
+ENEMY_MON_HP_ADDR = 0xCFE6
+ENEMY_MON_MAX_HP_ADDR = 0xCFF4
 
 BADGES_ADDR = 0xD356
 EVENT_FLAGS_START = 0xD747
@@ -97,6 +108,16 @@ def aggregate_hp_fraction(mem: Emulator) -> float:
     if total_max == 0:
         return 0.0
     return sum(current for current, _ in slots) / total_max
+
+
+def opponent_hp_fraction(mem: Emulator) -> float:
+    """The currently-battling opponent's health in [0, 1]. Returns 0.0 rather
+    than nan when max HP is zero -- stale/pre-battle memory, same guard as
+    aggregate_hp_fraction."""
+    max_hp = read_u16_be(mem, ENEMY_MON_MAX_HP_ADDR)
+    if max_hp == 0:
+        return 0.0
+    return read_u16_be(mem, ENEMY_MON_HP_ADDR) / max_hp
 
 
 def badge_count(mem: Emulator) -> int:
