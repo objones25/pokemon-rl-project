@@ -422,7 +422,26 @@ Add a new method directly after `_update_battle_progress`:
         self._state.last_badge_count = badge_count
 ```
 
-Update `_update_battle_progress`'s docstring (currently describes "a battle-won bonus" as a flat count) — replace its second paragraph:
+`_update_battle_progress`'s docstring currently reads exactly:
+
+```python
+        """Damage dealt (opponent HP fraction dropping, same squared-delta
+        shape as _update_healing) and a battle-won bonus (a rising->falling
+        edge at exactly 0, not a level check -- the faint/switch animation
+        holds the opponent at 0 HP for many env-steps, and a level check
+        would pay every one of them). steps_since_battle_progress is
+        steps_since_new_coord's battle-side twin, closing the loophole run
+        9 found: idle_penalty exempting battle turns meant sitting at the
+        FIGHT menu forever was the only place left that cost nothing.
+
+        Only meaningful in battle -- these bytes are stale otherwise, same
+        guard as _update_exploration's position check. max_hp == 0 means
+        the battle struct has not been populated yet (just-opened battle);
+        treated as no-progress-yet, not as a fainted opponent, or the
+        placeholder zero would misread as an instant win."""
+```
+
+Replace the whole docstring with:
 
 ```python
         """Damage dealt (opponent HP fraction dropping, same squared-delta
@@ -745,7 +764,33 @@ with:
         )
 ```
 
-Also update the docstring's persistence list (currently "Exploration (seen_coords/seen_maps/explore_sum) persists across this reset; everything else does not") to:
+`reset()`'s full docstring currently reads exactly:
+
+```python
+        """Captures the event flags init.state already has set, so the agent
+        is not paid on step one for progress it did not make.
+
+        Exploration (seen_coords/seen_maps/explore_sum) persists across this
+        reset; everything else does not. EnvSession.reset() is one code path
+        for both the very first cold start and every later autoreset at
+        max_steps, and the emulator genuinely reloads init_state on both --
+        badges/HP/party/events really do come back to their init values, so
+        max_total (which those feed into) must reset with them, or a fresh
+        episode would need to out-earn every badge the last one banked just
+        to see reward again. Exploration is different: the coordinates
+        themselves are still the same physical tiles, seen for real, so
+        forgetting them on every one of the ~160-update resets this project's
+        fixed max_steps produces (run 9, docs/ppo-experiment-history.md) pays
+        the decaying 1/sqrt(k) bonus at full price for the same starting
+        area every time instead of ever converging on genuinely new ground.
+
+        max_total is rebased to exactly the persisted explore contribution
+        (not left at 0) -- otherwise the fresh episode's `total` would sit
+        above a stale 0 baseline and manufacture a reward on step one that
+        nothing there actually earned."""
+```
+
+Replace the whole docstring with:
 
 ```python
         """Captures the event flags init.state already has set, so the agent
@@ -759,10 +804,14 @@ Also update the docstring's persistence list (currently "Exploration (seen_coord
         genuine game-state reset, unlike badges/HP/party/events, which
         really do come back to their init values because the emulator
         genuinely reloads init_state on every reset (cold start and every
-        later autoreset alike).
-```
+        later autoreset alike). EnvSession.reset() is one code path for both
+        the very first cold start and every later autoreset at max_steps.
 
-(keep the rest of the existing docstring paragraph about `max_total` rebasing unchanged below this).
+        max_total is rebased to exactly the persisted explore contribution
+        (not left at 0) -- otherwise the fresh episode's `total` would sit
+        above a stale 0 baseline and manufacture a reward on step one that
+        nothing there actually earned."""
+```
 
 - [ ] **Step 7: Update `state_dict`/`load_state_dict`**
 
