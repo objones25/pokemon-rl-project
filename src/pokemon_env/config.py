@@ -41,6 +41,12 @@ class EnvConfig:
     battle_win_weight: float = 0.0
     catch_weight: float = 0.0
     money_weight: float = 0.0
+    # Continuous, proactive pressure while the party is hurt -- see
+    # rewards.py's RewardAccumulator._low_hp_penalty. Opt-in like every
+    # other weight above; 0.25 (not the 50% first considered) is the
+    # threshold below which it starts ramping up.
+    low_hp_penalty_weight: float = 0.0
+    low_hp_threshold: float = 0.25
 
     def __post_init__(self) -> None:
         release_frames = self.action_freq - self.press_frames - 1
@@ -54,6 +60,8 @@ class EnvConfig:
             raise ValueError(f"press_frames={self.press_frames} must be at least 1")
         if self.n_envs < 1:
             raise ValueError(f"n_envs={self.n_envs} must be at least 1")
+        if not 0.0 < self.low_hp_threshold <= 1.0:
+            raise ValueError(f"low_hp_threshold={self.low_hp_threshold} must be in (0, 1]")
 
     @property
     def release_frames(self) -> int:

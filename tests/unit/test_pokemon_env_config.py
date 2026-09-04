@@ -57,3 +57,31 @@ def test_battle_incentive_weights_default_to_zero() -> None:
         config.catch_weight,
         config.money_weight,
     ) == (0.0, 0.0, 0.0, 0.0)
+
+
+def test_low_hp_penalty_weight_defaults_to_zero() -> None:
+    """Opt-in like every other reward weight added since idle_penalty_weight:
+    defaults off so every existing default-EnvConfig test keeps its current
+    behavior."""
+    config = EnvConfig()
+
+    assert config.low_hp_penalty_weight == pytest.approx(0.0)
+
+
+def test_low_hp_threshold_defaults_to_a_quarter_health() -> None:
+    config = EnvConfig()
+
+    assert config.low_hp_threshold == pytest.approx(0.25)
+
+
+def test_low_hp_threshold_rejects_zero() -> None:
+    """A zero threshold divides by zero computing the penalty's severity
+    ramp (rewards.py's (threshold - fraction) / threshold) -- reject it at
+    construction, not with a ZeroDivisionError deep in a training step."""
+    with pytest.raises(ValueError, match=r"low_hp_threshold=0.0 must be in \(0, 1\]"):
+        EnvConfig(low_hp_threshold=0.0)
+
+
+def test_low_hp_threshold_rejects_a_value_above_one() -> None:
+    with pytest.raises(ValueError, match=r"low_hp_threshold=1.5 must be in \(0, 1\]"):
+        EnvConfig(low_hp_threshold=1.5)
