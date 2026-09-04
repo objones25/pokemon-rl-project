@@ -136,6 +136,7 @@ def _trainer_harness(
     target_kl: float | None = None,
     max_consecutive_stalled_updates: int = 10,
     steps_since_new_coord: int = 0,
+    blackout_count: int = 0,
 ) -> _TrainerHarness:
     """A tiny real policy (matching the other ppo/ harnesses' shapes) plus a
     `FakeVecEnv`/`FakeLatentEncoder` and a `FakeExperimentRun`. `run_update`
@@ -166,6 +167,7 @@ def _trainer_harness(
         aux_dim=policy_config.aux_state_dim,
         done_at_step=None,
         steps_since_new_coord=steps_since_new_coord,
+        blackout_count=blackout_count,
     )
     encoder = FakeLatentEncoder(latent_dim=policy_config.latent_dim, device=torch.device("cpu"))
     wandb_run = FakeExperimentRun()
@@ -739,3 +741,12 @@ def test_stalled_env_fraction_is_zero_when_every_env_found_new_ground() -> None:
     fraction = _stalled_env_fraction(stats, n_steps=1024)
 
     assert fraction == pytest.approx(0.0)
+
+
+def test_blackout_count_total_is_logged(tmp_path) -> None:
+    harness = _trainer_harness(tmp_path, blackout_count=3)
+
+    run_training(harness.deps, max_updates=1)
+    logged = harness.wandb_run.logged[0]
+
+    assert logged["env/blackout_count_total"] == pytest.approx(3.0 * _N_ENVS)
