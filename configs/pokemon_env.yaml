@@ -65,3 +65,19 @@ money_weight: 50.0
 # All four: first guesses, not yet validated by a live run -- re-tune
 # against the next run's reward/damage, reward/battle_won, reward/catch,
 # reward/money, and (most importantly) env/stalled_frac trajectories.
+# Run 11 (2026-09-05, wandb cq14kskq, docs/2026-09-05-battle-reward-hacking-audit.md
+# and docs/superpowers/specs/2026-09-05-battle-reward-redesign-design.md) found
+# battle_win_weight's flat, uncapped marginal value let the agent grind wild
+# battles as a terminal strategy -- ~261 wins/env by update 46 while
+# exploration flatlined and reward/money crashed from repeated blackouts.
+# battle_won now decays per badge tier (see rewards.py) rather than being
+# capped -- this section is the OTHER half of that fix: a continuous,
+# proactive penalty for a hurt team, active whether battling or not, meant
+# to prevent ever reaching a blackout rather than punishing one after the
+# fact. 0.25 -- not the 50% first considered -- is the threshold below
+# which it starts ramping up. low_hp_penalty_weight itself is a first
+# guess, not yet validated by a live run -- re-tune against the next run's
+# reward/low_hp trajectory alongside env/blackout_count_total, the same
+# way every other weight in this file has been.
+low_hp_penalty_weight: 0.05
+low_hp_threshold: 0.25
