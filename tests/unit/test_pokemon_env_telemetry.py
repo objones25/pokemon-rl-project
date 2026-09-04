@@ -28,6 +28,7 @@ def _empty_stats(n_envs: int) -> list[dict]:
             "step_count": 0,
             "episode_lengths": [],
             "steps_since_new_coord": 0,
+            "blackout_count": 0,
         }
         for _ in range(n_envs)
     ]
@@ -44,6 +45,7 @@ def _stats_with_steps_since_new_coord(values: list[int]) -> list[dict]:
             "step_count": 0,
             "episode_lengths": [],
             "steps_since_new_coord": value,
+            "blackout_count": 0,
         }
         for value in values
     ]
@@ -193,6 +195,7 @@ def test_rollout_metrics_counts_episodes_finished_anywhere_in_the_rollout() -> N
             "step_count": 0,
             "episode_lengths": lengths,
             "steps_since_new_coord": 0,
+            "blackout_count": 0,
         }
         for lengths in ([10], [], [20, 30])
     ]
@@ -251,6 +254,25 @@ def test_rollout_metrics_defaults_the_respawn_delta_to_zero_when_not_given() -> 
     )
 
     assert metrics["env/worker_respawns_delta"] == pytest.approx(0.0)
+
+
+def test_rollout_metrics_sums_blackout_count_across_envs() -> None:
+    stats = [
+        {
+            "coord_keys": [],
+            "badges": 0,
+            "event_flags": 0,
+            "step_count": 0,
+            "episode_lengths": [],
+            "steps_since_new_coord": 0,
+            "blackout_count": count,
+        }
+        for count in (2, 0, 5)
+    ]
+
+    metrics = rollout_metrics(_vec_step(3), components={}, clip_fire_rate=0.0, respawns=0, stats=stats)
+
+    assert metrics["env/blackout_count_total"] == pytest.approx(7.0)
 
 
 def test_two_coordinates_one_tile_apart_do_not_collide_in_the_heatmap() -> None:
@@ -317,8 +339,8 @@ def test_a_map_ranked_below_the_top_twelve_is_dropped_from_the_heatmap() -> None
 def test_rollout_metrics_reports_badges_from_the_env_stats() -> None:
     step = _vec_step(n_envs=2)
     stats = [
-        {"coord_keys": [1], "badges": 3, "event_flags": 10, "step_count": 5, "episode_lengths": [], "steps_since_new_coord": 0},
-        {"coord_keys": [2], "badges": 1, "event_flags": 20, "step_count": 7, "episode_lengths": [], "steps_since_new_coord": 0},
+        {"coord_keys": [1], "badges": 3, "event_flags": 10, "step_count": 5, "episode_lengths": [], "steps_since_new_coord": 0, "blackout_count": 0},
+        {"coord_keys": [2], "badges": 1, "event_flags": 20, "step_count": 7, "episode_lengths": [], "steps_since_new_coord": 0, "blackout_count": 0},
     ]
 
     metrics = rollout_metrics(step, {}, 0.0, 0, stats)
@@ -329,8 +351,8 @@ def test_rollout_metrics_reports_badges_from_the_env_stats() -> None:
 def test_rollout_metrics_counts_unique_coordinates_across_envs_without_double_counting() -> None:
     step = _vec_step(n_envs=2)
     stats = [
-        {"coord_keys": [1, 2], "badges": 0, "event_flags": 0, "step_count": 0, "episode_lengths": [], "steps_since_new_coord": 0},
-        {"coord_keys": [2, 3], "badges": 0, "event_flags": 0, "step_count": 0, "episode_lengths": [], "steps_since_new_coord": 0},
+        {"coord_keys": [1, 2], "badges": 0, "event_flags": 0, "step_count": 0, "episode_lengths": [], "steps_since_new_coord": 0, "blackout_count": 0},
+        {"coord_keys": [2, 3], "badges": 0, "event_flags": 0, "step_count": 0, "episode_lengths": [], "steps_since_new_coord": 0, "blackout_count": 0},
     ]
 
     metrics = rollout_metrics(step, {}, 0.0, 0, stats)
@@ -341,8 +363,8 @@ def test_rollout_metrics_counts_unique_coordinates_across_envs_without_double_co
 def test_rollout_metrics_reports_mean_completed_episode_length() -> None:
     step = _vec_step(n_envs=2)
     stats = [
-        {"coord_keys": [], "badges": 0, "event_flags": 0, "step_count": 0, "episode_lengths": [10], "steps_since_new_coord": 0},
-        {"coord_keys": [], "badges": 0, "event_flags": 0, "step_count": 0, "episode_lengths": [20, 30], "steps_since_new_coord": 0},
+        {"coord_keys": [], "badges": 0, "event_flags": 0, "step_count": 0, "episode_lengths": [10], "steps_since_new_coord": 0, "blackout_count": 0},
+        {"coord_keys": [], "badges": 0, "event_flags": 0, "step_count": 0, "episode_lengths": [20, 30], "steps_since_new_coord": 0, "blackout_count": 0},
     ]
 
     metrics = rollout_metrics(step, {}, 0.0, 0, stats)

@@ -107,6 +107,7 @@ def rollout_metrics(
     unique_maps = {(key >> 16) & 0xFF for key in unique_coords}
     lengths = [length for entry in stats for length in entry["episode_lengths"]]
     stalls = [entry["steps_since_new_coord"] for entry in stats]
+    blackouts = sum(entry["blackout_count"] for entry in stats)
 
     metrics = {
         "reward/mean": float(step.reward.mean()),
@@ -115,6 +116,7 @@ def rollout_metrics(
         "env/worker_respawns_total": float(respawns),
         "env/worker_respawns_delta": float(respawns_delta),
         "env/episodes_finished": float(sum(len(entry["episode_lengths"]) for entry in stats)),
+        "env/blackout_count_total": float(blackouts),
         "progress/badges_max": float(max(entry["badges"] for entry in stats)),
         "progress/badges_mean": float(
             sum(entry["badges"] for entry in stats) / len(stats)
