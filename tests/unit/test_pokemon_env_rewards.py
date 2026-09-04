@@ -335,10 +335,10 @@ def test_the_battle_win_bonus_does_not_repeat_while_the_same_faint_persists(
 
 
 def test_a_second_battle_won_against_a_new_opponent_pays_again(fake_emulator) -> None:
-    """Same shape as a second badge: the monotone-gain formula only pays the
-    marginal increase, so the second win's own step earns battle_win_weight
-    again, not the cumulative total -- proving total_battles_won is a real
-    running count, not a one-shot flag consumed by the first win."""
+    """The second win in a tier pays its own decayed marginal value
+    (weight/sqrt(2)), proving total_battles_won's successor (battle_sum)
+    is a real running sum that keeps growing across wins, not a one-shot
+    flag consumed by the first win."""
     win_accumulator = RewardAccumulator(EnvConfig(battle_win_weight=0.5))
     win_accumulator.reset(fake_emulator)
     fake_emulator.memory[ram.IN_BATTLE_ADDR] = 1
@@ -352,7 +352,100 @@ def test_a_second_battle_won_against_a_new_opponent_pays_again(fake_emulator) ->
 
     second_win = win_accumulator.step(fake_emulator)
 
-    assert second_win.reward == pytest.approx(0.5)
+    assert second_win.reward == pytest.approx(0.5 / math.sqrt(2))
+
+
+def test_the_second_win_in_one_tier_pays_the_decayed_value(fake_emulator) -> None:
+    """Mirrors test_exploration_decays_as_one_over_root_k's structure
+    exactly -- the 2nd win, like the 2nd new coordinate, is worth
+    weight/sqrt(2), not another full weight."""
+    win_accumulator = RewardAccumulator(EnvConfig(battle_win_weight=0.5))
+    win_accumulator.reset(fake_emulator)
+    fake_emulator.memory[ram.IN_BATTLE_ADDR] = 1
+    _set_opponent_hp(fake_emulator, current=10, max_hp=10)
+    win_accumulator.step(fake_emulator)
+    _set_opponent_hp(fake_emulator, current=0, max_hp=10)
+    win_accumulator.step(fake_emulator)  # first win
+    _set_opponent_hp(fake_emulator, current=8, max_hp=8)
+    win_accumulator.step(fake_emulator)
+    _set_opponent_hp(fake_emulator, current=0, max_hp=8)
+
+    second_win = win_accumulator.step(fake_emulator)
+
+    assert second_win.reward == pytest.approx(0.5 / math.sqrt(2))
+
+
+def test_a_badge_resets_the_win_decay_to_a_fresh_curve(fake_emulator) -> None:
+    """The whole point of Part 1 of the redesign: a badge does not erase
+    battle_sum (which would risk a spurious reward spike), it resets which
+    exponent the NEXT win uses -- so the first win after a badge pays a
+    full fresh weight/sqrt(1), not a continuation of the pre-badge decay."""
+    win_accumulator = RewardAccumulator(EnvConfig(battle_win_weight=0.5))
+    win_accumulator.reset(fake_emulator)
+    fake_emulator.memory[ram.IN_BATTLE_ADDR] = 1
+    _set_opponent_hp(fake_emulator, current=10, max_hp=10)
+    win_accumulator.step(fake_emulator)
+    _set_opponent_hp(fake_emulator, current=0, max_hp=10)
+    win_accumulator.step(fake_emulator)  # first win, tier 1
+    fake_emulator.memory[ram.BADGES_ADDR] = 0b0000_0001  # badge earned
+    win_accumulator.step(fake_emulator)  # processes the badge, no HP change this step
+    _set_opponent_hp(fake_emulator, current=8, max_hp=8)
+    win_accumulator.step(fake_emulator)
+    _set_opponent_hp(fake_emulator, current=0, max_hp=8)
+
+    first_win_of_new_tier = win_accumulator.step(fake_emulator)
+
+    assert first_win_of_new_tier.reward == pytest.approx(0.5)
+
+
+def test_the_win_that_earns_a_badge_is_attributed_to_the_old_tier(fake_emulator) -> None:
+    """If the badge flag and the fainting edge land on the exact same
+    step, that win must still count as the old tier's Nth win, not reset
+    itself out of existence -- proven by checking the tier only resets
+    for whatever comes NEXT.
+
+    badge_weight=0.0 isolates battle_won's reward from the badge's own:
+    _update_badge_tier reads ram.badge_count directly, unaffected by
+    badge_weight, so this doesn't change what tier-reset behavior is
+    under test -- it only removes components["badges"]'s own +1.0 jump
+    (which would otherwise land on the exact same step as the win, since
+    the badge flag is deliberately set there too, and clip .reward to a
+    contaminated 1.0 instead of the intended 0.5 signal)."""
+    win_accumulator = RewardAccumulator(EnvConfig(battle_win_weight=0.5, badge_weight=0.0))
+    win_accumulator.reset(fake_emulator)
+    fake_emulator.memory[ram.IN_BATTLE_ADDR] = 1
+    _set_opponent_hp(fake_emulator, current=10, max_hp=10)
+    win_accumulator.step(fake_emulator)
+    _set_opponent_hp(fake_emulator, current=0, max_hp=10)
+    fake_emulator.memory[ram.BADGES_ADDR] = 0b0000_0001  # badge lands same step as the win
+    same_step_win = win_accumulator.step(fake_emulator)
+    _set_opponent_hp(fake_emulator, current=8, max_hp=8)
+    win_accumulator.step(fake_emulator)
+    _set_opponent_hp(fake_emulator, current=0, max_hp=8)
+
+    next_win = win_accumulator.step(fake_emulator)
+
+    assert (same_step_win.reward, next_win.reward) == (
+        pytest.approx(0.5),          # 1st win of tier 1, badge or not
+        pytest.approx(0.5),          # 1st win of the NEW tier, freshly reset
+    )
+
+
+def test_many_wins_in_one_tier_decay_instead_of_staying_flat(fake_emulator) -> None:
+    """The exact failure mode from run 11, made unrepresentable: the 50th
+    win's own marginal contribution must be small relative to the 1st,
+    unlike the old flat battle_win_weight * total_battles_won design."""
+    win_accumulator = RewardAccumulator(EnvConfig(battle_win_weight=0.5))
+    win_accumulator.reset(fake_emulator)
+    fake_emulator.memory[ram.IN_BATTLE_ADDR] = 1
+    last_reward = None
+    for i in range(50):
+        _set_opponent_hp(fake_emulator, current=10, max_hp=10)
+        win_accumulator.step(fake_emulator)
+        _set_opponent_hp(fake_emulator, current=0, max_hp=10)
+        last_reward = win_accumulator.step(fake_emulator).reward
+
+    assert last_reward == pytest.approx(0.5 / math.sqrt(50))
 
 
 def test_catching_a_pokemon_pays_the_catch_bonus(fake_emulator) -> None:

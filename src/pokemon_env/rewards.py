@@ -99,7 +99,9 @@ class _State:
     explore_sum: float = 0.0
     total_healing: float = 0.0
     total_damage: float = 0.0
-    total_battles_won: int = 0
+    battle_sum: float = 0.0
+    wins_since_badge: int = 0
+    last_badge_count: int = 0
     total_catches: int = 0
     base_event_flags: int = 0
     last_hp_fraction: float = 0.0
@@ -185,13 +187,14 @@ class RewardAccumulator:
         # this method, after both have read it.
         party_size = ram.party_size(mem)
         in_battle = ram.in_battle(mem)
+        badge_count = ram.badge_count(mem)
 
         self._update_catches(party_size)
         self._update_healing(mem, party_size)
         self._update_exploration(mem, in_battle)
         self._update_battle_progress(mem, in_battle)
+        self._update_badge_tier(badge_count)
 
-        badge_count = ram.badge_count(mem)
         event_flag_count = ram.event_flag_count(mem)
 
         components = {
@@ -206,7 +209,7 @@ class RewardAccumulator:
                 self._config.damage_weight * self._state.total_damage,
                 _DAMAGE_CONTRIBUTION_CEILING,
             ),
-            "battle_won": self._config.battle_win_weight * self._state.total_battles_won,
+            "battle_won": self._config.battle_win_weight * self._state.battle_sum,
             "catch": min(
                 self._config.catch_weight * self._state.total_catches,
                 _CATCH_CONTRIBUTION_CEILING,
@@ -302,10 +305,12 @@ class RewardAccumulator:
 
     def _update_battle_progress(self, mem: Emulator, in_battle: bool) -> None:
         """Damage dealt (opponent HP fraction dropping, same squared-delta
-        shape as _update_healing) and a battle-won bonus (a rising->falling
-        edge at exactly 0, not a level check -- the faint/switch animation
-        holds the opponent at 0 HP for many env-steps, and a level check
-        would pay every one of them). steps_since_battle_progress is
+        shape as _update_healing) and a decaying battle-won bonus (the
+        i-th win since the last badge is worth 1/sqrt(i), the same shape
+        explore_sum already uses -- a rising->falling edge at exactly 0,
+        not a level check, since the faint/switch animation holds the
+        opponent at 0 HP for many env-steps and a level check would pay
+        every one of them). steps_since_battle_progress is
         steps_since_new_coord's battle-side twin, closing the loophole run
         9 found: idle_penalty exempting battle turns meant sitting at the
         FIGHT menu forever was the only place left that cost nothing.
@@ -330,13 +335,27 @@ class RewardAccumulator:
             delta = last - current
             self._state.total_damage += delta * delta
             if current == 0.0:
-                self._state.total_battles_won += 1
+                self._state.wins_since_badge += 1
+                self._state.battle_sum += 1.0 / math.sqrt(self._state.wins_since_badge)
             self._state.steps_since_battle_progress = 0
         elif current > last:
             self._state.steps_since_battle_progress = 0
         else:
             self._state.steps_since_battle_progress += 1
         self._state.last_opponent_hp_fraction = current
+
+    def _update_badge_tier(self, badge_count: int) -> None:
+        """Run AFTER _update_battle_progress each step, not before: if a
+        badge and the win that earns it land on the same step, the win
+        must still be attributed to the tier it happened in. Only the
+        NEXT win starts the fresh post-badge decay curve. battle_sum
+        itself is never reset -- only wins_since_badge, the exponent
+        driving future additions -- so this can't manufacture a spurious
+        reward spike; see docs/superpowers/specs/
+        2026-09-05-battle-reward-redesign-design.md Part 1."""
+        if badge_count > self._state.last_badge_count:
+            self._state.wins_since_badge = 0
+        self._state.last_badge_count = badge_count
 
     def state_dict(self) -> dict:
         """Coordinates leave as a sorted list of ints, not a set: the
@@ -347,7 +366,9 @@ class RewardAccumulator:
             "explore_sum": self._state.explore_sum,
             "total_healing": self._state.total_healing,
             "total_damage": self._state.total_damage,
-            "total_battles_won": self._state.total_battles_won,
+            "battle_sum": self._state.battle_sum,
+            "wins_since_badge": self._state.wins_since_badge,
+            "last_badge_count": self._state.last_badge_count,
             "total_catches": self._state.total_catches,
             "base_event_flags": self._state.base_event_flags,
             "last_hp_fraction": self._state.last_hp_fraction,
@@ -365,7 +386,9 @@ class RewardAccumulator:
             explore_sum=state["explore_sum"],
             total_healing=state["total_healing"],
             total_damage=state["total_damage"],
-            total_battles_won=state["total_battles_won"],
+            battle_sum=state["battle_sum"],
+            wins_since_badge=state["wins_since_badge"],
+            last_badge_count=state["last_badge_count"],
             total_catches=state["total_catches"],
             base_event_flags=state["base_event_flags"],
             last_hp_fraction=state["last_hp_fraction"],
