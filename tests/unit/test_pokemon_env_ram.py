@@ -193,6 +193,38 @@ def test_aggregate_hp_fraction_sums_across_the_party(fake_emulator) -> None:
     assert ram.aggregate_hp_fraction(fake_emulator) == pytest.approx(0.4)
 
 
+def test_live_party_hp_fraction_is_zero_when_party_is_empty(fake_emulator) -> None:
+    """All-zero memory is the pre-game state (party_size=0). Dividing by a
+    zero live max would produce nan, which propagates silently through
+    the whole aux vector and every reward that reads this."""
+    assert ram.live_party_hp_fraction(fake_emulator) == pytest.approx(0.0)
+
+
+def test_live_party_hp_fraction_ignores_a_vacated_slot(fake_emulator) -> None:
+    """The regression test for the bug this function fixes: Pokemon Red
+    never clears a slot when a party member is deposited or released, so
+    slot 1 here still holds a stale, full-HP Pokemon the player does not
+    have. aggregate_hp_fraction would average it in and read a healthy
+    0.7; only the live slot 0 (10/100, critically low) should count."""
+    fake_emulator.memory[ram.PARTY_SIZE_ADDR] = 1
+    fake_emulator.memory[ram.PARTY_HP_BASE + 1] = 10
+    fake_emulator.memory[ram.PARTY_MAX_HP_BASE + 1] = 100
+    fake_emulator.memory[ram.PARTY_HP_BASE + ram.PARTY_STRIDE + 1] = 40
+    fake_emulator.memory[ram.PARTY_MAX_HP_BASE + ram.PARTY_STRIDE + 1] = 40
+
+    assert ram.live_party_hp_fraction(fake_emulator) == pytest.approx(0.1)
+
+
+def test_live_party_hp_fraction_sums_across_live_slots_only(fake_emulator) -> None:
+    fake_emulator.memory[ram.PARTY_SIZE_ADDR] = 2
+    fake_emulator.memory[ram.PARTY_HP_BASE + 1] = 30
+    fake_emulator.memory[ram.PARTY_MAX_HP_BASE + 1] = 60
+    fake_emulator.memory[ram.PARTY_HP_BASE + ram.PARTY_STRIDE + 1] = 10
+    fake_emulator.memory[ram.PARTY_MAX_HP_BASE + ram.PARTY_STRIDE + 1] = 40
+
+    assert ram.live_party_hp_fraction(fake_emulator) == pytest.approx(0.4)
+
+
 def test_game_coords_returns_x_then_y_then_map(fake_emulator) -> None:
     """X is 0xD362 and Y is 0xD361 -- the higher address holds X. Swapping
     them produces a valid-looking coordinate that is simply the wrong tile."""

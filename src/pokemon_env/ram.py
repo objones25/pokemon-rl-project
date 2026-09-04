@@ -110,6 +110,21 @@ def aggregate_hp_fraction(mem: Emulator) -> float:
     return sum(current for current, _ in slots) / total_max
 
 
+def live_party_hp_fraction(mem: Emulator) -> float:
+    """Party-wide health in [0, 1], live slots only. Unlike
+    aggregate_hp_fraction, a vacated slot's stale leftover HP (the game
+    never clears a slot when a party member is deposited or released)
+    cannot mask a live Pokemon actually being near death. Same nan guard
+    as aggregate_hp_fraction: 0.0 rather than nan with no live max HP to
+    divide by."""
+    size = min(party_size(mem), PARTY_SLOTS)
+    slots = party_hp(mem)[:size]
+    total_max = sum(maximum for _, maximum in slots)
+    if total_max == 0:
+        return 0.0
+    return sum(current for current, _ in slots) / total_max
+
+
 def opponent_hp_fraction(mem: Emulator) -> float:
     """The currently-battling opponent's health in [0, 1]. Returns 0.0 rather
     than nan when max HP is zero -- stale/pre-battle memory, same guard as
