@@ -253,10 +253,11 @@ class RewardAccumulator:
             )
             else 0.0
         )
+        low_hp_penalty = self._low_hp_penalty(mem)
         return RewardBreakdown(
-            reward=min(gain, 1.0) - idle_penalty,
+            reward=min(gain, 1.0) - idle_penalty - low_hp_penalty,
             clipped=gain > 1.0,
-            components={**components, "idle": -idle_penalty},
+            components={**components, "idle": -idle_penalty, "low_hp": -low_hp_penalty},
             badge_count=badge_count,
             event_flag_count=event_flag_count,
         )
@@ -266,6 +267,21 @@ class RewardAccumulator:
             event_flag_count - self._state.base_event_flags - int(ram.museum_ticket_set(mem)),
             0,
         )
+
+    def _low_hp_penalty(self, mem: Emulator) -> float:
+        """Continuous, not a cliff: ramps from 0 at the threshold to full
+        strength at 0% HP, so the pressure is gradable rather than a step
+        discontinuity PPO's advantage estimation would otherwise have to
+        absorb in one bucket. Applies whether in battle or the overworld --
+        a hurt team wandering around ungoverned by anything gets the same
+        nudge as a hurt team still fighting; the lesson is "go heal your
+        team," not "don't fight while hurt.\""""
+        threshold = self._config.low_hp_threshold
+        live_fraction = ram.live_party_hp_fraction(mem)
+        if live_fraction >= threshold:
+            return 0.0
+        severity = (threshold - live_fraction) / threshold
+        return self._config.low_hp_penalty_weight * severity
 
     def _update_catches(self, party_size: int) -> None:
         """A new Pokemon in the party, same monotone-count shape as

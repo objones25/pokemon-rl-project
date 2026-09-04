@@ -236,6 +236,72 @@ def test_a_change_in_opponent_hp_resets_the_battle_stall_counter(fake_emulator) 
     assert result.reward == pytest.approx(0.0)
 
 
+def test_no_low_hp_penalty_at_or_above_the_threshold(fake_emulator) -> None:
+    accumulator = RewardAccumulator(EnvConfig(low_hp_penalty_weight=0.1))
+    fake_emulator.memory[ram.PARTY_SIZE_ADDR] = 1
+    fake_emulator.memory[ram.PARTY_MAX_HP_BASE + 1] = 100
+    fake_emulator.memory[ram.PARTY_HP_BASE + 1] = 25  # exactly the 25% default threshold
+    accumulator.reset(fake_emulator)
+
+    result = accumulator.step(fake_emulator)
+
+    assert result.components["low_hp"] == pytest.approx(0.0)
+
+
+def test_low_hp_penalty_scales_with_severity_below_the_threshold(fake_emulator) -> None:
+    """At 10% HP against a 25% threshold, severity = (0.25-0.10)/0.25 = 0.6."""
+    accumulator = RewardAccumulator(EnvConfig(low_hp_penalty_weight=0.1))
+    fake_emulator.memory[ram.PARTY_SIZE_ADDR] = 1
+    fake_emulator.memory[ram.PARTY_MAX_HP_BASE + 1] = 100
+    fake_emulator.memory[ram.PARTY_HP_BASE + 1] = 10
+    accumulator.reset(fake_emulator)
+
+    result = accumulator.step(fake_emulator)
+
+    assert result.components["low_hp"] == pytest.approx(-0.1 * 0.6)
+
+
+def test_low_hp_penalty_is_at_full_severity_when_fully_fainted(fake_emulator) -> None:
+    accumulator = RewardAccumulator(EnvConfig(low_hp_penalty_weight=0.1))
+    fake_emulator.memory[ram.PARTY_SIZE_ADDR] = 1
+    fake_emulator.memory[ram.PARTY_MAX_HP_BASE + 1] = 100
+    fake_emulator.memory[ram.PARTY_HP_BASE + 1] = 50
+    accumulator.reset(fake_emulator)
+    fake_emulator.memory[ram.PARTY_HP_BASE + 1] = 0
+
+    result = accumulator.step(fake_emulator)
+
+    assert result.components["low_hp"] == pytest.approx(-0.1)
+
+
+def test_low_hp_penalty_applies_in_battle_the_same_as_the_overworld(fake_emulator) -> None:
+    accumulator = RewardAccumulator(EnvConfig(low_hp_penalty_weight=0.1))
+    fake_emulator.memory[ram.PARTY_SIZE_ADDR] = 1
+    fake_emulator.memory[ram.PARTY_MAX_HP_BASE + 1] = 100
+    fake_emulator.memory[ram.PARTY_HP_BASE + 1] = 10
+    accumulator.reset(fake_emulator)
+    fake_emulator.memory[ram.IN_BATTLE_ADDR] = 1
+
+    result = accumulator.step(fake_emulator)
+
+    assert result.components["low_hp"] == pytest.approx(-0.1 * 0.6)
+
+
+def test_low_hp_penalty_composes_with_idle_penalty(fake_emulator) -> None:
+    accumulator = RewardAccumulator(
+        EnvConfig(low_hp_penalty_weight=0.1, idle_penalty_weight=0.01)
+    )
+    fake_emulator.memory[ram.PARTY_SIZE_ADDR] = 1
+    fake_emulator.memory[ram.PARTY_MAX_HP_BASE + 1] = 100
+    fake_emulator.memory[ram.PARTY_HP_BASE + 1] = 10
+    accumulator.reset(fake_emulator)
+    accumulator.step(fake_emulator)  # registers (0, 0, 0) as seen
+
+    results = [accumulator.step(fake_emulator) for _ in range(1002)]  # past the idle grace window
+
+    assert results[-1].reward == pytest.approx(0.0 - 0.01 - 0.1 * 0.6)
+
+
 def test_damage_dealt_pays_the_squared_hp_fraction_drop(fake_emulator) -> None:
     """Mirrors _update_healing's own squared-delta shape exactly, applied to
     the opponent's HP instead of the player's."""

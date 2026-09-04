@@ -165,6 +165,7 @@ def test_last_components_reports_the_mean_reward_breakdown_across_envs(
             "catch": 0.0,
             "money": 0.0,
             "idle": 0.0,
+            "low_hp": 0.0,
         }
     )
 
