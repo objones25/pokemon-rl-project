@@ -28,7 +28,14 @@ from pokemon_env.session import EnvSession, StepResult
 # state["episode_lengths"] directly (Task 2); a checkpoint written before that
 # change has no such key and would otherwise fail with a bare KeyError instead
 # of this module's legible version-mismatch error.
-VEC_ENV_SCHEMA_VERSION = 2
+#
+# Bumped 2->3 because RewardAccumulator.state_dict()/load_state_dict() now
+# read five new keys (battle_sum, wins_since_badge, last_badge_count,
+# blackout_count, pending_blackout_recovery) that replaced total_battles_won;
+# a checkpoint written before that change has none of them and would
+# otherwise fail with a bare KeyError instead of this module's legible
+# version-mismatch error.
+VEC_ENV_SCHEMA_VERSION = 3
 
 
 class EnvBackend(Protocol):

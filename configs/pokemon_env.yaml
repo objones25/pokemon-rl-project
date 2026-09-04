@@ -75,9 +75,23 @@ money_weight: 50.0
 # proactive penalty for a hurt team, active whether battling or not, meant
 # to prevent ever reaching a blackout rather than punishing one after the
 # fact. 0.25 -- not the 50% first considered -- is the threshold below
-# which it starts ramping up. low_hp_penalty_weight itself is a first
-# guess, not yet validated by a live run -- re-tune against the next run's
-# reward/low_hp trajectory alongside env/blackout_count_total, the same
-# way every other weight in this file has been.
-low_hp_penalty_weight: 0.05
+# which it starts ramping up.
+#
+# low_hp_penalty_weight started as a 0.05 first guess; the final-review
+# arithmetic against idle_penalty_weight's own reasoning above (a flat
+# per-step cost eventually swamps exploration's 1/sqrt(k) decay regardless
+# of magnitude) showed 0.05 repeated that mistake at 50x the weight: a
+# full-severity step (0.05) dwarfs a typical new-coordinate discovery
+# (0.3/sqrt(k)), while losing $1500 in a blackout costs the monotone-gain
+# formula's max_total only ~0.075 -- cheaper than walking to a Pokemon
+# Center at 10% HP for even a few hundred steps. That made deliberate
+# fainting the agent's cheapest exit from a hurt state, the exact
+# behavior this redesign exists to prevent. Lowered to 0.005 (10x down --
+# a full-severity step now costs 5x idle_penalty_weight rather than
+# competing with a battle win) so the signal discourages staying hurt
+# without outweighing exploration. Still a first guess: re-tune against
+# reward/low_hp and env/blackout_count_total in the next run, and treat a
+# rising blackout count in the first ~10 updates as a sign this is still
+# too low, not too high.
+low_hp_penalty_weight: 0.005
 low_hp_threshold: 0.25

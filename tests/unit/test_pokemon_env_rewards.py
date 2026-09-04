@@ -933,3 +933,52 @@ def test_a_restored_accumulator_still_pays_for_genuinely_new_ground(
     discovered = restored.step(fake_emulator)
 
     assert discovered.reward == pytest.approx(0.30 / math.sqrt(2))
+
+
+def test_a_restored_accumulator_still_pays_the_decayed_value_for_the_next_win(
+    fake_emulator,
+) -> None:
+    """A naive round-trip test would pass even if wins_since_badge/battle_sum
+    were silently dropped on restore -- a reset RewardAccumulator's next win
+    would still pay a full weight/sqrt(1) either way, since nothing else
+    earned reward in between and gain is computed relative to the restored
+    max_total. Asserting the SECOND win's marginal reward is the only way to
+    prove wins_since_badge/battle_sum survived the round trip rather than
+    restarting the decay curve at k=1."""
+    win_accumulator = RewardAccumulator(EnvConfig(battle_win_weight=0.5))
+    win_accumulator.reset(fake_emulator)
+    fake_emulator.memory[ram.IN_BATTLE_ADDR] = 1
+    _set_opponent_hp(fake_emulator, current=10, max_hp=10)
+    win_accumulator.step(fake_emulator)
+    _set_opponent_hp(fake_emulator, current=0, max_hp=10)
+    win_accumulator.step(fake_emulator)  # first win, banked into max_total
+
+    restored = RewardAccumulator(EnvConfig(battle_win_weight=0.5))
+    restored.load_state_dict(win_accumulator.state_dict())
+
+    _set_opponent_hp(fake_emulator, current=8, max_hp=8)
+    restored.step(fake_emulator)
+    _set_opponent_hp(fake_emulator, current=0, max_hp=8)
+    second_win = restored.step(fake_emulator)
+
+    assert second_win.reward == pytest.approx(0.5 / math.sqrt(2))
+
+
+def test_a_restored_accumulators_blackout_count_survives_a_checkpoint_resume(
+    fake_emulator,
+) -> None:
+    """blackout_count round-trips through state_dict()/load_state_dict() --
+    a real checkpoint resume, distinct from the in-process reset() that
+    test_blackout_count_persists_across_an_episode_boundary already covers."""
+    accumulator = RewardAccumulator(EnvConfig())
+    fake_emulator.memory[ram.PARTY_SIZE_ADDR] = 1
+    fake_emulator.memory[ram.PARTY_MAX_HP_BASE + 1] = 100
+    fake_emulator.memory[ram.PARTY_HP_BASE + 1] = 50
+    accumulator.reset(fake_emulator)
+    fake_emulator.memory[ram.PARTY_HP_BASE + 1] = 0
+    accumulator.step(fake_emulator)  # blackout, count -> 1
+
+    restored = RewardAccumulator(EnvConfig())
+    restored.load_state_dict(accumulator.state_dict())
+
+    assert restored.blackout_count == 1
